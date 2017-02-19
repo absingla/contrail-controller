@@ -63,7 +63,7 @@ import context
 from context import get_request, get_context, set_context, use_context
 from context import ApiContext
 import vnc_cfg_types
-from vnc_cfg_ifmap import VncDbClient
+from vnc_db import VncDbClient
 
 import cfgm_common
 from cfgm_common import ignore_exceptions, imid
@@ -107,6 +107,8 @@ from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, \
 from sandesh.discovery_client_stats import ttypes as sandesh
 from sandesh.traces.ttypes import RestApiTrace
 from vnc_bottle import get_bottle_server
+from cfgm_common.vnc_greenlets import VncGreenlet
+from vnc_ifmap import VncIfmapServer
 
 _ACTION_RESOURCES = [
     {'uri': '/prop-collection-get', 'link_name': 'prop-collection-get',
@@ -1503,6 +1505,12 @@ class VncApiServer(object):
             self._db_connect(self._args.reset_config)
             self._db_init_entries()
 
+        if (self._args.ifmap_listen_ip is not None and
+                self._args.ifmap_listen_port is not None):
+            # As DB are synced, we can serve the custom IF-MAP server
+            self._vnc_ifmap_server = VncIfmapServer(self, self._args)
+            gevent.spawn(self._vnc_ifmap_server.run_server)
+
         # API/Permissions check
         # after db init (uses db_conn)
         self._rbac = vnc_rbac.VncRbac(self, self._db_conn)
@@ -1837,7 +1845,7 @@ class VncApiServer(object):
                 'token_info': None,
                 'is_cloud_admin_role': False,
                 'is_global_read_only_role': False,
-                'permissions': PERMS_RWX
+                'permissions': 'RWX'
             }
             return result
 
@@ -2622,12 +2630,13 @@ class VncApiServer(object):
                                          --rabbit_health_check_interval 120.0
                                          --cluster_id <testbed-name>
                                          [--auth keystone]
-                                         [--ifmap_server_loc
-                                          /home/contrail/source/ifmap-server/]
                                          [--default_encoding ascii ]
                                          --ifmap_health_check_interval 60
                                          --object_cache_size 10000
                                          --object_cache_exclude_types ''
+                                         --ifmap_listen_ip 0.0.0.0
+                                         --ifmap_listen_port 8443
+                                         --ifmap_credentials control:secret
         '''
         self._args, _ = utils.parse_args(args_str)
     # end _parse_args
@@ -2870,14 +2879,6 @@ class VncApiServer(object):
 
     # generate default rbac group rule
     def _create_default_rbac_rule(self):
-        obj_type = 'api_access_list'
-        fq_name = ['default-global-system-config', 'default-api-access-list']
-        try:
-            id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
-            return
-        except NoIdError:
-            pass
-
         # allow full access to cloud admin
         rbac_rules = [
             {
@@ -2906,6 +2907,30 @@ class VncApiServer(object):
                 'rule_perms': [{'role_name':'*', 'role_crud':'R'}]
             },
         ]
+
+        obj_type = 'api_access_list'
+        fq_name = ['default-global-system-config', 'default-api-access-list']
+        try:
+            # ensure global list is not missing any default rules (bug 1642464)
+            id = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
+            (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid':id})
+            update_obj = False
+            cur_rbac_rules = copy.deepcopy(obj_dict['api_access_list_entries']['rbac_rule'])
+            for rule in rbac_rules:
+                present = False
+                for existing_rule in cur_rbac_rules:
+                    if rule == existing_rule:
+                        present = True
+                        cur_rbac_rules.remove(existing_rule)
+                        break
+                if not present:
+                    obj_dict['api_access_list_entries']['rbac_rule'].append(rule)
+                    update_obj = True
+            if update_obj:
+                self._db_conn.dbe_update(obj_type, {'uuid': id}, obj_dict)
+            return
+        except NoIdError:
+            pass
 
         rge = RbacRuleEntriesType([])
         for rule in rbac_rules:
@@ -3540,8 +3565,9 @@ class VncApiServer(object):
         self._args.multi_tenancy = multi_tenancy
     # end
 
+    # check if token validatation needed
     def is_multi_tenancy_set(self):
-        return self._args.multi_tenancy or self.aaa_mode != 'no-auth'
+        return self.aaa_mode != 'no-auth'
 
     def is_rbac_enabled(self):
         return self.aaa_mode == 'rbac'
@@ -3627,10 +3653,17 @@ class VncApiServer(object):
 
     def publish_ifmap_to_discovery(self, state = 'up', msg = ''):
         # publish ifmap server
-        data = {
-            'ip-address': self._args.ifmap_server_ip,
-            'port': self._args.ifmap_server_port,
-        }
+        if (self._args.ifmap_listen_ip is not None and
+                self._args.ifmap_listen_port is not None):
+            data = {
+                'ip-address': self._args.ifmap_listen_ip,
+                'port': self._args.ifmap_listen_port,
+            }
+        else:
+            data = {
+                'ip-address': self._args.ifmap_server_ip,
+                'port': self._args.ifmap_server_port,
+            }
         if self._disc:
             self.ifmap_task = self._disc.publish(
                                   IFMAP_SERVER_DISCOVERY_SERVICE_NAME,
@@ -3648,10 +3681,17 @@ class VncApiServer(object):
 
     def un_publish_ifmap_to_discovery(self):
         # un publish ifmap server
-        data = {
-            'ip-address': self._args.ifmap_server_ip,
-            'port': self._args.ifmap_server_port,
-        }
+        if (self._args.ifmap_listen_ip is not None and
+                self._args.ifmap_listen_port is not None):
+            data = {
+                'ip-address': self._args.ifmap_listen_ip,
+                'port': self._args.ifmap_listen_port,
+            }
+        else:
+            data = {
+                'ip-address': self._args.ifmap_server_ip,
+                'port': self._args.ifmap_server_port,
+            }
         if self._disc:
             self._disc.un_publish(IFMAP_SERVER_DISCOVERY_SERVICE_NAME, data)
     # end un_publish_ifmap_to_discovery

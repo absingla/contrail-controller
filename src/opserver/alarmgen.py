@@ -841,7 +841,7 @@ class AlarmStateMachine:
                     [timeout_val]:
                 self._logger.error("Timer error for (%s,%s,%s)" % \
                     (tab, uv, nm))
-                raise SystemExit
+                raise SystemExit(1)
             AlarmStateMachine.tab_alarms_timer[timeout_val].add\
                         ((asm.tab, asm.uv, asm.nm))
 
@@ -1029,7 +1029,7 @@ class Controller(object):
             self._logger.error('Partition Del : %s' % str(oldset-newset))
             if not self.partition_change(oldset-newset, False):
                 self._logger.error('Partition Del : %s failed!' % str(oldset-newset))
-                raise SystemExit
+                raise SystemExit(1)
 
 	    self._logger.error('Partition Del done: %s' % str(oldset-newset))
 
@@ -1041,7 +1041,7 @@ class Controller(object):
             self._logger.error('Partition List failed %s %s' % \
                 (str(newset),str(oldset)))
         except SystemExit:
-            raise SystemExit
+            raise SystemExit(1)
 
         self._logger.error('Partition List done : new %s old %s' % \
             (str(newset),str(oldset)))
@@ -1192,7 +1192,7 @@ class Controller(object):
         """
         if not redish:
             self._logger.error("No redis handle")
-            raise SystemExit
+            raise SystemExit(1)
         old_acq_time = redish.hget("AGPARTS:%s" % inst, part)
         if old_acq_time is None:
             self._logger.error("Agg %s part %d new" % (inst, part))
@@ -1257,7 +1257,7 @@ class Controller(object):
 
         if retry:
             self._logger.error("Agg unexpected rows %s" % str(rows))
-            raise SystemExit
+            raise SystemExit(1)
         
     def send_alarm_update(self, tab, uk):
         ustruct = None
@@ -1335,22 +1335,6 @@ class Controller(object):
         lredis = None
         oldworkerset = None
         while True:
-            workerset = {}
-            for part in self._workers.keys():
-                if self._workers[part]._up:
-                    workerset[part] = self._workers[part].acq_time()
-            if workerset != oldworkerset:
-                if self.disc:
-                    data = {
-                        'ip-address': self._conf.host_ip(),
-                        'instance-id': self._instance_id,
-                        'redis-port': str(self._conf.redis_server_port()),
-                        'partitions': json.dumps(workerset)
-                    }
-                    self._logger.error("Disc Publish to %s : %s"
-                                  % (str(self._conf.discovery()), str(data)))
-                    self.disc.publish(ALARM_GENERATOR_SERVICE_NAME, data)
-                oldworkerset = copy.deepcopy(workerset)
              
             for part in self._uveqf.keys():
                 self._logger.error("Stop UVE processing for %d:%d" % \
@@ -1464,12 +1448,46 @@ class Controller(object):
             except Exception as ex:
                 template = "Exception {0} in uve proc. Arguments:\n{1!r}"
                 messag = template.format(type(ex).__name__, ex.args)
-                self._logger.error("%s : traceback %s" % \
-                                  (messag, traceback.format_exc()))
+
+                if type(ex).__name__ == 'ConnectionError':
+                    self._logger.error(messag)
+                else:
+                    self._logger.error("%s : traceback %s" % \
+                                   (messag, traceback.format_exc()))
+
                 lredis = None
                 ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
                       name = 'AggregateRedis', status = ConnectionStatus.DOWN)
+                if self.disc:
+                    data = {
+                        'ip-address': self._conf.host_ip(),
+                        'instance-id': self._instance_id,
+                        'redis-port': str(self._conf.redis_server_port()),
+                        'partitions': None
+                    }
+                    self._logger.error("Disc Publish to %s : %s"
+                                  % (str(self._conf.discovery()), str(data)))
+                    self.disc.publish(ALARM_GENERATOR_SERVICE_NAME, data)
+                oldworkerset = None
                 gevent.sleep(1)
+
+            else:
+                workerset = {}
+                for part in self._workers.keys():
+                    if self._workers[part]._up:
+                        workerset[part] = self._workers[part].acq_time()
+                if workerset != oldworkerset:
+                    data = {
+                        'ip-address': self._conf.host_ip(),
+                        'instance-id': self._instance_id,
+                        'redis-port': str(self._conf.redis_server_port()),
+                        'partitions': json.dumps(workerset)
+                    }
+                    if self.disc:
+                        self._logger.error("Disc Publish to %s : %s"
+                                      % (str(self._conf.discovery()), str(data)))
+                        self.disc.publish(ALARM_GENERATOR_SERVICE_NAME, data)
+                    oldworkerset = copy.deepcopy(workerset)
                         
             curr = time.time()
             try:
@@ -1479,7 +1497,7 @@ class Controller(object):
                 messag = template.format(type(ex).__name__, ex.args)
                 self._logger.error("%s : traceback %s" % \
                                   (messag, traceback.format_exc()))
-                raise SystemExit
+                raise SystemExit(1)
             if (curr - prev) < 1:
                 gevent.sleep(1 - (curr - prev))
                 self._logger.info("UVE Done")
@@ -2213,16 +2231,26 @@ class Controller(object):
         for elem in alist:
             ipaddr = elem["ip-address"]
             inst = elem["instance-id"]
-            newlist.append(ipaddr + ":" + inst)
+            # If AlarmGenerator sends partitions as NULL, its
+            # unable to provide service
+            if elem["partitions"]:
+                newlist.append(ipaddr + ":" + inst)
 
-        # We should always include ourselves in the list of memebers
-        newset = set(newlist)
-        newset.add(self._libpart_name)
-        newlist = list(newset)
-        if not self._libpart:
-            self._libpart = self.start_libpart(newlist)
+        # Shut down libpartition if the current alarmgen is not up
+        if self._libpart_name not in newlist:
+            if self._libpart:
+                self._libpart.close()
+                self._libpart = None
+                if not self.partition_change(set(self._workers.keys()), False):
+                    self._logger.error('AlarmGen withdraw failed!')
+                    raise SystemExit(1)
+                self._partset = set()
+                self._logger.error('AlarmGen withdrawn!')
         else:
-            self._libpart.update_cluster_list(newlist)
+            if not self._libpart:
+                self._libpart = self.start_libpart(newlist)
+            else:
+                self._libpart.update_cluster_list(newlist)
 
     def run_process_stats(self):
         while True:

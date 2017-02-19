@@ -133,7 +133,7 @@ def redis_query_start(host, port, redis_password, qid, inp, columns):
     if columns is not None:
         for col in columns:
             m = TableSchema(name = col.name, datatype = col.datatype, index = col.index, suffixes = col.suffixes)
-            col_list.append(m.__dict__)
+            col_list.append(m._asdict())
     query_metadata = {}
     query_metadata['enqueue_time'] = OpServerUtils.utc_timestamp_usec()
     redish.hset("QUERY:" + qid, 'query_metadata', json.dumps(query_metadata))
@@ -2359,6 +2359,10 @@ class OpServer(object):
             instance_id = elem['instance-id']
             port = int(elem['redis-port']) 
             ip_address = elem['ip-address']
+            # If AlarmGenerator sends partitions as NULL, its
+            # unable to provide service
+            if not elem['partitions']:
+                continue
             parts = json.loads(elem['partitions'])
             for partstr,acq_time in parts.iteritems():
                 partno = int(partstr)

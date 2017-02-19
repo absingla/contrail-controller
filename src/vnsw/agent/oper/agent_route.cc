@@ -475,6 +475,7 @@ void AgentRouteTable::Input(DBTablePartition *part, DBClient *client,
 
     //Route changed, trigger change on dependent routes
     if (notify) {
+        bool was_active_path = (path == rt->GetActivePath());
         const Path *prev_front = rt->front();
         if (prev_front) {
             rt->Sort(&AgentRouteTable::PathSelection, prev_front);
@@ -484,7 +485,8 @@ void AgentRouteTable::Input(DBTablePartition *part, DBClient *client,
         rt->ResyncTunnelNextHop();
         //Since newly added path became active path, send path with path_changed
         //flag as true. Path can be NULL for route resync requests.
-        UpdateDerivedRoutes(rt, path, (path == rt->GetActivePath()));
+        UpdateDerivedRoutes(rt, path, was_active_path ||
+                            (path == rt->GetActivePath()));
     }
 }
 
@@ -784,6 +786,9 @@ bool AgentRoute::WaitForTraffic() const {
     for(Route::PathList::const_iterator it = GetPathList().begin();
         it != GetPathList().end(); it++) {
         const AgentPath *path = static_cast<const AgentPath *>(it.operator->());
+        if (path->peer() && path->peer()->GetType() == Peer::INET_EVPN_PEER) {
+            continue;
+        }
         if (path->path_preference().wait_for_traffic() == true) {
             return true;
         }

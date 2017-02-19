@@ -408,29 +408,7 @@ class DBInterface(object):
         except (PermissionDenied, RefsExistError) as e:
             self._raise_contrail_exception('BadRequest',
                 resource='network', msg=str(e))
-
-        # read back to get subnet gw allocated by api-server
-        fq_name_str = json.dumps(net_obj.get_fq_name())
-    #end _virtual_network_update
-
-    def _virtual_network_delete(self, net_id):
-        fq_name_str = None
-        try:
-            net_obj = self._vnc_lib.virtual_network_read(id=net_id)
-            fq_name_str = json.dumps(net_obj.get_fq_name())
-        except NoIdError:
-            return
-
-        try:
-            if net_obj.get_floating_ip_pools():
-                fip_pools = net_obj.get_floating_ip_pools()
-                for fip_pool in fip_pools:
-                    self._floating_ip_pool_delete(fip_pool_id=fip_pool['uuid'])
-
-            self._vnc_lib.virtual_network_delete(id=net_id)
-        except RefsExistError:
-            self._raise_contrail_exception('NetworkInUse', net_id=net_id)
-    #end _virtual_network_delete
+    # end _virtual_network_update
 
     def _virtual_network_list(self, parent_id=None, obj_uuids=None,
                               fields=None, detail=False, count=False,
@@ -665,8 +643,7 @@ class DBInterface(object):
 
     def _logical_router_update(self, rtr_obj):
         self._vnc_lib.logical_router_update(rtr_obj)
-        fq_name_str = json.dumps(rtr_obj.get_fq_name())
-    #end _logical_router_update
+    # end _logical_router_update
 
     def _logical_router_delete(self, rtr_id):
         try:
@@ -2571,8 +2548,24 @@ class DBInterface(object):
 
     @wait_for_api_server_connection
     def network_delete(self, net_id):
-        self._virtual_network_delete(net_id=net_id)
-    #end network_delete
+        try:
+            net_obj = self._vnc_lib.virtual_network_read(id=net_id)
+        except NoIdError:
+            return
+
+        try:
+            fip_pools = net_obj.get_floating_ip_pools()
+            for fip_pool in fip_pools or []:
+                fip_pool_obj = self._vnc_lib.floating_ip_pool_read(id=fip_pool['uuid'])
+                fips = fip_pool_obj.get_floating_ips()
+                for fip in fips or []:
+                    self.floatingip_delete(fip_id=fip['uuid'])
+                self._floating_ip_pool_delete(fip_pool_id=fip_pool['uuid'])
+
+            self._vnc_lib.virtual_network_delete(id=net_id)
+        except RefsExistError:
+            self._raise_contrail_exception('NetworkInUse', net_id=net_id)
+    # end network_delete
 
     # TODO request based on filter contents
     @wait_for_api_server_connection
@@ -3738,30 +3731,37 @@ class DBInterface(object):
                 self._raise_contrail_exception('BadRequest', resource='port',
                                                msg=str(e))
         elif net_obj.get_network_ipam_refs():
-            msg_str="Virtual-Network("+net_fq_name_str+") has exhausted subnet(all)"
+            ipv4_port_delete = False
+            ipv6_port_delete = False
+            err_msg_str = "unable to create instance_ip,"
             try:
                 self._port_create_instance_ip(net_obj, port_obj,
                      {'fixed_ips':[{'ip_address': None,
                                     'subnet_id':subnet_id}]},
                                               ip_family="v4")
             except BadRequest as e:
-                if e.content != msg_str:
-                    # failure in creating the instance ip. Roll back
-                    self._virtual_machine_interface_delete(port_id=port_id)
-                    self._raise_contrail_exception('BadRequest',
-                                                   resource='port', msg=str(e))
+                ipv4_port_delete = True
+                v4_msg_str = "v4:"+ str(e) 
+                err_msg_str += v4_msg_str
+ 
             try:
                 self._port_create_instance_ip(net_obj, port_obj,
                      {'fixed_ips':[{'ip_address': None,
                                     'subnet_id':subnet_id}]},
                                               ip_family="v6")
             except BadRequest as e:
-                if e.content != msg_str:
-                    # failure in creating the instance ip. Roll back
+                ipv6_port_delete = True
+                v6_msg_str = " v6:"+ str(e)
+                err_msg_str += v6_msg_str
+
+            # if if bad request is for both ipv4 and ipv6
+            # delete the port and Roll back
+            if ipv4_port_delete and ipv6_port_delete:
                     self._virtual_machine_interface_delete(port_id=port_id)
                     self._raise_contrail_exception('BadRequest',
-                                                   resource='port', msg=str(e))
-
+                                                   resource='port',
+                                                   msg=err_msg_str)
+       
         # TODO below reads back default parent name, fix it
         port_obj = self._virtual_machine_interface_read(port_id=port_id)
         ret_port_q = self._port_vnc_to_neutron(port_obj)
@@ -3899,25 +3899,36 @@ class DBInterface(object):
 
         port_objs = []
         if filters.get('device_id'):
+            back_ref_ids = filters.get('device_id')
+            if filters.get('network_id'):
+                back_ref_ids += filters.get('network_id')
             # Get all VM port
             port_objs_filtered_by_device_id =\
                 self._virtual_machine_interface_list(
                     obj_uuids=filters.get('id'),
-                    back_ref_id=filters.get('device_id'))
+                    back_ref_id=back_ref_ids)
+
+            port_objs_filtered_by_device_id = []
+            founded_device_ids = set()
+            for vmi_obj in self._virtual_machine_interface_list(
+                    obj_uuids=filters.get('id'),
+                    back_ref_id=back_ref_ids):
+                for device_ref in vmi_obj.get_virtual_machine_refs() or [] +\
+                        vmi_obj.get_logical_router_back_refs() or []:
+                    if device_ref['uuid'] in filters.get('device_id'):
+                        port_objs_filtered_by_device_id.append(vmi_obj)
+                        founded_device_ids.add(device_ref['uuid'])
 
             # If some device ids not yet found look to router interfaces
-            found_device_ids = set(
-                vm_ref['uuid']
-                for vmi_obj in port_objs_filtered_by_device_id
-                for vm_ref in vmi_obj.get_virtual_machine_refs() or [])
             not_found_device_ids = set(filters.get('device_id')) -\
-                                   found_device_ids
+                founded_device_ids
             if not_found_device_ids:
                 # Port has a back_ref to logical router, so need to read in
                 # logical routers based on device ids
                 router_objs = self._logical_router_list(
                     obj_uuids=list(not_found_device_ids),
                     parent_id=project_ids,
+                    back_ref_id=filters.get('network_id'),
                     fields=['virtual_machine_interface_back_refs'])
                 router_port_ids = [
                     vmi_ref['uuid']
@@ -3928,8 +3939,7 @@ class DBInterface(object):
                 # Read all logical router ports and add it to the list
                 if router_port_ids:
                     port_objs.extend(self._virtual_machine_interface_list(
-                                         obj_uuids=router_port_ids,
-                                         parent_id=project_ids))
+                        obj_uuids=router_port_ids, parent_id=project_ids))
 
             # Filter it with project ids if there are.
             if project_ids:
@@ -3940,7 +3950,8 @@ class DBInterface(object):
         else:
             port_objs = self._virtual_machine_interface_list(
                 obj_uuids=filters.get('id'),
-                parent_id=project_ids)
+                parent_id=project_ids,
+                back_ref_id=filters.get('network_id'))
 
         neutron_ports = self._port_list(port_objs)
 
@@ -3955,9 +3966,6 @@ class DBInterface(object):
             if ('fixed_ips' in filters and
                 not self._port_fixed_ips_is_present(filters['fixed_ips'],
                                                     neutron_port['fixed_ips'])):
-                continue
-            if not self._filters_is_present(filters,'network_id',
-                                            neutron_port['network_id']):
                 continue
 
             ret_list.append(neutron_port)

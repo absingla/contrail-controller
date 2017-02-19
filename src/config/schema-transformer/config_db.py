@@ -6,6 +6,9 @@
 This file contains config data model for schema transformer
 """
 
+import gevent.monkey
+gevent.monkey.patch_all()
+
 import sys
 reload(sys)
 sys.setdefaultencoding('UTF8')
@@ -54,8 +57,8 @@ def _access_control_list_update(acl_obj, name, obj, entries):
             return acl_obj
         except (NoIdError, BadRequest) as e:
             DBBaseST._logger.error(
-                "Error while creating acl %s for %s: %s",
-                name, obj.get_fq_name_str(), str(e))
+                "Error while creating acl %s for %s: %s"%(
+                name, obj.get_fq_name_str(), str(e)))
         return None
     else:
         if entries is None:
@@ -75,11 +78,11 @@ def _access_control_list_update(acl_obj, name, obj, entries):
             DBBaseST._vnc_lib.access_control_list_update(acl_obj)
         except HttpError as he:
             DBBaseST._logger.error(
-                "HTTP error while updating acl %s for %s: %d, %s",
-                name, obj.get_fq_name_str(), he.status_code, he.content)
+                "HTTP error while updating acl %s for %s: %d, %s"%(
+                name, obj.get_fq_name_str(), he.status_code, he.content))
         except NoIdError:
-            DBBaseST._logger.error("NoIdError while updating acl %s for %s",
-                                   name, obj.get_fq_name_str())
+            DBBaseST._logger.error("NoIdError while updating acl %s for %s"%(
+                                   name, obj.get_fq_name_str()))
     return acl_obj
 # end _access_control_list_update
 
@@ -195,7 +198,7 @@ class GlobalSystemConfigST(DBBaseST):
             for router_ref in route_tgt.obj.get_logical_router_back_refs() or []:
                 logical_router = LogicalRouterST.get_by_uuid(router_ref['uuid']).obj
                 logical_router.del_route_target(old_rtgt_obj)
-                logical_router.add_route_target(new_rtgt_obj.obj) 
+                logical_router.add_route_target(new_rtgt_obj.obj)
                 cls._vnc_lib.logical_router_update(logical_router)
 
             RouteTargetST.delete_vnc_obj(old_rtgt_obj.get_fq_name()[0])
@@ -1140,38 +1143,49 @@ class VirtualNetworkST(DBBaseST):
             acl = AclRuleType(match, action)
             acl_list.append(acl)
 
-            for rule in static_acl_entries.get_acl_rule():
-                src_address = copy.deepcopy(rule.match_condition.src_address)
-                dst_address = copy.deepcopy(rule.match_condition.dst_address)
-                if src_address.virtual_network:
-                    src_address.subnet = None
-                    src_address.subnet_list = []
-                if dst_address.virtual_network:
-                    dst_address.subnet = None
-                    dst_address.subnet_list = []
-                match = MatchConditionType("any", src_address, PortType(),
-                                           dst_address, PortType())
+            if self._manager._args.logical_routers_enabled:
+                for rule in static_acl_entries.get_acl_rule():
+                    src_address = copy.deepcopy(rule.match_condition.src_address)
+                    dst_address = copy.deepcopy(rule.match_condition.dst_address)
+                    if src_address.virtual_network:
+                        src_address.subnet = None
+                        src_address.subnet_list = []
+                    if dst_address.virtual_network:
+                        dst_address.subnet = None
+                        dst_address.subnet_list = []
+                    match = MatchConditionType("any", src_address, PortType(),
+                                               dst_address, PortType())
 
-                acl = AclRuleType(match, ActionListType("deny"),
-                                  rule.get_rule_uuid())
+                    acl = AclRuleType(match, ActionListType("deny"),
+                                      rule.get_rule_uuid())
+                    acl_list.append(acl)
+
+                    match = MatchConditionType("any", dst_address, PortType(),
+                                               src_address, PortType())
+
+                    acl = AclRuleType(match, ActionListType("deny"),
+                                      rule.get_rule_uuid())
+                    acl_list.append(acl)
+                # end for rule
+
+                # Create any-vn to any-vn allow
+                match = MatchConditionType(
+                    "any", AddressType(virtual_network="any"), PortType(),
+                    AddressType(virtual_network="any"), PortType())
+                action = ActionListType("pass")
+                acl = AclRuleType(match, action)
                 acl_list.append(acl)
-
-                match = MatchConditionType("any", dst_address, PortType(),
-                                           src_address, PortType())
-
-                acl = AclRuleType(match, ActionListType("deny"),
-                                  rule.get_rule_uuid())
+                acl_list.update_acl_entries(static_acl_entries)
+            else:
+                # Create any-vn to any-vn deny
+                match = MatchConditionType(
+                    "any", AddressType(virtual_network="any"), PortType(),
+                    AddressType(virtual_network="any"), PortType())
+                action = ActionListType("deny")
+                acl = AclRuleType(match, action)
                 acl_list.append(acl)
-            # end for rule
+                acl_list.update_acl_entries(static_acl_entries)
 
-            # Create any-vn to any-vn allow
-            match = MatchConditionType(
-                "any", AddressType(virtual_network="any"), PortType(),
-                AddressType(virtual_network="any"), PortType())
-            action = ActionListType("pass")
-            acl = AclRuleType(match, action)
-            acl_list.append(acl)
-            acl_list.update_acl_entries(static_acl_entries)
 
         self.acl = _access_control_list_update(self.acl, self.obj.name,
                                                self.obj, static_acl_entries)
@@ -1326,10 +1340,14 @@ class RouteTargetST(DBBaseST):
 
     def update(self, obj=None):
         pass
+
     @classmethod
     def delete_vnc_obj(cls, key):
-        cls._vnc_lib.route_target_delete(fq_name=[key])
-        del cls._dict[key]
+        try:
+            cls._vnc_lib.route_target_delete(fq_name=[key])
+        except NoIdError:
+            pass
+        cls._dict.pop(key, None)
     # end delete_vnc_obj
 # end RoutTargetST
 
@@ -2077,7 +2095,6 @@ class RoutingInstanceST(DBBaseST):
         ri2.connections.add(self.name)
 
         conn_data = ConnectionType()
-        self.obj.add_routing_instance(ri2.obj, conn_data)
         self._vnc_lib.ref_update('routing-instance', self.obj.uuid,
                                  'routing-instance', ri2.obj.uuid,
                                  None, 'ADD', conn_data)
@@ -2239,7 +2256,10 @@ class RoutingInstanceST(DBBaseST):
         # end for route_table
         if static_routes != old_static_routes:
             self.obj.set_static_route_entries(static_routes)
-            self._vnc_lib.routing_instance_update(self.obj)
+            try:
+                self._vnc_lib.routing_instance_update(self.obj)
+            except NoIdError:
+                pass
     # end update_static_routes
 
     def delete_obj(self):
@@ -2277,19 +2297,26 @@ class RoutingInstanceST(DBBaseST):
             if rp:
                 rp.delete_routing_instance(self)
             else:
-                rp_obj = RoutingPolicyST.read_vnc_obj(fq_name=rp_name)
-                if rp_obj:
-                    rp_obj.del_routing_instance(self.obj)
-                    self._vnc_lib.routing_policy_update(rp_obj)
+                try:
+                    rp_obj = RoutingPolicyST.read_vnc_obj(fq_name=rp_name)
+                    if rp_obj:
+                        rp_obj.del_routing_instance(self.obj)
+                        self._vnc_lib.routing_policy_update(rp_obj)
+                except NoIdError:
+                    pass
         for ra_name in self.route_aggregates:
             ra = RouteAggregateST.get(ra_name)
             if ra:
                 ra.delete_routing_instance(self)
             else:
-                ra_obj = RouteAggregateST.read_vnc_obj(fq_name=ra_name)
-                if ra_obj:
-                    ra_obj.del_routing_instance(self.obj)
-                    self._vnc_lib.route_aggregate_update(ra_obj)
+                try:
+                    ra_obj = RouteAggregateST.read_vnc_obj(fq_name=ra_name)
+                    if ra_obj:
+                        ra_obj.del_routing_instance(self.obj)
+                        self._vnc_lib.route_aggregate_update(ra_obj)
+                except NoIdError:
+                    pass
+
         self.routing_policys = {}
         self.route_aggregates = set()
         bgpaas_server_name = self.obj.get_fq_name_str() + ':bgpaas-server'
@@ -3026,7 +3053,7 @@ class BgpRouterST(DBBaseST):
             obj = self.read_vnc_obj(fq_name=self.name)
         except NoIdError as e:
             self._logger.error("NoIdError while reading bgp router "
-                                   "%s: %s", self.name, str(e))
+                                   "%s: %s"%(self.name, str(e)))
             return
 
         peerings = [ref['to'] for ref in (obj.get_bgp_router_refs() or [])]
@@ -3054,7 +3081,7 @@ class BgpRouterST(DBBaseST):
                 self._vnc_lib.bgp_router_update(obj)
             except NoIdError as e:
                 self._logger.error("NoIdError while updating bgp router "
-                                   "%s: %s", self.name, str(e))
+                                   "%s: %s"%(self.name, str(e)))
     # end update_peering
 
     def handle_st_object_req(self):
@@ -3146,7 +3173,12 @@ class BgpAsAServiceST(DBBaseST):
         if not bgpr:
             bgp_router = BgpRouter(vmi.obj.name, parent_obj=ri.obj)
             create = True
-            src_port = self._cassandra.alloc_bgpaas_port(router_fq_name)
+            try:
+                src_port = self._cassandra.alloc_bgpaas_port(router_fq_name)
+            except ResourceExhaustionError as e:
+                self._logger.error("Cannot allocate BGPaaS port for %s:%s" % (
+                    router_fq_name, str(e)))
+                return
         else:
             bgp_router = self._vnc_lib.bgp_router_read(id=bgpr.obj.uuid)
             src_port = bgpr.source_port
@@ -3390,15 +3422,19 @@ class VirtualMachineInterfaceST(DBBaseST):
 
     def recreate_vrf_assign_table(self):
         if self.service_interface_type not in ['left', 'right']:
+            self._set_vrf_assign_table(None)
             return
         vn = VirtualNetworkST.get(self.virtual_network)
         if vn is None:
+            self._set_vrf_assign_table(None)
             return
         vm_pt = self.get_virtual_machine_or_port_tuple()
         if not vm_pt:
+            self._set_vrf_assign_table(None)
             return
         smode = vm_pt.get_service_mode()
         if smode not in ['in-network', 'in-network-nat']:
+            self._set_vrf_assign_table(None)
             return
 
         vrf_table = VrfAssignTableType()
@@ -3447,9 +3483,14 @@ class VirtualMachineInterfaceST(DBBaseST):
                 ri_name = vn.get_service_name(service_chain.name, si_name)
                 for sp in service_chain.sp_list:
                     for dp in service_chain.dp_list:
-                        mc = MatchConditionType(src_port=sp,
-                                                dst_port=dp,
-                                                protocol=service_chain.protocol)
+                        if self.service_interface_type == 'left':
+                            mc = MatchConditionType(src_port=dp,
+                                                    dst_port=sp,
+                                                    protocol=service_chain.protocol)
+                        else:
+                            mc = MatchConditionType(src_port=sp,
+                                                    dst_port=dp,
+                                                    protocol=service_chain.protocol)
 
                         vrf_rule = VrfAssignRuleType(match_condition=mc,
                                                      routing_instance=ri_name,
@@ -3461,6 +3502,10 @@ class VirtualMachineInterfaceST(DBBaseST):
 
         if policy_rule_count == 0:
             vrf_table = None
+        self._set_vrf_assign_table(vrf_table)
+    # end recreate_vrf_assign_table
+
+    def _set_vrf_assign_table(self, vrf_table):
         vrf_table_pickle = jsonpickle.encode(vrf_table)
         if vrf_table_pickle != self.vrf_table:
             self.obj.set_vrf_assign_table(vrf_table)
@@ -3470,8 +3515,8 @@ class VirtualMachineInterfaceST(DBBaseST):
             except NoIdError as e:
                 if e._unknown_id == self.uuid:
                     VirtualMachineInterfaceST.delete(self.name)
+    # _set_vrf_assign_table
 
-    # end recreate_vrf_assign_table
 
     def handle_st_object_req(self):
         resp = super(VirtualMachineInterfaceST, self).handle_st_object_req()
@@ -3911,7 +3956,7 @@ class ServiceInstanceST(DBBaseST):
         if (not self.left_vn_str or not self.right_vn_str):
             self._logger.error(
                 "%s: route table next hop service instance must "
-                "have left and right virtual networks", self.name)
+                "have left and right virtual networks"% self.name)
             return self.delete_properties()
 
         policy_name = "_internal_" + self.name
@@ -4154,7 +4199,10 @@ class RouteAggregateST(DBBaseST):
             return
         self.obj.set_aggregate_route_nexthop(None)
         self.obj.set_routing_instance_list([])
-        self._vnc_lib.route_aggregate_update(self.obj)
+        try:
+            self._vnc_lib.route_aggregate_update(self.obj)
+        except NoIdError:
+            pass
         self.routing_instances.discard(ri.name)
     # end delete_routing_instance
 

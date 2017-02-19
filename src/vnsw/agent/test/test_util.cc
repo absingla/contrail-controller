@@ -2770,7 +2770,7 @@ void DeleteVmportEnv(struct PortInfo *input, int count, int del_vn, int acl_id,
         DelLink("virtual-network", vn_name, "virtual-machine-interface",
                 input[i].name);
         if (with_ip6) {
-            sprintf(instance_ip6, "instance6%d", input[i].vm_id);
+            sprintf(instance_ip6, "instance6%d", input[i].intf_id);
             DelLink("virtual-machine-interface", input[i].name, "instance-ip",
                     instance_ip6);
             DelInstanceIp(instance_ip6);
@@ -3450,7 +3450,8 @@ bool FlowGet(const string &vrf_name, const char *sip, const char *dip,
 
 bool FlowStatsMatch(const string &vrf_name, const char *sip,
                     const char *dip, uint8_t proto, uint16_t sport,
-                    uint16_t dport, uint64_t pkts, uint64_t bytes, int nh_id) {
+                    uint16_t dport, uint64_t pkts, uint64_t bytes, int nh_id,
+                    uint32_t flow_handle) {
     Agent *agent = Agent::GetInstance();
     VrfEntry *vrf = agent->vrf_table()->FindVrfFromName(vrf_name);
     EXPECT_TRUE(vrf != NULL);
@@ -3466,7 +3467,17 @@ bool FlowStatsMatch(const string &vrf_name, const char *sip,
     key.protocol = proto;
     key.family = key.src_addr.is_v4() ? Address::INET : Address::INET6;
 
-    FlowEntry *fe = agent->pkt()->get_flow_proto()->Find(key, 0);
+    FlowEntry *fe = NULL;
+    if (flow_handle != FlowEntry::kInvalidFlowHandle) {
+        FlowTable *table = agent->pkt()->get_flow_proto()->GetFlowTable(key,
+                                                                        flow_handle);
+        if (table == NULL) {
+            return NULL;
+        }
+        fe = table->Find(key);
+    } else {
+        fe = agent->pkt()->get_flow_proto()->Find(key, 0);
+    }
     EXPECT_TRUE(fe != NULL);
     if (fe == NULL) {
         return false;

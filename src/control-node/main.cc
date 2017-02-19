@@ -196,9 +196,8 @@ static bool ControlNodeInfoLogger(BgpServer *server,
     state.set_name(server->localname());
 
     // Send self information.
-    uint64_t start_time = UTCTimestampUsec();
-    if (first || start_time != state.get_uptime()) {
-        state.set_uptime(start_time);
+    if (first) {
+        state.set_uptime(UTCTimestampUsec());
         change = true;
     }
 
@@ -206,13 +205,6 @@ static bool ControlNodeInfoLogger(BgpServer *server,
     ip_list.push_back(ControlNode::GetSelfIp());
     if (first || state.get_bgp_router_ip_list() != ip_list) {
         state.set_bgp_router_ip_list(ip_list);
-        change = true;
-    }
-
-    vector<string> list;
-    MiscUtils::GetCoreFileList(ControlNode::GetProgramName(), list);
-    if (first || state.get_core_files_list() != list) {
-        state.set_core_files_list(list);
         change = true;
     }
 
