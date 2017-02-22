@@ -148,6 +148,10 @@ void NextHop::FillObjectLog(AgentLogEvent::type event,
             type_str.assign("COMPOSITE");
             break;
 
+        case NextHop::PBB:
+            type_str.assign("PBB_INDIRECT");
+            break;
+
         default:
             type_str.assign("unknown");
     }
@@ -494,6 +498,21 @@ bool InterfaceNH::Change(const DBRequest *req) {
         ret = true;
     }
 
+    if (learning_enabled_ != data->learning_enabled_) {
+        learning_enabled_ = data->learning_enabled_;
+        ret = true;
+    }
+
+    if (etree_leaf_ != data->etree_leaf_) {
+        etree_leaf_ = data->etree_leaf_;
+        ret = true;
+    }
+
+    if (layer2_control_word_ != data->layer2_control_word_) {
+        layer2_control_word_ = data->layer2_control_word_;
+        ret = true;
+    }
+
     return ret;
 }
 
@@ -502,12 +521,15 @@ const uuid &InterfaceNH::GetIfUuid() const {
 }
 
 static void AddInterfaceNH(const uuid &intf_uuid, const MacAddress &dmac,
-                          uint8_t flags, bool policy, const string vrf_name) {
+                          uint8_t flags, bool policy, const string vrf_name,
+                          bool learning_enabled, bool etree_leaf,
+                          bool layer2_control_word) {
     DBRequest req(DBRequest::DB_ENTRY_ADD_CHANGE);
     req.key.reset(new InterfaceNHKey
                   (new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE, intf_uuid, ""),
                    policy, flags, dmac));
-    req.data.reset(new InterfaceNHData(vrf_name));
+    req.data.reset(new InterfaceNHData(vrf_name, learning_enabled,
+                                       etree_leaf, layer2_control_word));
     Agent::GetInstance()->nexthop_table()->Process(req);
 }
 
@@ -515,9 +537,12 @@ static void AddInterfaceNH(const uuid &intf_uuid, const MacAddress &dmac,
 // policy, third one is for multicast.
 void InterfaceNH::CreateL3VmInterfaceNH(const uuid &intf_uuid,
                                         const MacAddress &dmac,
-                                        const string &vrf_name) {
-    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::INET4, true, vrf_name);
-    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::INET4, false, vrf_name);
+                                        const string &vrf_name,
+                                        bool learning_enabled) {
+    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::INET4, true, vrf_name,
+                   learning_enabled, false, false);
+    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::INET4, false, vrf_name,
+                   learning_enabled, false, false);
 }
 
 void InterfaceNH::DeleteL3InterfaceNH(const uuid &intf_uuid,
@@ -528,9 +553,14 @@ void InterfaceNH::DeleteL3InterfaceNH(const uuid &intf_uuid,
 
 void InterfaceNH::CreateL2VmInterfaceNH(const uuid &intf_uuid,
                                         const MacAddress &dmac,
-                                        const string &vrf_name) {
-    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::BRIDGE, false, vrf_name);
-    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::BRIDGE, true, vrf_name);
+                                        const string &vrf_name,
+                                        bool learning_enabled,
+                                        bool etree_leaf,
+                                        bool layer2_control_word) {
+    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::BRIDGE, false, vrf_name,
+                   learning_enabled, etree_leaf, layer2_control_word);
+    AddInterfaceNH(intf_uuid, dmac, InterfaceNHFlags::BRIDGE, true, vrf_name,
+                   learning_enabled, etree_leaf, layer2_control_word);
 }
 
 void InterfaceNH::DeleteL2InterfaceNH(const uuid &intf_uuid,
@@ -544,7 +574,7 @@ void InterfaceNH::CreateMulticastVmInterfaceNH(const uuid &intf_uuid,
                                                const string &vrf_name) {
     AddInterfaceNH(intf_uuid, dmac, (InterfaceNHFlags::INET4 |
                                      InterfaceNHFlags::MULTICAST), false,
-                   vrf_name);
+                   vrf_name, false, true, false);
 }
 
 void InterfaceNH::DeleteMulticastVmInterfaceNH(const uuid &intf_uuid) {
@@ -724,6 +754,16 @@ bool VrfNH::Change(const DBRequest *req) {
 
     if (data->flood_unknown_unicast_ != flood_unknown_unicast_) {
         flood_unknown_unicast_ = data->flood_unknown_unicast_;
+        ret = true;
+    }
+
+    if (learning_enabled_ != data->learning_enabled_) {
+        learning_enabled_ = data->learning_enabled_;
+        ret = true;
+    }
+
+    if (layer2_control_word_ != data->layer2_control_word_) {
+        layer2_control_word_ = data->layer2_control_word_;
         ret = true;
     }
 
@@ -1408,6 +1448,23 @@ void CompositeNHKey::ChangeTunnelType(TunnelType::Type tunnel_type) {
 }
 
 bool CompositeNH::Change(const DBRequest* req) {
+    bool changed = false;
+    CompositeNHData *data = static_cast<CompositeNHData *>(req->data.get());
+    if (data && data->pbb_nh_ != pbb_nh_) {
+        pbb_nh_ = data->pbb_nh_;
+        changed = true;
+    }
+
+    if (data && data->learning_enabled_ != learning_enabled_) {
+        learning_enabled_ = data->learning_enabled_;
+        changed = true;
+    }
+
+    if (data && layer2_control_word_ != data->layer2_control_word_) {
+        layer2_control_word_ = data->layer2_control_word_;
+        changed = true;
+    }
+
     ComponentNHList component_nh_list;
     ComponentNHKeyList::const_iterator it = component_nh_key_list_.begin();
     for (;it != component_nh_key_list_.end(); it++) {
@@ -1432,7 +1489,6 @@ bool CompositeNH::Change(const DBRequest* req) {
         }
     }
 
-    bool changed = false;
     //Check if new list and old list are same
     ComponentNHList::const_iterator new_comp_nh_it =
         component_nh_list.begin();
@@ -1464,7 +1520,7 @@ bool CompositeNH::Change(const DBRequest* req) {
 
     if (new_comp_nh_it == component_nh_list.end() &&
         old_comp_nh_it == component_nh_list_.end()) {
-        changed = false;
+        //No Change
     } else {
         changed = true;
     }
@@ -1737,7 +1793,8 @@ CompositeNH *CompositeNH::ChangeTunnelType(Agent *agent,
                                                      vrf_->GetName());
     DBRequest nh_req(DBRequest::DB_ENTRY_ADD_CHANGE);
     nh_req.key.reset(comp_nh_key);
-    nh_req.data.reset(new CompositeNHData());
+    nh_req.data.reset(new CompositeNHData(pbb_nh_, learning_enabled_,
+                                          layer2_control_word_));
     agent->nexthop_table()->Process(nh_req);
 
     CompositeNH *comp_nh = static_cast<CompositeNH *>(
@@ -2201,6 +2258,118 @@ ComponentNHKey::ComponentNHKey(int label, Composite::Type type, bool policy,
     vrf_name)) {
 }
 
+PBBNH::PBBNH(VrfEntry *vrf, const MacAddress &dest_bmac, uint32_t isid):
+    NextHop(NextHop::PBB, true, false), vrf_(vrf, this), dest_bmac_(dest_bmac),
+    isid_(isid), label_(MplsTable::kInvalidLabel), child_nh_(NULL){
+}
+
+PBBNH::~PBBNH() {
+}
+
+bool PBBNH::CanAdd() const {
+    if (vrf_ == NULL) {
+        LOG(ERROR, "Invalid VRF in PBBNH. Skip Add");
+        return false;
+    }
+
+    if (dest_bmac_ == MacAddress::ZeroMac()) {
+        LOG(ERROR, "Invalid tunnel-destination in PBBNH");
+    }
+
+    return true;
+}
+
+NextHop *PBBNHKey::AllocEntry() const {
+    VrfEntry *vrf = static_cast<VrfEntry *>
+        (Agent::GetInstance()->vrf_table()->Find(&vrf_key_, true));
+    return new PBBNH(vrf, dest_bmac_, isid_);
+}
+
+bool PBBNH::NextHopIsLess(const DBEntry &rhs) const {
+    const PBBNH &a = static_cast<const PBBNH &>(rhs);
+
+    if (vrf_.get() != a.vrf_.get()) {
+        return vrf_.get() < a.vrf_.get();
+    }
+
+    if (dest_bmac_ != a.dest_bmac_) {
+        return dest_bmac_ < a.dest_bmac_;
+    }
+
+    return isid_ < a.isid_;
+}
+
+void PBBNH::SetKey(const DBRequestKey *k) {
+    const PBBNHKey *key = static_cast<const PBBNHKey *>(k);
+    NextHop::SetKey(k);
+    vrf_ = NextHopTable::GetInstance()->FindVrfEntry(key->vrf_key_);
+    dest_bmac_ = key->dest_bmac_;
+    policy_ = key->policy_;
+    isid_ = key->isid_;
+}
+
+PBBNH::KeyPtr PBBNH::GetDBRequestKey() const {
+    NextHopKey *key = new PBBNHKey(vrf_->GetName(), dest_bmac_, isid_);
+    return DBEntryBase::KeyPtr(key);
+}
+
+const uint32_t PBBNH::vrf_id() const {
+    return vrf_->vrf_id();
+}
+
+bool PBBNH::Change(const DBRequest *req) {
+    bool ret = false;
+    Agent *agent = Agent::GetInstance();
+    BridgeAgentRouteTable *rt_table =
+        static_cast<BridgeAgentRouteTable *>(vrf_->GetBridgeRouteTable());
+    BridgeRouteEntry *rt = rt_table->FindRouteNoLock(dest_bmac_);
+
+    uint32_t label = MplsTable::kInvalidLabel;
+    const NextHop *nh = NULL;
+
+    if (!rt) {
+        DiscardNHKey key;
+        nh = static_cast<NextHop *>
+            (agent->nexthop_table()->FindActiveEntry(&key));
+    } else {
+        nh = rt->GetActiveNextHop();
+        label = rt->GetActiveLabel();
+    }
+
+    if (nh != child_nh_.get()) {
+        child_nh_ = nh;
+        ret = true;
+    }
+
+    if (label_ != label) {
+        label_ = label;
+        ret = true;
+    }
+
+    if (rt && etree_leaf_ != rt->GetActivePath()->etree_leaf()) {
+        etree_leaf_ = rt->GetActivePath()->etree_leaf();
+        ret = true;
+    }
+
+    return ret;
+}
+
+void PBBNH::Delete(const DBRequest *req) {
+    child_nh_.reset(NULL);
+}
+
+void PBBNH::SendObjectLog(const NextHopTable *table,
+                          AgentLogEvent::type event) const {
+    NextHopObjectLogInfo info;
+    FillObjectLog(event, info);
+
+    if (vrf_) {
+        info.set_vrf(vrf_->GetName());
+    }
+    info.set_mac(dest_bmac_.ToString());
+    OPER_TRACE_ENTRY(NextHop, table, info);
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // NextHop Sandesh routines
 /////////////////////////////////////////////////////////////////////////////
@@ -2478,6 +2647,7 @@ void NextHop::SetNHSandeshData(NhSandeshData &data) const {
             data.set_vrf(vrf->GetVrf()->GetName());
             data.set_vxlan_flag(vrf->vxlan_nh());
             data.set_flood_unknown_unicast(vrf->flood_unknown_unicast());
+            data.set_layer2_control_word(vrf->layer2_control_word());
             break;
         }
         case INTERFACE: {
@@ -2494,6 +2664,7 @@ void NextHop::SetNHSandeshData(NhSandeshData &data) const {
                 data.set_mcast("enabled");
             else
                 data.set_mcast("disabled");
+            data.set_layer2_control_word(itf->layer2_control_word());
             break;
         }
         case TUNNEL: {
@@ -2548,7 +2719,29 @@ void NextHop::SetNHSandeshData(NhSandeshData &data) const {
         case COMPOSITE: {
             const CompositeNH *comp_nh = static_cast<const CompositeNH *>(this);
             ExpandCompositeNextHop(comp_nh, data);
+            data.set_layer2_control_word(comp_nh->layer2_control_word());
             break;
+        }
+
+        case PBB: {
+             data.set_type("PBB Tunnel");
+             const PBBNH *pbb_nh = static_cast<const PBBNH *>(this);
+             data.set_mac(pbb_nh->dest_bmac().ToString());
+             data.set_vrf(pbb_nh->vrf()->GetName());
+             data.set_isid(pbb_nh->isid());
+             std::vector<McastData> data_list;
+             const TunnelNH *tnh =
+                 dynamic_cast<const TunnelNH *>(pbb_nh->child_nh());
+             if (tnh) {
+                 McastData sdata;
+                 sdata.set_type("Tunnel");
+                 sdata.set_dip(tnh->GetDip()->to_string());
+                 sdata.set_sip(tnh->GetSip()->to_string());
+                 sdata.set_label(pbb_nh->label());
+                 data_list.push_back(sdata);
+             }
+             data.set_mc_list(data_list);
+             break;
         }
 
         case VLAN: {
@@ -2575,6 +2768,9 @@ void NextHop::SetNHSandeshData(NhSandeshData &data) const {
     } else {
         data.set_valid("false");
     }
+
+    data.set_learning_enabled(learning_enabled_);
+    data.set_etree_leaf(etree_leaf_);
 
     if (policy_) {
         data.set_policy("enabled");

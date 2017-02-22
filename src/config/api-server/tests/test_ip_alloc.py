@@ -2,6 +2,8 @@
 # Copyright (c) 2013,2014 Juniper Networks, Inc. All rights reserved.
 #
 import gevent
+import gevent.monkey
+gevent.monkey.patch_all()
 import os
 import sys
 import socket
@@ -9,6 +11,7 @@ import errno
 import uuid
 import logging
 import coverage
+import ipaddress
 
 import testtools
 from testtools.matchers import Equals, MismatchError, Not, Contains
@@ -40,11 +43,17 @@ logger.setLevel(logging.DEBUG)
 
 
 class TestIpAlloc(test_case.ApiServerTestCase):
-    def __init__(self, *args, **kwargs):
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
-        logger.addHandler(ch)
-        super(TestIpAlloc, self).__init__(*args, **kwargs)
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestIpAlloc, cls).setUpClass(*args, **kwargs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestIpAlloc, cls).tearDownClass(*args, **kwargs)
 
     def test_subnet_overlap(self):
         project = Project('v4-proj-%s' %(self.id()), Domain())
@@ -662,13 +671,13 @@ class TestIpAlloc(test_case.ApiServerTestCase):
             logger.debug('Allocation failed, expected v4 IP Address 11.1.1.4')
 
         #Remove ipam_subnets from ipam, update should fail with
-        #RefExistError
+        #RefsExistError
         ipam.set_ipam_subnets(IpamSubnets([]))
         with ExpectedException(cfgm_common.exceptions.RefsExistError) as e:
             self._vnc_lib.network_ipam_update(ipam)
 
         #Change ipam by removing one and adding another, update should fail
-        # with RefExistError
+        # with RefsExistError
         ipam.set_ipam_subnets(IpamSubnets([ipam2_sn_v4]))
         with ExpectedException(cfgm_common.exceptions.RefsExistError) as e:
             self._vnc_lib.network_ipam_update(ipam)
@@ -737,7 +746,7 @@ class TestIpAlloc(test_case.ApiServerTestCase):
         ipv4_obj2.uuid = ipv4_obj2.name
         ipv4_obj2.set_virtual_network(net_obj)
         logger.debug('Created Instance IPv4 object 2 %s', ipv4_obj2.uuid)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             ipv4_id2 = self._vnc_lib.instance_ip_create(ipv4_obj2)
 
@@ -874,7 +883,7 @@ class TestIpAlloc(test_case.ApiServerTestCase):
 
         #try allocating specific ip, which has been assigned already
 	ipv4_obj5.set_instance_ip_address('12.1.1.4')
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             ipv4_id5 = self._vnc_lib.instance_ip_create(ipv4_obj5)
 
@@ -1021,7 +1030,7 @@ class TestIpAlloc(test_case.ApiServerTestCase):
 
         #try allocating specific ip, which has been assigned already
         ipv4_obj5.set_instance_ip_address('14.1.1.8')
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             ipv4_id5 = self._vnc_lib.instance_ip_create(ipv4_obj5)
 
@@ -1136,7 +1145,7 @@ class TestIpAlloc(test_case.ApiServerTestCase):
         # of ip in use
         ipv4_obj2.set_virtual_network(net_obj)
         ipv4_obj2.set_instance_ip_address('13.1.1.8')
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             ipv4_id2 = self._vnc_lib.instance_ip_create(ipv4_obj2)
 
@@ -1173,7 +1182,7 @@ class TestIpAlloc(test_case.ApiServerTestCase):
         # of ip in use.
         ipv4_obj4.set_virtual_network(net_obj)
         ipv4_obj4.set_instance_ip_address('11.1.1.8')
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             ipv4_id4 = self._vnc_lib.instance_ip_create(ipv4_obj4)
 
@@ -2090,14 +2099,14 @@ class TestIpAlloc(test_case.ApiServerTestCase):
                 self._invoked = 0
             # end __init__
 
-            def __call__(self, *args, **kwargs):
+            def __call__(self, _, *args, **kwargs):
                 if self._invoked >= 1:
                     raise Exception(
                         "Instance IP was persisted more than once")
 
-                if args[1].startswith('/api-server/subnets'):
+                if args[0].startswith('/api-server/subnets'):
                     self._invoked += 1
-                return self._orig_method(args, kwargs)
+                return self._orig_method(*args, **kwargs)
         # end SpyCreateNode
 
         orig_object = self._api_server._db_conn._zk_db._zk_client
@@ -2174,13 +2183,13 @@ class TestIpAlloc(test_case.ApiServerTestCase):
         iip2_obj = InstanceIp('clashing-iip-%s' %(self.id()),
                               instance_ip_address=iip_obj.instance_ip_address)
         iip2_obj.add_virtual_network(vn_obj)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.instance_ip_create(iip2_obj)
 
         # allocate instance-ip clashing with existing floating-ip
         iip2_obj.set_instance_ip_address(fip_obj.floating_ip_address)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.instance_ip_create(iip2_obj)
 
@@ -2188,7 +2197,7 @@ class TestIpAlloc(test_case.ApiServerTestCase):
         fip2_obj = FloatingIp('clashing-fip-%s' %(self.id()), fip_pool_obj,
                               floating_ip_address=fip_obj.floating_ip_address)
         fip2_obj.add_project(proj_obj)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.floating_ip_create(fip2_obj)
 
@@ -2196,37 +2205,37 @@ class TestIpAlloc(test_case.ApiServerTestCase):
         aip2_obj = AliasIp('clashing-aip-%s' %(self.id()), aip_pool_obj,
                            alias_ip_address=aip_obj.alias_ip_address)
         aip2_obj.add_project(proj_obj)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.alias_ip_create(aip2_obj)
 
         # allocate floating-ip clashing with existing instance-ip
         fip2_obj.set_floating_ip_address(iip_obj.instance_ip_address)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.floating_ip_create(fip2_obj)
 
         # allocate alias-ip clashing with existing instance-ip
         aip2_obj.set_alias_ip_address(iip_obj.instance_ip_address)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.alias_ip_create(aip2_obj)
 
         # allocate alias-ip clashing with existing floating-ip
         aip2_obj.set_alias_ip_address(fip_obj.floating_ip_address)
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.alias_ip_create(aip2_obj)
 
         # allocate floating-ip with gateway ip and verify failure
         fip2_obj.set_floating_ip_address('11.1.1.254')
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.floating_ip_create(fip2_obj)
 
         # allocate alias-ip with gateway ip and verify failure
         aip2_obj.set_alias_ip_address('11.1.1.254')
-        with ExpectedException(cfgm_common.exceptions.BadRequest,
+        with ExpectedException(cfgm_common.exceptions.RefsExistError,
                                'Ip address already in use') as e:
             self._vnc_lib.alias_ip_create(aip2_obj)
 
@@ -2261,6 +2270,240 @@ class TestIpAlloc(test_case.ApiServerTestCase):
             self._vnc_lib.virtual_machine_interface_update(
                 isolated_vmi_obj)
     # end test_ip_alloc_clash
+
+    def test_floating_ip_pool_subnet_create(self):
+        """
+        Test Floating-Ip-Pool create by specifiying subnet uuid in an Ipam of
+        a virtual-network. This testcase covers both valid and invalid subnet
+        uuid specification scenarios.
+        """
+        def _get_ipam_subnet_uuid(ipam_ref, ipam_obj):
+            """
+            Convenience function to return subnet uuid in a ipam ref on
+            a virtual-network.
+            """
+            if ipam_ref['to'] == ipam_obj.get_fq_name():
+                ipam_subnets = ipam_ref['attr'].get_ipam_subnets()
+                if ipam_subnets:
+                    # We will use the first subnet in the matching IPAM.
+                    return True, ipam_subnets[0].get_subnet_uuid()
+            return False, None
+        #end _get_ipam_subnet_uuid
+
+        # Create a test project.
+        proj_obj = Project('proj-%s' %(self.id()), parent_obj=Domain())
+        self._vnc_lib.project_create(proj_obj)
+
+        #
+        # User-defined subnet.
+        #
+
+        # Create a user-defined subnet IPAM.
+        ipam_obj = NetworkIpam('user-subnet-ipam-%s' %(self.id()), proj_obj)
+        self._vnc_lib.network_ipam_create(ipam_obj)
+        ipam_obj = self._vnc_lib.network_ipam_read(\
+            fq_name=ipam_obj.get_fq_name())
+
+        # Create a virtual-network and add user-defined IPAM to it.
+        vn_name = 'user-vn-%s' %(self.id())
+        vn_obj = VirtualNetwork(vn_name, proj_obj)
+        ipam_sn_v4 = IpamSubnetType(subnet=SubnetType('11.1.1.0', 24))
+        vn_obj.add_network_ipam(ipam_obj, VnSubnetsType([ipam_sn_v4]))
+        self._vnc_lib.virtual_network_create(vn_obj)
+        vn_obj = self._vnc_lib.virtual_network_read(\
+            fq_name=vn_obj.get_fq_name())
+
+        # Create a Floating-ip-pool that points to an "invalid subnet id
+        # on the virtual-network. Verify, floatin-ip-pool create fails.
+        fip_subnets = FloatingIpPoolSubnetType(subnet_uuid=[self.id()])
+        fip_pool_obj = FloatingIpPool(
+            'user-fip-pool-%s' %(self.id()), parent_obj=vn_obj,
+            floating_ip_pool_subnets = fip_subnets)
+        err_msg = "Subnet %s was not found in virtual-network %s" %\
+            (self.id(), vn_obj.get_uuid())
+        with ExpectedException(cfgm_common.exceptions.BadRequest,
+                 err_msg) as e:
+            self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+        # Get subnet uuid of user defined ipam in the virtual-network.
+        ipam_refs = vn_obj.get_network_ipam_refs()
+        svc_subnet_uuid = None
+        for ipam_ref in ipam_refs:
+            found, svc_subnet_uuid = _get_ipam_subnet_uuid(ipam_ref, ipam_obj)
+            if found:
+                break
+
+        # Create a Floating-ip-pool that points to an subnet id of the
+        # user-define ipam. Verify, floatin-ip-pool create succeeds.
+        fip_subnets = FloatingIpPoolSubnetType(subnet_uuid = [svc_subnet_uuid])
+        fip_pool_obj = FloatingIpPool(
+            'user-fip-pool-%s' %(self.id()), parent_obj=vn_obj,
+            floating_ip_pool_subnets = fip_subnets)
+        self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+        #
+        # Flat subnet.
+        #
+
+        # Create a flat subnet IPAM.
+        ipam_sn_v4 = [IpamSubnetType(subnet=SubnetType('11.1.1.0', 24))]
+        ipam_obj = NetworkIpam('flat-subnet-ipam-%s' %(self.id()), proj_obj)
+        ipam_obj.set_ipam_subnet_method('flat-subnet')
+        ipam_obj.set_ipam_subnets(IpamSubnets(ipam_sn_v4))
+        self._vnc_lib.network_ipam_create(ipam_obj)
+        ipam_obj = self._vnc_lib.network_ipam_read(\
+            fq_name=ipam_obj.get_fq_name())
+
+        # Create a virtual-network and add flat-subnet IPAM to it.
+        vn_name = 'flat-vn-%s' %(self.id())
+        vn_obj = VirtualNetwork(vn_name, proj_obj)
+        vn_obj.add_network_ipam(ipam_obj, VnSubnetsType([]))
+        vn_obj.set_virtual_network_properties(\
+            VirtualNetworkType(forwarding_mode='l3'))
+        self._vnc_lib.virtual_network_create(vn_obj)
+        vn_obj = self._vnc_lib.virtual_network_read(\
+            fq_name=vn_obj.get_fq_name())
+
+        # Create a Floating-ip-pool that points to an "invalid" subnet id
+        # on the virtual-network. Verify, floatin-ip-pool create fails.
+        fip_subnets = FloatingIpPoolSubnetType(subnet_uuid = [self.id()])
+        fip_pool_obj = FloatingIpPool(
+            'flat-fip-pool-%s' %(self.id()), parent_obj=vn_obj,
+            floating_ip_pool_subnets = fip_subnets)
+        err_msg = "Subnet %s was not found in virtual-network %s" %\
+            (self.id(), vn_obj.get_uuid())
+        with ExpectedException(cfgm_common.exceptions.BadRequest,
+                 err_msg) as e:
+            self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+        # Get subnet uuid of flat subnet ipam in the virtual-network.
+        ipam_refs = vn_obj.get_network_ipam_refs()
+        svc_subnet_uuid = None
+        for ipam_ref in ipam_refs:
+            found, svc_subnet_uuid = _get_ipam_subnet_uuid(ipam_ref, ipam_obj)
+            if found:
+                break
+
+        # Create a Floating-ip-pool that points to an subnet id of the
+        # flat-subnet ipam. Verify, floatin-ip-pool create succeeds.
+        fip_subnets = FloatingIpPoolSubnetType(subnet_uuid = [svc_subnet_uuid])
+        fip_pool_obj = FloatingIpPool(
+            'flat-fip-pool-%s' %(self.id()), parent_obj=vn_obj,
+            floating_ip_pool_subnets = fip_subnets)
+        self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+    # end test_floating_ip_pool_subnet_create
+
+    def test_floating_ip_alloc(self):
+        """
+        Test Floating-Ip create from floating-ip-pools that have been
+        created by requesting a specific subnet. Verify that the floating-ip
+        created is from the corresponding subnet.
+        """
+        def _get_ipam_subnet_uuid(ipam_ref, ipam_obj):
+            """
+            Convenience function to return subnet uuid in a ipam ref on
+            a virtual-network.
+            """
+            if ipam_ref['to'] == ipam_obj.get_fq_name():
+                ipam_subnets = ipam_ref['attr'].get_ipam_subnets()
+                if ipam_subnets:
+                    # We will use the first subnet in the matching IPAM.
+                    return True, ipam_subnets[0].get_subnet_uuid()
+            return False, None
+        #end _get_ipam_subnet_uuid
+
+        # Create a test project.
+        proj_obj = Project('proj-%s' %(self.id()), parent_obj=Domain())
+        self._vnc_lib.project_create(proj_obj)
+
+        vn_name = 'vn-%s' %(self.id())
+        vn_obj = VirtualNetwork(vn_name, proj_obj)
+
+        # Create a user-defined subnet IPAM.
+        user_ipam_obj = NetworkIpam('user-subnet-ipam-%s' %(self.id()), proj_obj)
+        self._vnc_lib.network_ipam_create(user_ipam_obj)
+        user_ipam_obj = self._vnc_lib.network_ipam_read(\
+            fq_name=user_ipam_obj.get_fq_name())
+
+        # Add user-defined subnet ipam to virtual-network.
+        ipam_sn_v4 = IpamSubnetType(subnet=SubnetType('10.1.1.0', 24))
+        vn_obj.add_network_ipam(user_ipam_obj, VnSubnetsType([ipam_sn_v4]))
+
+        # Create a flat subnet IPAM.
+        ipam_sn_v4 = [IpamSubnetType(subnet=SubnetType('11.1.1.0', 24))]
+        flat_ipam_obj = NetworkIpam(\
+            'flat-subnet-ipam-%s' %(self.id()), proj_obj)
+        flat_ipam_obj.set_ipam_subnet_method('flat-subnet')
+        flat_ipam_obj.set_ipam_subnets(IpamSubnets(ipam_sn_v4))
+        self._vnc_lib.network_ipam_create(flat_ipam_obj)
+        flat_ipam_obj = self._vnc_lib.network_ipam_read(\
+            fq_name=flat_ipam_obj.get_fq_name())
+
+        # Add flat subnet ipam to virtual-network.
+        vn_obj.add_network_ipam(flat_ipam_obj, VnSubnetsType([]))
+        vn_obj.set_virtual_network_properties(\
+            VirtualNetworkType(forwarding_mode='l3'))
+
+        # Create the virtual-network.
+        self._vnc_lib.virtual_network_create(vn_obj)
+        vn_obj = self._vnc_lib.virtual_network_read(\
+            fq_name=vn_obj.get_fq_name())
+
+        # Get subnet uuid of user defined ipam in the virtual-network.
+        ipam_refs = vn_obj.get_network_ipam_refs()
+        user_subnet_uuid = None
+        for ipam_ref in ipam_refs:
+            found, user_subnet_uuid = _get_ipam_subnet_uuid(ipam_ref,
+                user_ipam_obj)
+            if found:
+                break
+
+        # Get subnet uuid of flat subnet ipam in the virtual-network.
+        flat_subnet_uuid = None
+        for ipam_ref in ipam_refs:
+            found, flat_subnet_uuid = _get_ipam_subnet_uuid(ipam_ref,
+                flat_ipam_obj)
+            if found:
+                break
+
+        # Create a Floating-ip-pool that points to the user-defined subnet id.
+        # Verify, floating-ip-pool create succeeds.
+        fip_subnets = FloatingIpPoolSubnetType(subnet_uuid=[user_subnet_uuid])
+        fip_pool_obj = FloatingIpPool(
+            'user-fip-pool-%s' %(self.id()), parent_obj=vn_obj,
+            floating_ip_pool_subnets = fip_subnets)
+        self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+        # Create floating-ip and verify it is from the user-defined subnet.
+        fip_obj = FloatingIp('user-fip-%s' %(self.id()), fip_pool_obj)
+        fip_obj.add_project(proj_obj)
+        self._vnc_lib.floating_ip_create(fip_obj)
+        fip_obj = self._vnc_lib.floating_ip_read(id=fip_obj.uuid)
+        fip_addr = fip_obj.get_floating_ip_address()
+        if ipaddress.ip_address(fip_addr) not in \
+            ipaddress.ip_network(u'10.1.1.0/24'):
+            raise Exception("Floating-ip not allocated from requested subnet")
+
+        # Create a Floating-ip-pool that points to the flat subnet id.
+        # Verify, floating-ip-pool create succeeds.
+        fip_subnets = FloatingIpPoolSubnetType(subnet_uuid =[flat_subnet_uuid])
+        fip_pool_obj = FloatingIpPool(
+            'flat-fip-pool-%s' %(self.id()), parent_obj=vn_obj,
+            floating_ip_pool_subnets = fip_subnets)
+        self._vnc_lib.floating_ip_pool_create(fip_pool_obj)
+
+        # Create floating-ip and verify it is from the flat subnet.
+        fip_obj = FloatingIp('flat-fip-%s' %(self.id()), fip_pool_obj)
+        fip_obj.add_project(proj_obj)
+        self._vnc_lib.floating_ip_create(fip_obj)
+        fip_obj = self._vnc_lib.floating_ip_read(id=fip_obj.uuid)
+        fip_addr = fip_obj.get_floating_ip_address()
+        if ipaddress.ip_address(fip_addr) not in \
+            ipaddress.ip_network(u'11.1.1.0/24'):
+            raise Exception("Floating-ip not allocated from requested subnet")
+
+    # end test_floating_ip_alloc
 
 #end class TestIpAlloc
 

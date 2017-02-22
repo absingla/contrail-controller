@@ -56,6 +56,7 @@ class VmInterface : public Interface {
 public:
     static const uint32_t kInvalidVlanId = 0xFFFF;
     static const uint32_t kInvalidPmdId = 0xFFFF;
+    static const uint32_t kInvalidIsid = 0xFFFFFF;
 
     enum Configurer {
         INSTANCE_MSG,
@@ -93,6 +94,17 @@ public:
         SRIOV
     };
 
+    // Interface uses different type of labels. Enumeration of different
+    // types is given below
+    enum LabelType {
+        LABEL_TYPE_INVALID = 0,
+        LABEL_TYPE_L2,
+        LABEL_TYPE_L3,
+        LABEL_TYPE_AAP,
+        LABEL_TYPE_SERVICE_VLAN,
+        LABEL_TYPE_MAX
+    };
+
     struct ListEntry {
         ListEntry() : installed_(false), del_pending_(false) { }
         ListEntry(bool installed, bool del_pending) :
@@ -111,6 +123,13 @@ public:
     // A unified structure for storing FloatingIp information for both
     // operational and config elements
     struct FloatingIp : public ListEntry {
+        enum Direction {
+            DIRECTION_BOTH,
+            DIRECTION_INGRESS,
+            DIRECTION_EGRESS,
+            DIRECTION_INVALID
+        };
+
         struct PortMapKey {
             uint8_t protocol_;
             uint16_t port_;
@@ -132,7 +151,7 @@ public:
         FloatingIp(const FloatingIp &rhs);
         FloatingIp(const IpAddress &addr, const std::string &vrf,
                    const boost::uuids::uuid &vn_uuid, const IpAddress &ip,
-                   bool port_mappng_enabled,
+                   Direction direction, bool port_mappng_enabled,
                    const PortMap &src_port_map, const PortMap &dst_port_map);
         virtual ~FloatingIp();
 
@@ -153,6 +172,20 @@ public:
         uint32_t PortMappingSize() const;
         int32_t GetSrcPortMap(uint8_t protocol, uint16_t src_port) const;
         int32_t GetDstPortMap(uint8_t protocol, uint16_t dst_port) const;
+        Direction direction() const { return direction_; }
+        // direction_ is based on packet direction. Allow DNAT if direction is
+        // "both or ingress"
+        bool AllowDNat() const {
+            return (direction_ == DIRECTION_BOTH ||
+                    direction_ == DIRECTION_INGRESS);
+        }
+        // direction_ is based on packet direction. Allow SNAT if direction is
+        // "both or egress"
+        bool AllowSNat() const {
+            return (direction_ == DIRECTION_BOTH ||
+                    direction_ == DIRECTION_EGRESS);
+        }
+
 
         IpAddress floating_ip_;
         mutable VnEntryRef vn_;
@@ -163,6 +196,7 @@ public:
         mutable IpAddress fixed_ip_;
         mutable bool force_l3_update_;
         mutable bool force_l2_update_;
+        mutable Direction direction_;
         mutable bool port_map_enabled_;
         mutable PortMap src_port_map_;
         mutable PortMap dst_port_map_;
@@ -500,6 +534,44 @@ public:
         FatFlowEntrySet list_;
     };
 
+    struct BridgeDomain : ListEntry {
+        BridgeDomain(): uuid_(nil_uuid()), vlan_tag_(0),
+            bridge_domain_(NULL) {}
+        BridgeDomain(const BridgeDomain &rhs):
+            uuid_(rhs.uuid_), vlan_tag_(rhs.vlan_tag_),
+            bridge_domain_(rhs.bridge_domain_) {}
+        BridgeDomain(const boost::uuids::uuid &uuid, uint32_t vlan_tag):
+            uuid_(uuid), vlan_tag_(vlan_tag), bridge_domain_(NULL) {}
+        virtual ~BridgeDomain(){}
+        bool operator == (const BridgeDomain &rhs) const {
+            return (uuid_ == rhs.uuid_);
+        }
+
+        bool operator() (const BridgeDomain &lhs,
+                         const BridgeDomain &rhs) const {
+            return lhs.IsLess(&rhs);
+        }
+
+        bool IsLess(const BridgeDomain *rhs) const {
+            return uuid_ < rhs->uuid_;
+        }
+
+        boost::uuids::uuid uuid_;
+        uint32_t vlan_tag_;
+        mutable BridgeDomainConstRef bridge_domain_;
+    };
+    typedef std::set<BridgeDomain, BridgeDomain> BridgeDomainEntrySet;
+
+    struct BridgeDomainList {
+        BridgeDomainList(): list_() {}
+        ~BridgeDomainList() {}
+        void Insert(const BridgeDomain *rhs);
+        void Update(const BridgeDomain *lhs, const BridgeDomain *rhs);
+        void Remove(BridgeDomainEntrySet::iterator &it);
+
+        BridgeDomainEntrySet list_;
+    };
+
     enum Trace {
         ADD,
         DELETE,
@@ -634,6 +706,10 @@ public:
         return fat_flow_list_;
     }
 
+    const BridgeDomainList &bridge_domain_list() const {
+        return bridge_domain_list_;
+    }
+
     bool IsFatFlow(uint8_t protocol, uint16_t port) const;
     void set_vxlan_id(int vxlan_id) { vxlan_id_ = vxlan_id; }
     void set_subnet_bcast_addr(const Ip4Address &addr) {
@@ -755,6 +831,45 @@ public:
         return l3_interface_nh_no_policy_.get();
     }
 
+    const NextHop* l2_interface_nh_no_policy() const {
+        return l2_interface_nh_no_policy_.get();
+    }
+
+    const NextHop* l2_interface_nh_policy() const {
+        return l2_interface_nh_policy_.get();
+    }
+
+    bool learning_enabled() const {
+        return learning_enabled_;
+    }
+
+    void set_learning_enabled(bool val) {
+        learning_enabled_ = val;
+    }
+
+    bool etree_leaf() const {
+        return etree_leaf_;
+    }
+
+    void set_etree_leaf(bool val) {
+        etree_leaf_ = val;
+    }
+
+    bool pbb_interface() const {
+        return pbb_interface_;
+    }
+
+    bool layer2_control_word() const {
+        return layer2_control_word_;
+    }
+
+    void set_layer2_control_word(bool layer2_control_word) {
+        layer2_control_word_ = layer2_control_word;
+    }
+
+    uint32_t GetIsid() const;
+    uint32_t GetPbbVrf() const;
+    uint32_t GetPbbLabel() const;
 private:
     friend struct VmInterfaceConfigData;
     friend struct VmInterfaceNovaData;
@@ -800,7 +915,8 @@ private:
                     const VmInterfaceConfigData *data, bool *sg_changed,
                     bool *ecmp_changed, bool *local_pref_changed,
                     bool *ecmp_load_balance_changed,
-                    bool *static_route_config_changed);
+                    bool *static_route_config_changed,
+                    bool *etree_leaf_mode_changed);
     void ApplyConfig(bool old_ipv4_active,bool old_l2_active,  bool old_policy,
                      VrfEntry *old_vrf, const Ip4Address &old_addr,
                      int old_ethernet_tag, bool old_need_linklocal_ip,
@@ -846,7 +962,7 @@ private:
     void UpdateMacVmBinding();
     void UpdateL3NextHop();
     void DeleteL3NextHop();
-    void UpdateL2NextHop();
+    void UpdateL2NextHop(bool force_update);
     void UpdateFlowKeyNextHop();
     void DeleteL2NextHop();
     void DeleteMacVmBinding(const VrfEntry *old_vrf);
@@ -894,6 +1010,8 @@ private:
     void DeleteSecurityGroup();
     void UpdateFatFlow();
     void DeleteFatFlow();
+    void UpdateBridgeDomain();
+    void DeleteBridgeDomain();
     void UpdateL2TunnelId(bool force_update, bool policy_change);
     void DeleteL2TunnelId();
     void DeleteL2InterfaceRoute(bool old_bridging, VrfEntry *old_vrf,
@@ -919,7 +1037,7 @@ private:
 
     bool UpdateIsHealthCheckActive();
     void CopyEcmpLoadBalance(EcmpLoadBalance &ecmp_load_balance);
-    void UpdateCommonNextHop();
+    void UpdateCommonNextHop(bool force_update);
     void DeleteCommonNextHop();
 
     VmEntryBackRef vm_;
@@ -980,6 +1098,7 @@ private:
     InstanceIpList instance_ipv4_list_;
     InstanceIpList instance_ipv6_list_;
     FatFlowList fat_flow_list_;
+    BridgeDomainList bridge_domain_list_;
 
     // Peer for interface routes
     std::auto_ptr<LocalVmPortPeer> peer_;
@@ -1006,6 +1125,10 @@ private:
     NextHopRef l3_interface_nh_no_policy_;
     NextHopRef l2_interface_nh_no_policy_;
     bool is_vn_qos_config_;
+    bool learning_enabled_;
+    bool etree_leaf_;
+    bool pbb_interface_;
+    bool layer2_control_word_;
     DISALLOW_COPY_AND_ASSIGN(VmInterface);
 };
 
@@ -1154,6 +1277,7 @@ struct VmInterfaceConfigData : public VmInterfaceData {
     VmInterface::InstanceIpList instance_ipv4_list_;
     VmInterface::InstanceIpList instance_ipv6_list_;
     VmInterface::FatFlowList fat_flow_list_;
+    VmInterface::BridgeDomainList bridge_domain_list_;
     VmInterface::DeviceType device_type_;
     VmInterface::VmiType vmi_type_;
     // Parent physical-interface. Used in VMWare/ ToR logical-interface
@@ -1172,6 +1296,7 @@ struct VmInterfaceConfigData : public VmInterfaceData {
     Ip6Address service_ip6_;
     bool service_ip_ecmp6_;
     boost::uuids::uuid qos_config_uuid_;
+    bool learning_enabled_;
 };
 
 // Definition for structures when request queued from Nova

@@ -31,6 +31,8 @@ import base64
 import socket
 import struct
 import signal
+import random
+import hashlib
 import errno
 import copy
 import datetime
@@ -65,7 +67,6 @@ from sandesh.nodeinfo.process_info.ttypes import *
 from sandesh.discovery.ttypes import CollectorTrace
 import discoveryclient.client as discovery_client
 from opserver_util import OpServerUtils
-from opserver_util import ServicePoller
 from opserver_util import AnalyticsDiscovery
 from sandesh_req_impl import OpserverSandeshReqImpl
 from sandesh.analytics_database.ttypes import *
@@ -80,6 +81,7 @@ from partition_handler import PartInfo, UveStreamer, UveCacheProcessor
 from functools import wraps
 from vnc_cfg_api_client import VncCfgApiClient
 from opserver_local import LocalApp
+from opserver_util import AnalyticsDiscovery
 
 _ERRORS = {
     errno.EBADMSG: 400,
@@ -137,7 +139,7 @@ def redis_query_start(host, port, redis_password, qid, inp, columns):
     if columns is not None:
         for col in columns:
             m = TableSchema(name = col.name, datatype = col.datatype, index = col.index, suffixes = col.suffixes)
-            col_list.append(m.__dict__)
+            col_list.append(m._asdict())
     query_metadata = {}
     query_metadata['enqueue_time'] = OpServerUtils.utc_timestamp_usec()
     redish.hset("QUERY:" + qid, 'query_metadata', json.dumps(query_metadata))
@@ -326,12 +328,6 @@ class OpStateServer(object):
             try:
                 redis_inst.publish('analytics', redis_msg)
             except redis.exceptions.ConnectionError:
-                # Update connection info
-                ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
-                    name = 'UVE', status = ConnectionStatus.DOWN,
-                    message = 'Connection Error',
-                    server_addrs = ['%s:%d' % (redis_server[0], \
-                        redis_server[1])])
                 self._logger.error('No Connection to Redis [%s:%d].'
                                    'Failed to publish message.' \
                                    % (redis_server[0], redis_server[1]))
@@ -411,7 +407,7 @@ class OpServer(object):
                 (self._args.disc_server_ip,
                 self._args.disc_server_port, str(data)))
             self.disc.publish(ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME, data)
-        if self._ad:
+        if self._ad is not None:
             self._ad.publish(json.dumps(data))
     # end disc_publish
 
@@ -477,12 +473,18 @@ class OpServer(object):
                             self._args.disc_server_port,
                             ModuleNames[Module.OPSERVER])
 
+        self.random_collectors = self._args.collectors
+        if self._args.collectors:
+            self._chksum = hashlib.md5("".join(self._args.collectors)).hexdigest()
+            self.random_collectors = random.sample(self._args.collectors, \
+                                                   len(self._args.collectors))
         self._sandesh.init_generator(
             self._moduleid, self._hostname, self._node_type_name,
-            self._instance_id, self._args.collectors, 'opserver_context',
+            self._instance_id, self.random_collectors, 'opserver_context',
             int(self._args.http_server_port), ['opserver.sandesh'],
             self.disc, logger_class=self._args.logger_class,
-            logger_config_file=self._args.logging_conf)
+            logger_config_file=self._args.logging_conf,
+            config=self._args.sandesh_config)
         self._sandesh.set_logging_params(
             enable_local_log=self._args.log_local,
             category=self._args.log_category,
@@ -539,12 +541,6 @@ class OpServer(object):
         else:
             self._logger.error("Initializing UVE Cache")
 
-        self._uve_server = UVEServer(('127.0.0.1',
-                                  self._args.redis_server_port),
-                                 self._logger,
-                                 self._args.redis_password,
-                                 self._uvedbstream, self._usecache)
-
         self._LEVEL_LIST = []
         for k in SandeshLevel._VALUES_TO_NAMES:
             if (k < SandeshLevel.UT_START):
@@ -565,44 +561,53 @@ class OpServer(object):
                 name = 'UVE-Aggregation', status = ConnectionStatus.UP)
             self._uvepartitions_state = ConnectionStatus.UP
 
+        self.redis_uve_list = []
+        if type(self._args.redis_uve_list) is str:
+            self._args.redis_uve_list = self._args.redis_uve_list.split()
+        ad_freq = 10
+        us_freq = 5
+        is_local = True 
+        for redis_uve in self._args.redis_uve_list:
+            redis_ip_port = redis_uve.split(':')
+            if redis_ip_port[0] != "127.0.0.1":
+                is_local = False
+            redis_elem = (redis_ip_port[0], int(redis_ip_port[1]))
+            self.redis_uve_list.append(redis_elem)
+        if is_local:
+            ad_freq = 2
+            us_freq = 2 
+
         if self._args.zk_list:
             self._ad = AnalyticsDiscovery(self._logger,
                 ','.join(self._args.zk_list),
                 ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME,
                 self._hostname + "-" + self._instance_id,
-                # TODO: Use this callback instead of  DiscoveryClient
-                {ALARM_GENERATOR_SERVICE_NAME:None},
-                self._args.zk_prefix)
-            self._ad.start()
+                {ALARM_GENERATOR_SERVICE_NAME:self.disc_agp},
+                self._args.zk_prefix,
+                ad_freq)
         else:
             self._ad = None
+            if self._args.partitions != 0:
+                # Assume all partitions are on the 1st redis server
+                # and there is only one redis server
+                redis_ip_port = self._args.redis_uve_list[0].split(':')
+                assert(len(self._args.redis_uve_list) == 1)
+                for part in range(0,self._args.partitions):
+                    pi = PartInfo(ip_address = redis_ip_port[0],
+                                  acq_time = UTCTimestampUsec(),
+                                  instance_id = "0",
+                                  port = int(redis_ip_port[1]))
+                    self.agp[part] = pi
 
         self.disc_publish()
 
-        if not self._args.disc_server_ip:
-            for part in range(0,self._args.partitions):
-                pi = PartInfo(ip_address = self._args.host_ip,
-                              acq_time = UTCTimestampUsec(),
-                              instance_id = "0",
-                              port = self._args.redis_server_port)
-                self.agp[part] = pi
-            self.redis_uve_list = []
-            try:
-                if type(self._args.redis_uve_list) is str:
-                    self._args.redis_uve_list = self._args.redis_uve_list.split()
-                for redis_uve in self._args.redis_uve_list:
-                    redis_ip_port = redis_uve.split(':')
-                    redis_elem = (redis_ip_port[0], int(redis_ip_port[1]),0)
-                    self.redis_uve_list.append(redis_elem)
-            except Exception as e:
-                self._logger.error('Failed to parse redis_uve_list: %s' % e)
-            else:
-                self._state_server.update_redis_list(self.redis_uve_list)
-                self._uve_server.update_redis_uve_list(self.redis_uve_list)
-            ConnectionState.update(conn_type = ConnectionType.UVEPARTITIONS,
-                name = 'UVE-Aggregation', status = ConnectionStatus.UP,
-                message = 'Partitions:%d' % self._args.partitions)
-            self._uvepartitions_state = ConnectionStatus.UP
+
+        self._uve_server = UVEServer(self.redis_uve_list,
+                                 self._logger,
+                                 self._args.redis_password,
+                                 self._uvedbstream, self._usecache,
+                                 freq = us_freq)
+        self._state_server.update_redis_list(self.redis_uve_list)
 
         self._analytics_links = ['uves', 'uve-types', 'tables',
             'queries', 'alarms', 'uve-stream', 'alarm-stream']
@@ -639,7 +644,7 @@ class OpServer(object):
             stat_tables.append(new_table)
 
         # read all the _stats_tables.json files for remaining stat table schema
-        topdir = '/usr/share/doc/contrail-docs/html/messages/'
+        topdir = os.path.dirname(__file__) + "/stats_schema/"
         extn = '_stats_tables.json'
         stat_schema_files = []
         for dirpath, dirnames, files in os.walk(topdir):
@@ -729,7 +734,8 @@ class OpServer(object):
                                          self._args.redis_query_port,
                                          self._args.redis_password,
                                          self._args.cassandra_user,
-                                         self._args.cassandra_password)
+                                         self._args.cassandra_password,
+                                         self._args.cluster_id)
 
         bottle.route('/', 'GET', self.homepage_http_get)
         bottle.route('/analytics', 'GET', self.analytics_http_get)
@@ -784,7 +790,6 @@ class OpServer(object):
     def _parse_args(self, args_str=' '.join(sys.argv[1:])):
         '''
         Eg. python opserver.py --host_ip 127.0.0.1
-                               --redis_server_port 6379
                                --redis_query_port 6379
                                --redis_password
                                --collectors 127.0.0.1:8086
@@ -803,6 +808,7 @@ class OpServer(object):
                                --zk_list 127.0.0.1:2181
                                --redis_uve_list 127.0.0.1:6379
                                --auto_db_purge
+                               --zk_list 127.0.0.1:2181
         '''
         # Source any specified config/ini file
         # Turn off help, so we print all options in response to -h
@@ -826,7 +832,6 @@ class OpServer(object):
             'use_syslog'         : False,
             'syslog_facility'    : Sandesh._DEFAULT_SYSLOG_FACILITY,
             'dup'                : False,
-            'redis_uve_list'     : ['127.0.0.1:6379'],
             'auto_db_purge'      : True,
             'db_purge_threshold' : 70,
             'db_purge_level'     : 40,
@@ -848,13 +853,16 @@ class OpServer(object):
             'api_server_use_ssl': False,
         }
         redis_opts = {
-            'redis_server_port'  : 6379,
             'redis_query_port'   : 6379,
             'redis_password'       : None,
+            'redis_uve_list'     : ['127.0.0.1:6379'],
         }
         disc_opts = {
             'disc_server_ip'     : None,
             'disc_server_port'   : 5998,
+        }
+        database_opts = {
+            'cluster_id'     : '',
         }
         cassandra_opts = {
             'cassandra_user'     : None,
@@ -867,6 +875,13 @@ class OpServer(object):
             'admin_user': 'admin',
             'admin_password': 'contrail123',
             'admin_tenant_name': 'default-domain'
+        }
+        sandesh_opts = {
+            'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+            'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+            'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+            'sandesh_ssl_enable': False,
+            'introspect_ssl_enable': False
         }
 
         # read contrail-analytics-api own conf file
@@ -884,6 +899,10 @@ class OpServer(object):
                 cassandra_opts.update(dict(config.items('CASSANDRA')))
             if 'KEYSTONE' in config.sections():
                 keystone_opts.update(dict(config.items('KEYSTONE')))
+            if 'SANDESH' in config.sections():
+                sandesh_opts.update(dict(config.items('SANDESH')))
+            if 'DATABASE' in config.sections():
+                database_opts.update(dict(config.items('DATABASE')))
 
         # Override with CLI options
         # Don't surpress add_help here so it will handle -h
@@ -897,8 +916,9 @@ class OpServer(object):
         defaults.update(redis_opts)
         defaults.update(disc_opts)
         defaults.update(cassandra_opts)
+        defaults.update(database_opts)
         defaults.update(keystone_opts)
-        defaults.update()
+        defaults.update(sandesh_opts)
         parser.set_defaults(**defaults)
 
         parser.add_argument("--host_ip",
@@ -961,6 +981,8 @@ class OpServer(object):
         parser.add_argument(
             "--logger_class",
             help=("Optional external logger class, default: None"))
+        parser.add_argument("--cluster_id",
+            help="Analytics Cluster Id")
         parser.add_argument("--cassandra_user",
             help="Cassandra user name")
         parser.add_argument("--cassandra_password",
@@ -996,6 +1018,16 @@ class OpServer(object):
             help="Port with local auth for admin access")
         parser.add_argument("--api_server_use_ssl",
             help="Use SSL to connect with API server")
+        parser.add_argument("--sandesh_keyfile",
+            help="Sandesh ssl private key")
+        parser.add_argument("--sandesh_certfile",
+            help="Sandesh ssl certificate")
+        parser.add_argument("--sandesh_ca_cert",
+            help="Sandesh CA ssl certificate")
+        parser.add_argument("--sandesh_ssl_enable", action="store_true",
+            help="Enable ssl for sandesh connection")
+        parser.add_argument("--introspect_ssl_enable", action="store_true",
+            help="Enable ssl for introspect connection")
         self._args = parser.parse_args(remaining_argv)
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
@@ -1024,6 +1056,10 @@ class OpServer(object):
         auth_conf_info['api_server_ip'] = api_server_info[0]
         auth_conf_info['api_server_port'] = int(api_server_info[1])
         self._args.auth_conf_info = auth_conf_info
+        self._args.conf_file = args.conf_file
+        self._args.sandesh_config = SandeshConfig(self._args.sandesh_keyfile,
+            self._args.sandesh_certfile, self._args.sandesh_ca_cert,
+            self._args.sandesh_ssl_enable, self._args.introspect_ssl_enable)
     # end _parse_args
 
     def get_args(self):
@@ -1674,6 +1710,7 @@ class OpServer(object):
 
         stats = AnalyticsApiStatistics(self._sandesh, table)
 
+      
         uve_name = uve_tbl + ':' + name
         if name.find('*') != -1:
             flat = True
@@ -2342,10 +2379,7 @@ class OpServer(object):
         if ((column == MODULE) or (column == SOURCE)):
             sources = []
             moduleids = []
-            if self.disc:
-                ulist = self._uve_server._redis_uve_map
-            else:
-                ulist = self.redis_uve_list
+            ulist = self.redis_uve_list
             
             for redis_uve in ulist:
                 redish = redis.StrictRedis(
@@ -2429,29 +2463,16 @@ class OpServer(object):
             sys.exit()
     # end start_webserver
 
-    def disc_cb(self, clist):
-        '''
-        Analytics node may be brought up/down any time. For UVE aggregation,
-        Opserver needs to know the list of all Analytics nodes (redis-uves).
-        Periodically poll the Collector list [in lieu of 
-        redi-uve nodes] from the discovery. 
-        '''
-        newlist = []
-        for elem in clist:
-            ipaddr = elem["ip-address"]
-            cpid = 0
-            if "pid" in elem:
-                cpid = int(elem["pid"])
-            newlist.append((ipaddr, self._args.redis_server_port, cpid))
-        self._uve_server.update_redis_uve_list(newlist)
-        self._state_server.update_redis_list(newlist)
-
     def disc_agp(self, clist):
         new_agp = {}
         for elem in clist:
             instance_id = elem['instance-id']
             port = int(elem['redis-port']) 
             ip_address = elem['ip-address']
+            # If AlarmGenerator sends partitions as NULL, its
+            # unable to provide service
+            if not elem['partitions']:
+                continue
             parts = json.loads(elem['partitions'])
             for partstr,acq_time in parts.iteritems():
                 partno = int(partstr)
@@ -2489,18 +2510,8 @@ class OpServer(object):
             gevent.spawn(self.start_uve_server),
             ]
 
-        if self.disc:
-            sp = ServicePoller(self._logger, CollectorTrace, self.disc,\
-                               COLLECTOR_DISCOVERY_SERVICE_NAME, \
-                               self.disc_cb, self._sandesh)
-            sp.start()
-            self.gevs.append(sp)
-
-            sp2 = ServicePoller(self._logger, CollectorTrace, \
-                                self.disc, ALARM_GENERATOR_SERVICE_NAME, \
-                                self.disc_agp, self._sandesh)
-            sp2.start()
-            self.gevs.append(sp2)
+        if self._ad is not None:
+            self._ad.start()
 
         if self._vnc_api_client:
             self.gevs.append(gevent.spawn(self._vnc_api_client.connect))
@@ -2523,6 +2534,8 @@ class OpServer(object):
         self._sandesh._client._connection.set_admin_state(down=True)
         self._sandesh.uninit()
         self.stop_webserver()
+        if self._ad is not None:
+            self._ad.kill()
         l = len(self.gevs)
         for idx in range(0,l):
             self._logger.error('killing %d of %d' % (idx+1, l))
@@ -2536,9 +2549,31 @@ class OpServer(object):
         self.stop()
         exit()
 
+    def sighup_handler(self):
+        if self._args.conf_file:
+            config = ConfigParser.SafeConfigParser()
+            config.read(self._args.conf_file)
+            if 'DEFAULTS' in config.sections():
+                try:
+                    collectors = config.get('DEFAULTS', 'collectors')
+                    if type(collectors) is str:
+                        collectors = collectors.split()
+                        new_chksum = hashlib.md5("".join(collectors)).hexdigest()
+                        if new_chksum != self._chksum:
+                            self._chksum = new_chksum
+                            random_collectors = random.sample(collectors, len(collectors))
+                            self._sandesh.reconfig_collectors(random_collectors)
+                except ConfigParser.NoOptionError as e:
+                    pass
+    # end sighup_handler
+
 def main(args_str=' '.join(sys.argv[1:])):
     opserver = OpServer(args_str)
     gevent.hub.signal(signal.SIGTERM, opserver.sigterm_handler)
+    """ @sighup
+    SIGHUP handler to indicate configuration changes
+    """
+    gevent.hub.signal(signal.SIGHUP, opserver.sighup_handler)
     gv = gevent.getcurrent()
     gv._main_obj = opserver
     opserver.run()

@@ -20,6 +20,7 @@
 #include "schema/vnc_cfg_types.h"
 
 using std::auto_ptr;
+using std::find;
 using std::make_pair;
 using std::pair;
 using std::set;
@@ -161,11 +162,22 @@ static bool AddressFamilyIsValid(BgpNeighborConfig *neighbor,
 // that represent each family with a simple string.
 //
 static void BuildFamilyAttributesList(BgpNeighborConfig *neighbor,
-    const BgpNeighborConfig::AddressFamilyList &family_list) {
+    const BgpNeighborConfig::AddressFamilyList &family_list,
+    const vector<string> &remote_family_list) {
     BgpNeighborConfig::FamilyAttributesList family_attributes_list;
     BOOST_FOREACH(const string &family, family_list) {
+        // Skip families that are not valid/supported for the neighbor.
         if (!AddressFamilyIsValid(neighbor, family))
             continue;
+
+        // Skip families that are not configured on remote bgp-router.
+        if (!remote_family_list.empty()) {
+            vector<string>::const_iterator it = find(
+                remote_family_list.begin(), remote_family_list.end(), family);
+            if (it == remote_family_list.end())
+                continue;
+        }
+
         BgpFamilyAttributesConfig family_attributes(family);
         family_attributes_list.push_back(family_attributes);
     }
@@ -343,19 +355,20 @@ static BgpNeighborConfig *MakeBgpNeighborConfig(
     const BgpIfmapProtocolConfig *master_protocol =
         master_instance->protocol_config();
     if (master_protocol && master_protocol->bgp_router()) {
-        const autogen::BgpRouterParams &params =
+        const autogen::BgpRouterParams &master_params =
             master_protocol->router_params();
-        if (params.admin_down) {
+        if (master_params.admin_down) {
             neighbor->set_admin_down(true);
         }
-        Ip4Address localid = Ip4Address::from_string(params.identifier, err);
+        Ip4Address localid =
+            Ip4Address::from_string(master_params.identifier, err);
         if (err == 0) {
             neighbor->set_local_identifier(IpAddressToBgpIdentifier(localid));
         }
-        if (params.local_autonomous_system) {
-            neighbor->set_local_as(params.local_autonomous_system);
+        if (master_params.local_autonomous_system) {
+            neighbor->set_local_as(master_params.local_autonomous_system);
         } else {
-            neighbor->set_local_as(params.autonomous_system);
+            neighbor->set_local_as(master_params.autonomous_system);
         }
         if (instance != master_instance) {
             neighbor->set_passive(true);
@@ -366,18 +379,23 @@ static BgpNeighborConfig *MakeBgpNeighborConfig(
     // Note that there's no instance protocol config for non-master instances.
     const BgpIfmapProtocolConfig *protocol = instance->protocol_config();
     if (protocol && protocol->bgp_router()) {
-        const autogen::BgpRouterParams &params = protocol->router_params();
+        const autogen::BgpRouterParams &protocol_params =
+            protocol->router_params();
         if (neighbor->family_attributes_list().empty()) {
-            BuildFamilyAttributesList(neighbor, params.address_families.family);
+            BuildFamilyAttributesList(neighbor,
+                protocol_params.address_families.family,
+                params.address_families.family);
         }
         if (neighbor->auth_data().Empty()) {
-            const autogen::BgpRouterParams &lp = local_router->parameters();
-            BuildKeyChain(neighbor, lp.auth_data);
+            const autogen::BgpRouterParams &local_params =
+                local_router->parameters();
+            BuildKeyChain(neighbor, local_params.auth_data);
         }
     }
 
     if (neighbor->family_attributes_list().empty()) {
-        BuildFamilyAttributesList(neighbor, default_addr_family_list);
+        BuildFamilyAttributesList(neighbor, default_addr_family_list,
+            params.address_families.family);
     }
 
     return neighbor;
@@ -856,6 +874,20 @@ static bool GetVirtualNetworkAllowTransit(DBGraph *graph, IFMapNode *node) {
     return false;
 }
 
+
+//
+// Check if a virtual-network has pbb-evpn enabled.
+// The input IFMapNode represents the virtual-network.
+//
+static bool GetVirtualNetworkPbbEvpnEnable(DBGraph *graph, IFMapNode *node) {
+    const autogen::VirtualNetwork *vn =
+        static_cast<autogen::VirtualNetwork *>(node->GetObject());
+    if (vn && vn->IsPropertySet(autogen::VirtualNetwork::PBB_EVPN_ENABLE))
+        return vn->pbb_evpn_enable();
+    return false;
+}
+
+
 //
 // Get the vxlan id for a virtual-network.  The input IFMapNode represents
 // the virtual-network.
@@ -896,14 +928,28 @@ static void SetStaticRouteConfig(BgpInstanceConfig *rti,
             if (ec != 0)
                 continue;
             item.address = address;
-            inet_list.push_back(item);
+            std::pair<BgpInstanceConfig::StaticRouteList::iterator, bool> ret =
+                inet_list.insert(item);
+            if (!ret.second) {
+                BGP_LOG_WARNING_STR(BgpConfig, BGP_LOG_FLAG_ALL,
+                    "Duplicate static route prefix " << route.prefix <<
+                    " with nexthop " << route.next_hop <<
+                    " for routing instance " << rti->name());
+            }
         } else {
             Ip6Address address;
             ec = Inet6SubnetParse(route.prefix, &address, &item.prefix_length);
             if (ec != 0)
                 continue;
             item.address = address;
-            inet6_list.push_back(item);
+            std::pair<BgpInstanceConfig::StaticRouteList::iterator, bool> ret =
+                inet6_list.insert(item);
+            if (!ret.second) {
+                BGP_LOG_WARNING_STR(BgpConfig, BGP_LOG_FLAG_ALL,
+                    "Duplicate static route prefix " << route.prefix <<
+                    " with nexthop " << route.next_hop <<
+                    " for routing instance " << rti->name());
+            }
         }
     }
     rti->swap_static_routes(Address::INET, &inet_list);
@@ -1074,6 +1120,8 @@ void BgpIfmapInstanceConfig::Update(BgpIfmapConfigManager *manager,
             data_.set_virtual_network_allow_transit(
                 GetVirtualNetworkAllowTransit(graph, adj));
             data_.set_vxlan_id(GetVirtualNetworkVxlanId(graph, adj));
+            data_.set_virtual_network_pbb_evpn_enable(
+                GetVirtualNetworkPbbEvpnEnable(graph, adj));
         }
     }
 

@@ -67,6 +67,8 @@ void Options::Initialize(EventManager &evm,
     uint16_t default_collector_port = ContrailPorts::CollectorPort();
     uint16_t default_collector_protobuf_port =
         ContrailPorts::CollectorProtobufPort();
+    uint16_t default_collector_structured_syslog_port =
+        ContrailPorts::CollectorStructuredSyslogPort();
     uint16_t default_partitions = 15;
     uint16_t default_http_server_port = ContrailPorts::HttpPortCollector();
     uint16_t default_discovery_port = ContrailPorts::DiscoveryServerPort();
@@ -107,8 +109,12 @@ void Options::Initialize(EventManager &evm,
               "Cassandra password")
         ("CASSANDRA.compaction_strategy",
             opt::value<string>()->default_value(
-                GenDb::g_gendb_constants.LEVELED_COMPACTION_STRATEGY),
-            "Cassandra compaction strategy");;
+                GenDb::g_gendb_constants.SIZE_TIERED_COMPACTION_STRATEGY),
+            "Cassandra compaction strategy")
+        ("CASSANDRA.flow_tables.compaction_strategy",
+            opt::value<string>()->default_value(
+                GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY),
+            "Cassandra compaction strategy for flow tables");
 
     // Command line and config file options.
     opt::options_description config("Configuration options");
@@ -198,6 +204,11 @@ void Options::Initialize(EventManager &evm,
                 default_low_watermark2_message_severity_level),
             "Low Watermark 2 Message severity level")
 
+        ("COLLECTOR.structured_syslog_port",
+            opt::value<uint16_t>()->default_value(
+                default_collector_structured_syslog_port),
+         "Listener port of Structured Syslog collector server")
+
         ("DEFAULT.analytics_data_ttl",
              opt::value<uint64_t>()->default_value(g_viz_constants.TtlValuesDefault.find(TtlType::GLOBAL_TTL)->second),
              "global TTL(hours) for analytics data")
@@ -256,8 +267,6 @@ void Options::Initialize(EventManager &evm,
              "Enable logging to syslog")
         ("DEFAULT.syslog_facility", opt::value<string>()->default_value("LOG_LOCAL0"),
              "Syslog facility to receive log lines")
-        ("DEFAULT.kafka_prefix", opt::value<string>()->default_value(""),
-             "System Prefix for Kafka")
         ("DEFAULT.syslog_port", opt::value<int>()->default_value(-1),
              "Syslog listener port (< 0 will disable the syslog)")
         ("DEFAULT.sflow_port", opt::value<int>()->default_value(6343),
@@ -273,14 +282,16 @@ void Options::Initialize(EventManager &evm,
         ("DEFAULT.disable_flow_collection",
             opt::bool_switch(&disable_flow_collection_),
             "Disable flow message collection")
+        ("DATABASE.cluster_id", opt::value<string>()->default_value(""),
+             "Analytics Cluster Id")
         ("DATABASE.disable_all_writes",
-            opt::bool_switch(&disable_all_db_writes_),
+            opt::bool_switch(&cassandra_options_.disable_all_db_writes_),
             "Disable all writes to the database")
         ("DATABASE.disable_statistics_writes",
-            opt::bool_switch(&disable_db_stats_writes_),
+            opt::bool_switch(&cassandra_options_.disable_db_stats_writes_),
             "Disable statistics writes to the database")
         ("DATABASE.disable_message_writes",
-            opt::bool_switch(&disable_db_messages_writes_),
+            opt::bool_switch(&cassandra_options_.disable_db_messages_writes_),
             "Disable message writes to the database")
         ("DATABASE.enable_message_keyword_writes",
             opt::bool_switch(&enable_db_messages_keyword_writes_)->
@@ -290,7 +301,7 @@ void Options::Initialize(EventManager &evm,
         ("DISCOVERY.port", opt::value<uint16_t>()->default_value(
                                                        default_discovery_port),
              "Port of Discovery Server")
-        ("DISCOVERY.server", opt::value<string>()->default_value("127.0.0.1"),
+        ("DISCOVERY.server", opt::value<string>()->default_value(""),
              "IP address of Discovery Server")
 
         ("REDIS.port",
@@ -325,6 +336,22 @@ void Options::Initialize(EventManager &evm,
                     "/etc/contrail/ks-key"), "Keystone private key")
         ("KEYSTONE.cafile", opt::value<string>()->default_value(
                     "/etc/contrail/ks-ca"), "Keystone CA chain")
+
+        ("SANDESH.sandesh_keyfile", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/private/server-privkey.pem"),
+            "Sandesh ssl private key")
+        ("SANDESH.sandesh_certfile", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/certs/server.pem"),
+            "Sandesh ssl certificate")
+        ("SANDESH.sandesh_ca_cert", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/certs/ca-cert.pem"),
+            "Sandesh CA ssl certificate")
+        ("SANDESH.sandesh_ssl_enable",
+             opt::bool_switch(&sandesh_config_.sandesh_ssl_enable),
+             "Enable ssl for sandesh connection")
+        ("SANDESH.introspect_ssl_enable",
+             opt::bool_switch(&sandesh_config_.introspect_ssl_enable),
+             "Enable ssl for introspect connection")
         ;
 
     config_file_options_.add(config).add(cassandra_config);
@@ -387,6 +414,25 @@ void Options::GetOptValueImpl(
     }
 }
 
+static bool ValidateCompactionStrategyOption(
+    const std::string &compaction_strategy,
+    const std::string &option) {
+    if (!((compaction_strategy ==
+        GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY) ||
+        (compaction_strategy ==
+        GenDb::g_gendb_constants.LEVELED_COMPACTION_STRATEGY) ||
+        (compaction_strategy ==
+        GenDb::g_gendb_constants.SIZE_TIERED_COMPACTION_STRATEGY))) {
+        cout << "Invalid " << option <<  ", please select one of [" <<
+            GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY << ", " <<
+            GenDb::g_gendb_constants.LEVELED_COMPACTION_STRATEGY << ", " <<
+            GenDb::g_gendb_constants.SIZE_TIERED_COMPACTION_STRATEGY << "]" <<
+            endl;
+        return false;
+    }
+    return true;
+}
+
 // Process command line options. They can come from a conf file as well. Options
 // from command line always overrides those that come from the config file.
 void Options::Process(int argc, char *argv[],
@@ -401,7 +447,7 @@ void Options::Process(int argc, char *argv[],
     for(std::vector<int>::size_type i = 0; i != config_file_.size(); i++) {
         config_file_in.open(config_file_[i].c_str());
         if (config_file_in.good()) {
-           opt::store(opt::parse_config_file(config_file_in, config_file_options_),
+           opt::store(opt::parse_config_file(config_file_in, config_file_options_, true),
                    var_map);
         }
         config_file_in.close();
@@ -486,6 +532,13 @@ void Options::Process(int argc, char *argv[],
         var_map, db_write_options_.low_watermark2_message_severity_level_,
         "DATABASE.low_watermark2.message_severity_level");
 
+    if (GetOptValueIfNotDefaulted<uint16_t>(var_map, collector_structured_syslog_port_,
+            "COLLECTOR.structured_syslog_port")) {
+        collector_structured_syslog_port_configured_ = true;
+    } else {
+        collector_structured_syslog_port_configured_ = false;
+    }
+
     GetOptValue<uint64_t>(var_map, analytics_data_ttl_,
                      "DEFAULT.analytics_data_ttl");
     if (analytics_data_ttl_ == (uint64_t)-1) {
@@ -527,7 +580,7 @@ void Options::Process(int argc, char *argv[],
     GetOptValue<string>(var_map, log_level_, "DEFAULT.log_level");
     GetOptValue<bool>(var_map, use_syslog_, "DEFAULT.use_syslog");
     GetOptValue<string>(var_map, syslog_facility_, "DEFAULT.syslog_facility");
-    GetOptValue<string>(var_map, kafka_prefix_, "DEFAULT.kafka_prefix");
+    GetOptValue<string>(var_map, kafka_prefix_, "DATABASE.cluster_id");
     GetOptValue<int>(var_map, syslog_port_, "DEFAULT.syslog_port");
     GetOptValue<int>(var_map, sflow_port_, "DEFAULT.sflow_port");
     GetOptValue<int>(var_map, ipfix_port_, "DEFAULT.ipfix_port");
@@ -540,22 +593,26 @@ void Options::Process(int argc, char *argv[],
     GetOptValue<uint16_t>(var_map, redis_port_, "REDIS.port");
     GetOptValue<string>(var_map, redis_server_, "REDIS.server");
     GetOptValue<string>(var_map, redis_password_, "REDIS.password");
-    GetOptValue<string>(var_map, cassandra_user_, "CASSANDRA.cassandra_user");
-    GetOptValue<string>(var_map, cassandra_password_, "CASSANDRA.cassandra_password");
-    GetOptValue<string>(var_map, cassandra_compaction_strategy_,
+
+    GetOptValue<string>(var_map, cassandra_options_.cluster_id_, "DATABASE.cluster_id");
+
+    GetOptValue<string>(var_map, cassandra_options_.user_,
+        "CASSANDRA.cassandra_user");
+    GetOptValue<string>(var_map, cassandra_options_.password_,
+        "CASSANDRA.cassandra_password");
+    GetOptValue<string>(var_map, cassandra_options_.compaction_strategy_,
         "CASSANDRA.compaction_strategy");
-    if (!((cassandra_compaction_strategy_ ==
-        GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY) ||
-        (cassandra_compaction_strategy_ ==
-        GenDb::g_gendb_constants.LEVELED_COMPACTION_STRATEGY) ||
-        (cassandra_compaction_strategy_ ==
-        GenDb::g_gendb_constants.SIZE_TIERED_COMPACTION_STRATEGY))) {
-        cout << "Invalid CASSANDRA.compaction_strategy," <<
-            " please select one of [" <<
-            GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY << ", " <<
-            GenDb::g_gendb_constants.LEVELED_COMPACTION_STRATEGY << ", " <<
-            GenDb::g_gendb_constants.SIZE_TIERED_COMPACTION_STRATEGY << "]" <<
-            endl;
+    if (!ValidateCompactionStrategyOption(
+        cassandra_options_.compaction_strategy_,
+        "CASSANDRA.compaction_strategy")) {
+        exit(-1);
+    }
+    GetOptValue<string>(var_map,
+        cassandra_options_.flow_tables_compaction_strategy_,
+        "CASSANDRA.flow_tables.compaction_strategy");
+    if (!ValidateCompactionStrategyOption(
+        cassandra_options_.flow_tables_compaction_strategy_,
+        "CASSANDRA.flow_tables.compaction_strategy")) {
         exit(-1);
     }
     GetOptValue<uint16_t>(var_map, ks_port_, "KEYSTONE.auth_port");
@@ -569,4 +626,15 @@ void Options::Process(int argc, char *argv[],
     GetOptValue<string>(var_map, ks_cert_, "KEYSTONE.certfile");
     GetOptValue<string>(var_map, ks_key_, "KEYSTONE.keyfile");
     GetOptValue<string>(var_map, ks_ca_, "KEYSTONE.cafile");
+
+    GetOptValue<string>(var_map, sandesh_config_.keyfile,
+                        "SANDESH.sandesh_keyfile");
+    GetOptValue<string>(var_map, sandesh_config_.certfile,
+                        "SANDESH.sandesh_certfile");
+    GetOptValue<string>(var_map, sandesh_config_.ca_cert,
+                        "SANDESH.sandesh_ca_cert");
+    GetOptValue<bool>(var_map, sandesh_config_.sandesh_ssl_enable,
+                      "SANDESH.sandesh_ssl_enable");
+    GetOptValue<bool>(var_map, sandesh_config_.introspect_ssl_enable,
+                      "SANDESH.introspect_ssl_enable");
 }

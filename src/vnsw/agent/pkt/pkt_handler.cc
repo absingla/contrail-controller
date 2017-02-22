@@ -168,6 +168,12 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
 
     pkt_info->vrf = pkt_info->agent_hdr.vrf;
 
+
+    if (hdr.cmd == AgentHdr::TRAP_MAC_MOVE ||
+        hdr.cmd == AgentHdr::TRAP_MAC_LEARN) {
+        return MAC_LEARNING;
+    }
+
     bool is_flow_packet = IsFlowPacket(pkt_info);
     // Look for DHCP packets if corresponding service is enabled
     // Service processing over-rides ACL/Flow and forwarding configuration
@@ -198,7 +204,6 @@ PktHandler::PktModuleName PktHandler::ParsePacket(const AgentHdr &hdr,
         }
     }
    
-
     // Handle ARP packet
     if (pkt_type == PktType::ARP) {
         return ARP;
@@ -337,15 +342,6 @@ void PktHandler::SetOuterMac(PktInfo *pkt_info) {
 }
 
 
-static bool InterestedIPv6Protocol(uint8_t proto) {
-    if (proto == IPPROTO_UDP || proto == IPPROTO_TCP ||
-        proto == IPPROTO_ICMPV6) {
-        return true;
-    }
-
-    return false;
-}
-
 int PktHandler::ParseEthernetHeader(PktInfo *pkt_info, uint8_t *pkt) {
     int len = 0;
     pkt_info->eth = (struct ether_header *) (pkt + len);
@@ -354,9 +350,20 @@ int PktHandler::ParseEthernetHeader(PktInfo *pkt_info, uint8_t *pkt) {
     pkt_info->ether_type = ntohs(pkt_info->eth->ether_type);
     len += sizeof(struct ether_header);
 
-    if (pkt_info->ether_type == ETHERTYPE_VLAN) {
-       pkt_info->ether_type = ntohs(*((uint16_t *)(pkt + len + 2)));
+    //strip service vlan and customer vlan in packet
+    while (pkt_info->ether_type == ETHERTYPE_VLAN ||
+           pkt_info->ether_type == ETHERTYPE_QINQ) {
+        pkt_info->ether_type = ntohs(*((uint16_t *)(pkt + len + 2)));
         len += VLAN_HDR_LEN;
+    }
+
+    if (pkt_info->ether_type == ETHERTYPE_PBB) {
+        //Parse inner payload
+        pkt_info->pbb_header = (uint32_t *)(pkt + len);
+        pkt_info->b_smac = pkt_info->smac;
+        pkt_info->b_dmac = pkt_info->dmac;
+        pkt_info->i_sid = ntohl(*(pkt_info->pbb_header)) & 0x00FFFFFF;
+        len += ParseEthernetHeader(pkt_info, pkt + len + PBB_HEADER_LEN);
     }
 
     return len;
@@ -392,23 +399,8 @@ int PktHandler::ParseIpPacket(PktInfo *pkt_info, PktType::Type &pkt_type,
         pkt_info->ip_daddr = IpAddress(Ip6Address(addr));
         pkt_info->ttl      = ip->ip6_hlim;
 
-        // Look for known transport headers. Fallback to the last header if
-        // no known header is found
         uint8_t proto = ip->ip6_ctlun.ip6_un1.ip6_un1_nxt;
         len += sizeof(ip6_hdr);
-        while (InterestedIPv6Protocol(proto) == false) {
-            struct ip6_ext *ext = (ip6_ext *)(pkt + len);
-            proto = ext->ip6e_nxt;
-            len += (ext->ip6e_len * 8);
-            if (ext->ip6e_len == 0) {
-                proto = 0;
-                break;
-            }
-            if (len >= pkt_info->len) {
-                proto = 0;
-                break;
-            }
-        }
         pkt_info->ip_proto = proto;
     } else {
         assert(0);
@@ -522,6 +514,47 @@ int PktHandler::ParseIpPacket(PktInfo *pkt_info, PktType::Type &pkt_type,
     return len;
 }
 
+int PktHandler::ParseControlWord(PktInfo *pkt_info, uint8_t *pkt,
+                                 const MplsLabel *mpls) {
+    uint32_t ret = 0;
+    if (mpls->IsFabricMulticastReservedLabel() == true) {
+        //Check if there is a control word
+        uint32_t *control_word = (uint32_t *)(pkt);
+        if (*control_word == kMulticastControlWord) {
+            pkt_info->l3_label = false;
+            ret += kMulticastControlWordSize + sizeof(VxlanHdr) +
+                   sizeof(udphdr) + sizeof(ip);
+        }
+    } else if (pkt_info->l3_label == false) {
+        bool layer2_control_word = false;
+        const InterfaceNH *intf_nh =
+            dynamic_cast<const InterfaceNH *>(mpls->nexthop());
+        if (intf_nh && intf_nh->layer2_control_word()) {
+            layer2_control_word = true;
+        }
+
+        const CompositeNH *comp_nh =
+            dynamic_cast<const CompositeNH *>(mpls->nexthop());
+        if (comp_nh && comp_nh->layer2_control_word()) {
+            layer2_control_word = true;
+        }
+
+        const VrfNH *vrf_nh =
+            dynamic_cast<const VrfNH *>(mpls->nexthop());
+        if (vrf_nh && vrf_nh->layer2_control_word()) {
+            layer2_control_word = true;
+        }
+
+        //Check if there is a control word
+        uint32_t *control_word = (uint32_t *)(pkt);
+        if (layer2_control_word && *control_word == kMulticastControlWord) {
+            ret += kMulticastControlWordSize;
+        }
+    }
+
+    return ret;
+}
+
 int PktHandler::ParseMplsHdr(PktInfo *pkt_info, uint8_t *pkt) {
     MplsHdr *hdr = (MplsHdr *)(pkt);
 
@@ -537,7 +570,11 @@ int PktHandler::ParseMplsHdr(PktInfo *pkt_info, uint8_t *pkt) {
     }
 
     uint32_t label = pkt_info->tunnel.label;
-    const MplsLabel *mpls = agent_->mpls_table()->FindMplsLabel(label);
+    MplsLabelKey mpls_key(label);
+    uint32_t ret = sizeof(MplsHdr);
+
+    const MplsLabel *mpls = static_cast<const MplsLabel *>(
+            agent_->mpls_table()->FindActiveEntry(&mpls_key));
     if (mpls == NULL) {
         PKT_TRACE(Err, "Invalid MPLS Label <" << label << ">. Ignoring");
         pkt_info->tunnel.label = MplsTable::kInvalidLabel;
@@ -550,7 +587,18 @@ int PktHandler::ParseMplsHdr(PktInfo *pkt_info, uint8_t *pkt) {
         pkt_info->l3_label = false;
     }
 
-    return sizeof(MplsHdr);
+    const CompositeNH *cnh = dynamic_cast<const CompositeNH *>(mpls->nexthop());
+    if (cnh && cnh->composite_nh_type() != Composite::LOCAL_ECMP) {
+        pkt_info->l3_label = false;
+    }
+
+    const VrfNH *vrf_nh = dynamic_cast<const VrfNH *>(mpls->nexthop());
+    if (vrf_nh && vrf_nh->vxlan_nh() == true) {
+        pkt_info->l3_label = false;
+    }
+
+    ret += ParseControlWord(pkt_info, pkt + ret, mpls);
+    return ret;
 }
 
 // Parse MPLSoGRE header
@@ -868,7 +916,7 @@ bool PktHandler::IsManagedTORPacket(Interface *intf, PktInfo *pkt_info,
 bool PktHandler::IsFlowPacket(PktInfo *pkt_info) {
     if (pkt_info->agent_hdr.cmd == AgentHdr::TRAP_FLOW_MISS ||
         pkt_info->agent_hdr.cmd == AgentHdr::TRAP_ECMP_RESOLVE ||
-        pkt_info->agent_hdr.cmd == AgentHdr::TRAP_HOLD_ACTION) {
+        pkt_info->agent_hdr.cmd == AgentHdr::TRAP_FLOW_ACTION_HOLD) {
         return true;
     }
     return false;

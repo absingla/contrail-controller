@@ -6,7 +6,7 @@
 This file contains  utility methods used by device manager module
 """
 
-from netaddr import *
+from netaddr import IPNetwork
 
 class DMUtils(object):
 
@@ -36,8 +36,11 @@ class DMUtils(object):
         gateways = {}
         for ipam_ref in ipam_refs or []:
             for subnet in ipam_ref['attr'].get('ipam_subnets', []):
-                prefix = subnet['subnet']['ip_prefix']
-                prefix_len = subnet['subnet']['ip_prefix_len']
+                prefix = '0.0.0.0'
+                prefix_len = 0
+                if 'subnet' in subnet:
+                    prefix = subnet['subnet']['ip_prefix']
+                    prefix_len = subnet['subnet']['ip_prefix_len']
                 gateways[prefix + '/' + str(prefix_len)] = \
                     {"default_gateway": subnet.get('default_gateway', ''),
                      "subnet_uuid": subnet.get('subnet_uuid')}
@@ -172,5 +175,176 @@ class DMUtils(object):
         return m.get(cs_name)
     # end get_ip_used_for_str
 
+    @staticmethod
+    def groups_comment():
+        return "/* Contrail Generated Group Config */"
+
+    @staticmethod
+    def vn_ri_comment(vn, is_l2, is_l2_l3, is_nat):
+        vrf_type = "L3"
+        fwd_mode = "L3"
+        if is_l2:
+            vrf_type = "L2"
+            fwd_mode = "L2"
+        if is_l2_l3:
+            fwd_mode = "L2-L3"
+        if not is_nat:
+            return "/* Virtual Network: %s, UUID: %s, VRF Type: %s, Forwarding Mode: %s */"%(
+                                                  vn.fq_name[-1], vn.uuid, vrf_type, fwd_mode)
+        else:
+            return "/* Virtual Network: %s, UUID: %s, VRF Type: %s (NAT), Forwarding Mode: %s*/"%(
+                                                  vn.fq_name[-1], vn.uuid, vrf_type, fwd_mode)
+
+    @staticmethod
+    def bgp_group_comment(bgp_obj):
+        return "/* BGP Router: %s, UUID: %s */"%(bgp_obj.name, bgp_obj.uuid)
+
+    @staticmethod
+    def public_vrf_filter_comment():
+        return "/* Public VRF Filter for Floating IPs */"
+
+    @staticmethod
+    def vn_ps_comment(vn, target_type):
+        return "/* Virtual Network: %s, UUID: %s, Route Targets Type: %s */"%(vn.fq_name[-1], vn.uuid, target_type)
+
+    @staticmethod
+    def vn_firewall_comment(vn, mode):
+        return "/* Virtual Network: %s, UUID: %s, Filter Type: %s */"%(vn.fq_name[-1], vn.uuid, mode)
+
+    @staticmethod
+    def vn_bd_comment(vn, encap):
+        return "/* Virtual Network: %s, UUID: %s, Encapsulation: %s */"%(vn.fq_name[-1], vn.uuid, encap)
+
+    @staticmethod
+    def vn_evpn_comment(vn, encap):
+        return "/* Virtual Network: %s, UUID: %s, Encapsulation: %s */"%(vn.fq_name[-1], vn.uuid, encap)
+
+    @staticmethod
+    def vn_irb_comment(vn, is_l2, is_l2_l3):
+        vrf_type = "L3"
+        if is_l2:
+            vrf_type = "L2"
+        if is_l2_l3:
+            vrf_type = "L2-L3"
+        return "/* Virtual Network: %s, UUID: %s, VRF Type: %s */"%(vn.fq_name[-1], vn.uuid, vrf_type)
+
+    @staticmethod
+    def service_set_comment(vn):
+        return "/* Virtual Network: %s, UUID: %s */"%(vn.fq_name[-1], vn.uuid)
+
+    @staticmethod
+    def service_set_nat_rule_comment(vn, nat_type):
+        return "/* %s Rules for Virtual Network: %s, UUID: %s*/"%(nat_type, vn.fq_name[-1], vn.uuid)
+
+    @staticmethod
+    def nat_comment():
+        return "/* Network Address Transalation Rules for SNAT/Floating IPs */"
+
+    @staticmethod
+    def snat_rule_comment():
+        return "/* Traffic Inbound Rule */"
+
+    @staticmethod
+    def dnat_rule_comment():
+        return "/* Traffic Outbound Rule */"
+
+    @staticmethod
+    def routing_options_comment():
+        return "/* Global Routing Options */"
+
+    @staticmethod
+    def policy_options_comment():
+        return "/* Policy Options */"
+
+    @staticmethod
+    def forwarding_options_comment():
+        return "/* Forwarding Options */"
+
+    @staticmethod
+    def firewall_comment():
+        return "/* Firewalls Configuration */"
+
+    @staticmethod
+    def interfaces_comment():
+        return "/* Interfaces Configuration */"
+
+    @staticmethod
+    def protocols_comment():
+        return "/* Protocols Configuration */"
+
+    @staticmethod
+    def routing_instances_comment():
+        return "/* Routing Instances Confguration */"
+
+    @staticmethod
+    def services_comment():
+        return "/* Services Config */"
+
+    @staticmethod
+    def vn_irb_fip_inet_comment(vn):
+        return "/* Routing Interface For Floating IPs, Virtual Network: %s, "\
+               "UUID: %s */"%(vn.fq_name[-1], vn.uuid)
+
+    @staticmethod
+    def l2_evpn_intf_unit_comment(vn, is_tagged, tag=None):
+        if is_tagged:
+            return "/* L2 EVPN Tagged Interface, Virtual Network: %s, "\
+                   "UUID: %s, VLAN Tag: %s */"%(vn.fq_name[-1], vn.uuid, str(tag))
+        return "/* L2 EVPN Untagged Interface, Virtual Network: %s, "\
+               "UUID: %s */"%(vn.fq_name[-1], vn.uuid)
+
+    @staticmethod
+    def l3_lo_intf_comment(vn):
+        return "/* L3 Gateway Interface, Virtual Network: %s, "\
+               "UUID: %s */"%(vn.fq_name[-1], vn.uuid)
+
+    @staticmethod
+    def service_ifd_comment():
+        return "/* Service Interface */"
+
+    @staticmethod
+    def service_intf_comment(direction):
+        return "/* Service %s Interface */"%(direction)
+
+    @staticmethod
+    def irb_ip_comment(irb_ip):
+        ip = IPNetwork(irb_ip)
+        return "/* Allocated IPv%s Address from Subnet: %s/%s */"%(str(ip.version),
+                                                    ip.network, str(ip.prefixlen))
+
+    @staticmethod
+    def lo0_ip_comment(lo_ip):
+        ip = netaddr.IPNetwork(lo_ip)
+        return "/* Allocated IPv%s Address from Subnet: %s/%s */"%(str(ip.version),
+                                                    ip.network, str(ip.prefixlen))
+
+    @staticmethod
+    def lo0_ri_intf_comment(vn):
+        return "/* Routing Interface for lo0 IPs of L3 Virtual Network: %s, "\
+               "UUID: %s */"%(vn.fq_name[-1], vn.uuid)
+
+    @staticmethod
+    def lo0_unit_0_comment():
+        return "/* Routing Interface For L2 EVPNs */"
+
+    @staticmethod
+    def ip_fabric_subnet_comment():
+        return "/* IP Fabric Subnet */"
+
+    @staticmethod
+    def bgp_router_subnet_comment(name):
+        return "/* BGP Router : %s */"%(name)
+
+    @staticmethod
+    def public_vrf_route_comment():
+        return "/* Static Route for Public L3 VRF */"
+
+    @staticmethod
+    def fip_ingress_comment():
+        return "/* Static Route for Floating IP ingress */"
+
+    @staticmethod
+    def fip_egress_comment():
+        return "/* Static Route for Floating IP egress */"
 
 # end DMUtils

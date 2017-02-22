@@ -36,7 +36,7 @@
 #include "control-node/control_node.h"
 #include "control-node/options.h"
 #include "db/db_graph.h"
-#include "ifmap/client/ifmap_manager.h"
+#include "ifmap/client/config_client_manager.h"
 #include "ifmap/ifmap_link_table.h"
 #include "ifmap/ifmap_sandesh_context.h"
 #include "ifmap/ifmap_server.h"
@@ -53,7 +53,6 @@
 #include "xmpp/xmpp_init.h"
 #include "xmpp/xmpp_sandesh.h"
 #include "xmpp/xmpp_server.h"
-#include "base/task_tbbkeepawake.h"
 
 using namespace std;
 using namespace boost::asio::ip;
@@ -75,12 +74,16 @@ static string FileRead(const char *filename) {
     return content;
 }
 
-static void IFMap_Initialize(IFMapServer *server) {
+static void IFMap_Initialize(IFMapServer *server, ConfigClientManager *mgr) {
     IFMapLinkTable_Init(server->database(), server->graph());
+    // TODO Remove server parser
     IFMapServerParser *parser = IFMapServerParser::GetInstance("vnc_cfg");
     vnc_cfg_ParserInit(parser);
-    vnc_cfg_Server_ModuleInit(server->database(), server->graph());
     bgp_schema_ParserInit(parser);
+
+    vnc_cfg_JsonParserInit(mgr->config_json_parser());
+    vnc_cfg_Server_ModuleInit(server->database(), server->graph());
+    bgp_schema_JsonParserInit(mgr->config_json_parser());
     bgp_schema_Server_ModuleInit(server->database(), server->graph());
     server->Initialize();
 }
@@ -133,7 +136,7 @@ static void ShutdownDiscoveryClient(DiscoveryServiceClient *client) {
 // Shutdown various server objects used in the control-node.
 static void ShutdownServers(
     boost::scoped_ptr<BgpXmppChannelManager> *channel_manager,
-    DiscoveryServiceClient *dsclient, TaskTbbKeepAwake *tbb_awake_task) {
+    DiscoveryServiceClient *dsclient) {
 
     // Bring down bgp server, xmpp server, etc. in the right order.
     BgpServer *bgp_server = (*channel_manager)->bgp_server();
@@ -169,8 +172,6 @@ static void ShutdownServers(
     ConnectionStateManager::
         GetInstance()->Shutdown();
 
-    tbb_awake_task->ShutTbbKeepAwakeTask();
-
     // Do sandesh cleanup.
     Sandesh::Uninit();
     WaitForIdle();
@@ -193,14 +194,14 @@ void ControlNodeShutdown() {
 }
 
 static void ControlNodeGetProcessStateCb(const BgpServer *bgp_server,
-    const IFMapManager *ifmap_manager,
+    const ConfigClientManager *config_client_manager,
     const std::vector<ConnectionInfo> &cinfos,
     ProcessState::type &state, std::string &message,
     std::vector<ConnectionTypeName> expected_connections) {
     GetProcessStateCb(cinfos, state, message, expected_connections);
     if (state == ProcessState::NON_FUNCTIONAL)
         return;
-    if (!ifmap_manager->GetEndOfRibComputed()) {
+    if (!config_client_manager->GetEndOfRibComputed()) {
         state = ProcessState::NON_FUNCTIONAL;
         message = "IFMap Server End-Of-RIB not computed";
     } else if (!bgp_server->HasSelfConfiguration()) {
@@ -213,8 +214,8 @@ static void ControlNodeGetProcessStateCb(const BgpServer *bgp_server,
 }
 
 static bool ControlNodeReEvalPublishCb(const BgpServer *bgp_server,
-    const IFMapManager *ifmap_manager, std::string &message) {
-    if (!ifmap_manager->GetEndOfRibComputed()) {
+    const ConfigClientManager *config_client_manager, std::string &message) {
+    if (!config_client_manager->GetEndOfRibComputed()) {
         message = "IFMap Server End-Of-RIB not computed";
         return false;
     }
@@ -263,7 +264,9 @@ int main(int argc, char *argv[]) {
                         Sandesh::StringToLevel(options.log_level())));
     }
 
-    TaskScheduler::Initialize();
+    int num_threads_to_tbb = TaskScheduler::GetDefaultThreadCount() +
+        ConfigClientManager::GetNumWorkers();
+    TaskScheduler::Initialize(num_threads_to_tbb, &evm);
     TaskScheduler::GetInstance()->SetTrackRunTime(
         options.task_track_run_time());
     BgpServer::Initialize();
@@ -288,10 +291,18 @@ int main(int argc, char *argv[]) {
     sandesh_context.bgp_server = bgp_server.get();
     bgp_server->set_gr_helper_disable(options.gr_helper_bgp_disable());
 
+    ConnectionStateManager::GetInstance();
+
     DB config_db(TaskScheduler::GetInstance()->GetTaskId("db::IFMapTable"));
     DBGraph config_graph;
     IFMapServer ifmap_server(&config_db, &config_graph, evm.io_service());
-    IFMap_Initialize(&ifmap_server);
+
+    // TODO Coming Soon
+    ConfigClientManager *config_client_manager =
+        new ConfigClientManager(&evm, &ifmap_server, options.hostname(),
+                                module_name, options.ifmap_config_options());
+    IFMap_Initialize(&ifmap_server, config_client_manager);
+    ifmap_server.set_config_manager(config_client_manager);
 
     BgpIfmapConfigManager *config_manager =
             static_cast<BgpIfmapConfigManager *>(bgp_server->config_manager());
@@ -327,15 +338,6 @@ int main(int argc, char *argv[]) {
     IFMapSandeshContext ifmap_sandesh_context(&ifmap_server);
     Sandesh::set_module_context("IFMap", &ifmap_sandesh_context);
 
-    // Create IFMapManager and associate with the IFMapServer.
-    IFMapServerParser *ifmap_parser = IFMapServerParser::GetInstance("vnc_cfg");
-    IFMapManager *ifmap_manager = new IFMapManager(&ifmap_server,
-        options.ifmap_config_options(),
-        boost::bind(
-            &IFMapServerParser::Receive, ifmap_parser, &config_db, _1, _2, _3),
-        evm.io_service());
-    ifmap_server.set_ifmap_manager(ifmap_manager);
-
     // Determine if the number of connections is as expected. At the moment,
     // consider connections to collector, discovery server and IFMap (irond)
     // servers as critical to the normal functionality of control-node.
@@ -344,14 +346,17 @@ int main(int argc, char *argv[]) {
     // 2. Discovery Server publish XmppServer
     // 3. Discovery Server subscribe Collector
     // 4. Discovery Server subscribe IfmapServer
-    // 5. IFMap Server (irond)
+    // 5. Cassandra Server
+    // 6. AMQP Server
     std::vector<ConnectionTypeName> expected_connections;
     if (options.discovery_server().empty()) {
         expected_connections = boost::assign::list_of
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
                              ConnectionType::COLLECTOR)->second, "Collector"))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::IFMAP)->second, "IFMapServer"));
+                             ConnectionType::DATABASE)->second, "Cassandra"))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::DATABASE)->second, "RabbitMQ"));
     } else {
         expected_connections = boost::assign::list_of
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
@@ -361,25 +366,19 @@ int main(int argc, char *argv[]) {
                              ConnectionType::COLLECTOR)->second, "Collector"))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
                              ConnectionType::DISCOVERY)->second,
-                             g_vns_constants.IFMAP_SERVER_DISCOVERY_SERVICE_NAME))
+                             g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::IFMAP)->second, "IFMapServer"))
+                             ConnectionType::DATABASE)->second, "Cassandra"))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::DISCOVERY)->second,
-                             g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME));
+                             ConnectionType::DATABASE)->second, "RabbitMQ"));
     }
+
     ConnectionStateManager::GetInstance()->Init(
         *evm.io_service(), options.hostname(),
         module_name, g_vns_constants.INSTANCE_ID_DEFAULT,
         boost::bind(&ControlNodeGetProcessStateCb,
-                    bgp_server.get(), ifmap_manager, _1, _2, _3,
+                    bgp_server.get(), config_client_manager, _1, _2, _3,
                     expected_connections), "ObjectBgpRouter");
-
-    // Start TbbKeepAwake Task which makes scheduler always active,
-    // for it to not miss any spawn events
-    TaskTbbKeepAwake tbb_awake_task;
-    tbb_awake_task.StartTbbKeepAwakeTask(TaskScheduler::GetInstance(), &evm,
-                                         "bgp::TbbKeepAwake");
 
     // Parse discovery server configuration.
     DiscoveryServiceClient *ds_client = NULL;
@@ -406,7 +405,7 @@ int main(int argc, char *argv[]) {
             pub_msg = pub_ss.str();
             ds_client->Publish(sname, pub_msg,
                 boost::bind(&ControlNodeReEvalPublishCb,
-                    bgp_server.get(), ifmap_manager, _1));
+                    bgp_server.get(), config_client_manager, _1));
         }
 
         // Subscribe to collector service if collector isn't explicitly configured.
@@ -430,10 +429,12 @@ int main(int argc, char *argv[]) {
                                    options.http_server_port(),
                                    csf,
                                    list,
-                                   &sandesh_context));
+                                   &sandesh_context,
+                                   Sandesh::DerivedStats(),
+                                   options.sandesh_config()));
             if (!success) {
                 LOG(ERROR, "SANDESH: Initialization FAILED ... exiting");
-                ShutdownServers(&bgp_peer_manager, ds_client, &tbb_awake_task);
+                ShutdownServers(&bgp_peer_manager, ds_client);
                 exit(1);
             }
         }
@@ -466,7 +467,9 @@ int main(int argc, char *argv[]) {
                         &evm,
                         options.http_server_port(), 0,
                         options.randomized_collector_server_list(),
-                        &sandesh_context);
+                        &sandesh_context,
+                        Sandesh::DerivedStats(),
+                        options.sandesh_config());
             } else {
                 success = Sandesh::InitGenerator(
                         g_vns_constants.ModuleNames.find(module)->second,
@@ -475,7 +478,9 @@ int main(int argc, char *argv[]) {
                         g_vns_constants.INSTANCE_ID_DEFAULT,
                         &evm,
                         options.http_server_port(),
-                        &sandesh_context);
+                        &sandesh_context,
+                        Sandesh::DerivedStats(),
+                        options.sandesh_config());
             }
             if (!success) {
                 LOG(ERROR, "SANDESH: Initialization FAILED ... exiting");
@@ -485,12 +490,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Initialize discovery mechanism for IFMapManager.
-    // Must happen after call to ConnectionStateManager::Init to ensure that
-    // ConnectionState is not updated before the ConnectionStateManager gets
-    // initialized.
-    ifmap_manager->InitializeDiscovery(ds_client, options.ifmap_server_url());
-
     // Set BuildInfo.
     string build_info;
     MiscUtils::GetBuildInfo(MiscUtils::ControlNode, BuildInfo, build_info);
@@ -499,10 +498,12 @@ int main(int argc, char *argv[]) {
                                             bgp_peer_manager.get(),
                                             &ifmap_server, build_info);
 
+    config_client_manager->Initialize();
+
     // Event loop.
     evm.Run();
 
-    ShutdownServers(&bgp_peer_manager, ds_client, &tbb_awake_task);
+    ShutdownServers(&bgp_peer_manager, ds_client);
     BgpServer::Terminate();
     return 0;
 }

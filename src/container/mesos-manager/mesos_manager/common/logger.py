@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2016 Juniper Networks, Inc. All rights reserved.
+# Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
 #
 
 """
@@ -11,7 +11,7 @@ import socket
 
 from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, NodeStatus
 import discoveryclient.client as client
-from sandesh.mesos_manager import ttypes as sandesh
+from mesos_manager.sandesh.mesos_manager import ttypes as sandesh
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.sandesh_base import Sandesh, SandeshSystem
@@ -161,7 +161,8 @@ class MesosManagerLogger(object):
             int(self._args.http_server_port),
             ['cfgm_common', 'mesos_manager.sandesh'],
             self.module['discovery'], logger_class=self._args.logger_class,
-            logger_config_file=self._args.logging_conf)
+            logger_config_file=self._args.logging_conf,
+            config=self._args.sandesh_config)
 
         # Set Sandesh logging params.
         self._sandesh.set_logging_params(

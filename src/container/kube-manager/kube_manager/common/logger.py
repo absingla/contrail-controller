@@ -17,7 +17,7 @@ import discoveryclient.client as client
 from kube_manager.sandesh.kube_manager import ttypes as sandesh
 from kube_manager.sandesh.kube_introspect import ttypes as introspect
 from kube_manager.common.kube_config_db import (
-         PodKM, NamespaceKM, ServiceKM, NetworkPolicyKM)
+         PodKM, NamespaceKM, ServiceKM, NetworkPolicyKM, IngressKM)
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.sandesh_base import Sandesh, SandeshSystem
@@ -171,6 +171,10 @@ class KubeManagerLogger(object):
         introspect.NetworkPolicyDatabaseList.handle_request =\
             NetworkPolicyKM.sandesh_handle_db_list_request
 
+        # Register Ingress DB introspect handler.
+        introspect.IngressDatabaseList.handle_request =\
+            IngressKM.sandesh_handle_db_list_request
+
     def sandesh_init(self):
         """ Init Sandesh """
         self._sandesh = Sandesh()
@@ -189,9 +193,10 @@ class KubeManagerLogger(object):
             self._module["node_type_name"], self._module["instance_id"],
             self._args.collectors, 'kube_manager_context',
             int(self._args.http_server_port),
-            ['cfgm_common', 'kube_manager.sandesh', 'kube_introspect.sandesh'],
+            ['cfgm_common', 'kube_manager'],
             self._module["discovery"], logger_class=self._args.logger_class,
-            logger_config_file=self._args.logging_conf)
+            logger_config_file=self._args.logging_conf,
+            config=self._args.sandesh_config)
 
         # Set Sandesh logging params.
         self._sandesh.set_logging_params(

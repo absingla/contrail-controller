@@ -211,7 +211,6 @@ bool InterfaceTable::OperDBResync(DBEntry *entry, const DBRequest *req) {
             intf->qos_config_ = qos_config;
             return true;
         }
-        return false;
     }
 
     if (key->type_ != Interface::VM_INTERFACE)
@@ -426,8 +425,14 @@ void Interface::GetOsParams(Agent *agent) {
     //will not be present
     if (transport_ == TRANSPORT_PMD) {
         if (type_ == PHYSICAL || type_ == INET) {
-            mac_ = *ether_aton(agent->params()->
-                               physical_interface_mac_addr().c_str());
+            struct ether_addr *addr = ether_aton(agent->params()->
+                                      physical_interface_mac_addr().c_str());
+            if (addr) {
+                mac_ = *addr;
+            } else {
+                LOG(ERROR,
+                    "Physical interface MAC not set in DPDK vrouter agent");
+            }
         }
     }
 
@@ -897,6 +902,41 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
                 entry.set_installed("N");
             }
             entry.set_fixed_ip(ip.fixed_ip_.to_string());
+
+            string dir = "";
+            switch (it->direction()) {
+            case VmInterface::FloatingIp::DIRECTION_BOTH:
+                dir = "both";
+                break;
+
+            case VmInterface::FloatingIp::DIRECTION_INGRESS:
+                dir = "ingress";
+                break;
+
+            case VmInterface::FloatingIp::DIRECTION_EGRESS:
+                dir = "egress";
+                break;
+
+            default:
+                dir = "INVALID";
+                break;
+            }
+            entry.set_direction(dir);
+
+            entry.set_port_map_enabled(it->port_map_enabled());
+            std::vector<SandeshPortMapping> pmap_list;
+            VmInterface::FloatingIp::PortMapIterator pmap_it =
+                it->src_port_map_.begin();
+            while (pmap_it != it->src_port_map_.end()) {
+                SandeshPortMapping pmap;
+                pmap.set_protocol(pmap_it->first.protocol_);
+                pmap.set_port(pmap_it->first.port_);
+                pmap.set_nat_port(pmap_it->second);
+                pmap_list.push_back(pmap);
+                pmap_it++;
+            }
+            entry.set_port_map(pmap_list);
+
             fip_list.push_back(entry);
             it++;
         }
@@ -1069,6 +1109,16 @@ void Interface::SetItfSandeshData(ItfSandeshData &data) const {
                 vintf->service_health_check_ip().to_string());
         data.set_drop_new_flows(vintf->drop_new_flows());
 
+        VmInterface::BridgeDomainEntrySet::const_iterator bd_it;
+        std::vector<VmIntfBridgeDomainUuid> intf_bd_uuid_l;
+        const VmInterface::BridgeDomainList &bd_list =
+            vintf->bridge_domain_list();
+        for (bd_it = bd_list.list_.begin(); bd_it != bd_list.list_.end(); ++bd_it) {
+            VmIntfBridgeDomainUuid bd_id;
+            bd_id.set_bridge_domain_uuid(UuidToString(bd_it->uuid_));
+            intf_bd_uuid_l.push_back(bd_id);
+        }
+        data.set_bridge_domain_list(intf_bd_uuid_l);
         break;
     }
     case Interface::INET: {

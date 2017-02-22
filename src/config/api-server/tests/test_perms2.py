@@ -248,6 +248,9 @@ class TestPermissions(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_mocks = [(keystone.Client,
                             '__new__', test_utils.FakeKeystoneClient),
                        (vnc_api.vnc_api.VncApi,
@@ -262,6 +265,11 @@ class TestPermissions(test_case.ApiServerTestCase):
         ]
         super(TestPermissions, cls).setUpClass(extra_mocks=extra_mocks,
             extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestPermissions, cls).tearDownClass(*args, **kwargs)
 
 
     def setUp(self):
@@ -394,7 +402,7 @@ class TestPermissions(test_case.ApiServerTestCase):
         admin = self.admin
         self.vn_name = "alice-vn-%s" % self.id()
 
-        rv = admin.vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = admin.vnc_lib.get_aaa_mode()
         self.assertEquals(rv["aaa-mode"], "rbac")
 
         # delete api-access-list for alice and bob and disallow api access to their projects

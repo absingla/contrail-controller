@@ -37,6 +37,7 @@
 #include "base/parse_object.h"
 #include <base/connection_info.h>
 #include "io/event_manager.h"
+#include "io/ssl_session.h"
 #include "base/sandesh/process_info_types.h"
 
 #include <sandesh/sandesh_types.h>
@@ -67,12 +68,9 @@ public:
         GenDb::GenDbIf::DbAddColumnCb db_cb)> VizCallback;
 
     Collector(EventManager *evm, short server_port,
+              const SandeshConfig &sandesh_config,
               DbHandlerPtr db_handler, OpServerProxy *osp,
-              VizCallback cb,
-              std::vector<std::string> cassandra_ips,
-              std::vector<int> cassandra_ports, const TtlMap& ttl_map,
-              const std::string& cassandra_user,
-              const std::string& cassandra_password);
+              VizCallback cb);
     virtual ~Collector();
     virtual void Shutdown();
     virtual void SessionShutdown();
@@ -117,11 +115,6 @@ public:
     static std::string GetSelfIp() { return self_ip_; }
     static void SetSelfIp(std::string ip) { self_ip_ = ip; }
 
-    std::vector<std::string> cassandra_ips() { return cassandra_ips_; }
-    std::vector<int> cassandra_ports() { return cassandra_ports_; }
-    std::string cassandra_user() { return cassandra_user_; }
-    std::string cassandra_password() { return cassandra_password_; }
-    const TtlMap& analytics_ttl_map() { return ttl_map_; }
     int db_task_id();
     const CollectorStats &GetStats() const { return stats_; }
     void SendGeneratorStatistics();
@@ -136,11 +129,10 @@ public:
 
     std::string DbGlobalName(bool dup=false);
 protected:
-    virtual TcpSession *AllocSession(Socket *socket);
+    virtual SslSession *AllocSession(SslSocket *socket);
     virtual void DisconnectSession(SandeshSession *session);
 
 private:
-    ConnectionStatus::type dbConnStatus_;
     void SetQueueWaterMarkInfo(QueueType::type type,
         Sandesh::QueueWaterMarkInfo &wm);
     void ResetQueueWaterMarkInfo(QueueType::type type);
@@ -166,12 +158,7 @@ private:
     EventManager * const evm_;
     VizCallback cb_;
 
-    std::vector<std::string> cassandra_ips_;
-    std::vector<int> cassandra_ports_;
-    TtlMap ttl_map_;
     int db_task_id_;
-    std::string cassandra_user_;
-    std::string cassandra_password_;
 
     // SandeshGenerator map
     typedef boost::ptr_map<SandeshGenerator::GeneratorId, SandeshGenerator> GeneratorMap;
@@ -196,7 +183,7 @@ private:
 
 class VizSession : public SandeshSession {
 public:
-    VizSession(TcpServer *client, Socket *socket, int task_instance,
+    VizSession(SslServer *client, SslSocket *socket, int task_instance,
             int writer_task_id, int reader_task_id) :
         SandeshSession(client, socket, task_instance, writer_task_id,
                        reader_task_id),

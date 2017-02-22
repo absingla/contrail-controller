@@ -98,7 +98,8 @@ public:
     void AddEvent(FlowEntryPtr &flow);
     void DeleteEvent(const FlowEntryPtr &flow, const RevFlowDepParams &params);
     void UpdateStatsEvent(const FlowEntryPtr &flow, uint32_t bytes,
-                          uint32_t packets, uint32_t oflow_bytes);
+                          uint32_t packets, uint32_t oflow_bytes,
+                          const boost::uuids::uuid &u);
 
     void Init(uint64_t flow_stats_interval, uint64_t flow_cache_timeout);
     void InitDone();
@@ -150,7 +151,11 @@ public:
         return flow_export_drops_;
     }
 
-    uint32_t threshold() const { return threshold_;}
+    uint32_t deleted_flow_export_drops() const {
+        return deleted_flow_export_drops_;
+    }
+
+    uint64_t threshold() const { return threshold_;}
     bool delete_short_flow() const {
         return delete_short_flow_;
     }
@@ -175,7 +180,7 @@ private:
     friend class FlowStatsCollectorReq;
     friend class FlowStatsCollector;
     bool UpdateFlowThreshold(void);
-    void UpdateThreshold(uint32_t new_value);
+    void UpdateThreshold(uint64_t new_value, bool check_oflow);
     FlowStatsCollectorObject* GetFlowStatsCollectorObject(const FlowEntry *flow)
         const;
     Agent *agent_;
@@ -185,17 +190,18 @@ private:
     tbb::atomic<uint32_t> flow_export_count_;
     uint64_t prev_flow_export_rate_compute_time_;
     uint32_t flow_export_rate_;
-    uint32_t threshold_;
+    uint64_t threshold_;
     tbb::atomic<uint64_t> flow_export_disable_drops_;
     tbb::atomic<uint64_t> flow_export_sampling_drops_;
     tbb::atomic<uint32_t> flow_export_without_sampling_;
     tbb::atomic<uint64_t> flow_export_drops_;
+    tbb::atomic<uint64_t> deleted_flow_export_drops_;
     tbb::atomic<bool> flows_sampled_atleast_once_;
     uint32_t prev_cfg_flow_export_rate_;
     Timer* timer_;
     bool delete_short_flow_;
     //Protocol based array for minimal tree comparision
     FlowStatsCollectorObject* protocol_list_[256];
-    IndexVector<FlowStatsCollector> instance_table_;
+    IndexVector<FlowStatsCollector *> instance_table_;
 };
 #endif //vnsw_agent_flow_stats_manager_h

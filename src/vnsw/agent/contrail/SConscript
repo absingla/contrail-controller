@@ -47,6 +47,7 @@ buildinfo_dep_libs += MapBuildCmnLib([
     'route/libroute.a',
     'schema/libbgp_schema.a',
     'schema/libifmap_vnc.a',
+    'ifmap/client/libifmapio.a',
     'schema/libxmpp_unicast.a',
     'schema/libxmpp_multicast.a',
     'vrouter/utils/libvrutil.a',
@@ -109,8 +110,7 @@ env.Default(contrail_vrouter_agent)
 
 utils_scripts = [
   'agent_dissector.lua',
-  'mpls_dissector.lua',
-  'qosmap.py']
+  'mpls_dissector.lua',]
 
 # Documentation
 doc_files = []
@@ -133,6 +133,12 @@ env.Alias('install',
 env.Alias('install',
         env.InstallAs(env['INSTALL_INITD'] + '/contrail-vrouter-agent',
         '../contrail-vrouter.initd.supervisord'))
+env.Alias('install',
+        env.InstallAs(env['INSTALL_SYSTEMD'] + '/contrail-vrouter-agent.service',
+        '../systemd/contrail-vrouter-agent.service'))
+env.Alias('install',
+        env.InstallAs(env['INSTALL_SYSTEMD'] + '/contrail-vrouter-nodemgr.service',
+        '../systemd/contrail-vrouter-nodemgr.service'))
 env.Alias('install', env.Install(env['INSTALL_CONF'], 
     '../supervisord_vrouter.conf'))
 env.Alias('install', env.Install(

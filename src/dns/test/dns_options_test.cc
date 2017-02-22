@@ -104,7 +104,7 @@ TEST_F(OptionsTest, DefaultConfFile) {
     EXPECT_EQ(options_.named_config_dir(), "/etc/contrail/dns");
     EXPECT_EQ(options_.named_log_file(), "/var/log/contrail/contrail-named.log");
     EXPECT_EQ(options_.rndc_config_file(), "contrail-rndc.conf");
-    EXPECT_EQ(options_.rndc_secret(), "secret==$");
+    EXPECT_EQ(options_.rndc_secret(), "xvysmOR8lnUQRBcunkC6vg==");
     EXPECT_EQ(options_.named_max_cache_size(), "32M");
     EXPECT_EQ(options_.hostname(), hostname_);
     EXPECT_EQ(options_.host_ip(), host_ip_);
@@ -126,7 +126,6 @@ TEST_F(OptionsTest, DefaultConfFile) {
     EXPECT_EQ(options_.ifmap_end_of_rib_timeout(), 10);
     EXPECT_EQ(options_.ifmap_peer_response_wait_time(), 60);
     EXPECT_EQ(options_.test_mode(), false);
-    EXPECT_EQ(options_.sandesh_send_rate_limit(), 100);
 }
 
 TEST_F(OptionsTest, OverrideStringFromCommandLine) {

@@ -51,6 +51,7 @@ public:
     virtual void FlowMsgHandler(vr_flow_req *req) = 0;
     virtual void FlowResponseHandler(vr_flow_response *req) { assert(0); }
     virtual void FlowTableInfoHandler(vr_flow_table_data *r) { assert(0); }
+    virtual void BridgeTableInfoHandler(vr_bridge_table_data *r) { assert(0);}
     virtual void VrfAssignMsgHandler(vr_vrf_assign_req *req) = 0;
     virtual void VrfStatsMsgHandler(vr_vrf_stats_req *req) = 0;
     virtual void DropStatsMsgHandler(vr_drop_stats_req *req) = 0;
@@ -382,7 +383,7 @@ public:
     void SetSeqno(uint32_t seq);
     void SetMeasureQueueDelay(bool val);
 protected:
-    static void Init(bool use_work_queue);
+    static void Init(bool use_work_queue, const std::string &cpu_pin_policy);
     static void SetSockTableEntry(KSyncSock *sock);
     bool ValidateAndEnqueue(char *data, KSyncBulkMsgContext *context);
 
@@ -484,7 +485,8 @@ public:
 
     static void NetlinkDecoder(char *data, SandeshContext *ctxt);
     static void NetlinkBulkDecoder(char *data, SandeshContext *ctxt, bool more);
-    static void Init(boost::asio::io_service &ios, int protocol);
+    static void Init(boost::asio::io_service &ios, int protocol,
+                     const std::string &cpu_pin_policy);
 private:
     boost::asio::netlink::raw::socket sock_;
 };
@@ -506,7 +508,8 @@ public:
     virtual std::size_t SendTo(KSyncBufferList *iovec, uint32_t seq_no);
     virtual void Receive(boost::asio::mutable_buffers_1);
 
-    static void Init(boost::asio::io_service &ios, int port);
+    static void Init(boost::asio::io_service &ios, int port,
+                     const std::string &cpu_pin_policy);
 private:
     boost::asio::ip::udp::socket sock_;
     boost::asio::ip::udp::endpoint server_ep_;
@@ -568,7 +571,8 @@ public:
     void AsyncReadStart();
 
     static void Init(EventManager *evm,
-                     boost::asio::ip::address ip_addr, int port);
+                     boost::asio::ip::address ip_addr, int port,
+                     const std::string &cpu_pin_policy);
 private:
     EventManager *evm_;
     TcpSession *session_;

@@ -23,7 +23,6 @@ import fixtures
 import socket
 from utils.analytics_fixture import AnalyticsFixture
 from mockcassandra import mockcassandra
-from mockredis import mockredis
 import logging
 from pysandesh.util import UTCTimestampUsec
 from utils.util import find_buildroot
@@ -46,10 +45,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         cls.cassandra_port = AnalyticsDbTest.get_free_port()
         mockcassandra.start_cassandra(cls.cassandra_port)
-        cls.redis_port = AnalyticsDbTest.get_free_port()
-        mockredis.start_redis(cls.redis_port)
-        cls.redis_password_port = AnalyticsDbTest.get_free_port()
-        mockredis.start_redis(cls.redis_password_port, password='contrail')
 
     @classmethod
     def tearDownClass(cls):
@@ -57,8 +52,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
             return
 
         mockcassandra.stop_cassandra(cls.cassandra_port)
-        mockredis.stop_redis(cls.redis_port)
-        mockredis.stop_redis(cls.redis_password_port, password='contrail')
         pass
 
     #@unittest.skip('Skipping test_00_verify_database_purge_with_percentage_input')
@@ -75,7 +68,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -100,7 +92,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -124,7 +115,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -148,7 +138,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -172,7 +161,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -196,7 +184,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_password_port,
                              self.__class__.cassandra_port,
                              redis_password='contrail'))
         assert vizd_obj.verify_on_setup()
@@ -221,7 +208,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_password_port,
                              self.__class__.cassandra_port,
                              redis_password='contrail'))
         assert vizd_obj.verify_on_setup()
@@ -246,7 +232,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_password_port,
                              self.__class__.cassandra_port,
                              redis_password='contrail'))
         assert vizd_obj.verify_on_setup()
@@ -271,7 +256,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_password_port,
                              self.__class__.cassandra_port,
                              redis_password='contrail'))
         assert vizd_obj.verify_on_setup()
@@ -296,7 +280,6 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_password_port,
                              self.__class__.cassandra_port,
                              redis_password='contrail'))
         assert vizd_obj.verify_on_setup()
@@ -304,6 +287,57 @@ class AnalyticsDbTest(testtools.TestCase, fixtures.TestWithFixtures):
         assert vizd_obj.verify_generator_collector_connection(
                     vizd_obj.opserver.http_port)
         assert vizd_obj.verify_database_purge_request_limit()
+        return True
+
+    #@unittest.skip('Query query engine logs to test QE w/ ClusterName')
+    def test_10_message_table_query(self):
+        '''
+        This test starts redis,vizd,opserver and qed
+        It uses the test class' cassandra instance
+        Then it checks that the collector UVE (via redis)
+        and syslog (via cassandra) can be accessed from
+        opserver.
+        '''
+        logging.info("%%% test_10_message_table_query %%%")
+        if AnalyticsDbTest._check_skip_test() is True:
+            return True
+  
+        vizd_obj = self.useFixture(
+            AnalyticsFixture(logging, builddir,
+                             self.__class__.cassandra_port,
+                             cluster_id='Cluster1'))
+  
+        vizd_obj2 = self.useFixture(
+            AnalyticsFixture(logging, builddir,
+                             self.__class__.cassandra_port,
+                             cluster_id='Cluster2'))
+  
+        assert vizd_obj.verify_on_setup()
+        assert vizd_obj.verify_collector_obj_count()
+        assert vizd_obj.verify_message_table_moduleid()
+        assert vizd_obj.verify_message_table_select_uint_type()
+        assert vizd_obj.verify_message_table_messagetype()
+        assert vizd_obj.verify_message_table_where_or()
+        assert vizd_obj.verify_message_table_where_and()
+        assert vizd_obj.verify_message_table_where_prefix()
+        assert vizd_obj.verify_message_table_filter()
+        assert vizd_obj.verify_message_table_filter2()
+        assert vizd_obj.verify_message_table_sort()
+        assert vizd_obj.verify_message_table_limit()
+  
+        assert vizd_obj2.verify_on_setup()
+        assert vizd_obj2.verify_collector_obj_count()
+        assert vizd_obj2.verify_message_table_moduleid()
+        assert vizd_obj2.verify_message_table_select_uint_type()
+        assert vizd_obj2.verify_message_table_messagetype()
+        assert vizd_obj2.verify_message_table_where_or()
+        assert vizd_obj2.verify_message_table_where_and()
+        assert vizd_obj2.verify_message_table_where_prefix()
+        assert vizd_obj2.verify_message_table_filter()
+        assert vizd_obj2.verify_message_table_filter2()
+        assert vizd_obj2.verify_message_table_sort()
+        assert vizd_obj2.verify_message_table_limit()
+  
         return True
 
     @staticmethod

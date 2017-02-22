@@ -1,13 +1,13 @@
 #
-# Copyright (c) 2016 Juniper Networks, Inc. All rights reserved.
+# Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
 #
 
 import argparse
 import ConfigParser
 import sys
 
-from pysandesh.sandesh_base import Sandesh, SandeshSystem
-import mesos_consts
+from pysandesh.sandesh_base import Sandesh, SandeshSystem, SandeshConfig
+import mesos_manager.mesos_consts as mesos_consts
 from sandesh_common.vns.constants import HttpPortMesosManager
 
 
@@ -18,8 +18,8 @@ def parse_args():
     args, remaining_argv = conf_parser.parse_known_args(sys.argv)
 
     defaults = {
-        'listen_ip_addr': mesos_consts._WEB_HOST,
-        'listen_port': mesos_consts._WEB_PORT,
+        'mesos_api_server': mesos_consts._WEB_HOST,
+        'mesos_api_port': mesos_consts._WEB_PORT,
         'http_server_port': HttpPortMesosManager,
         'worker_id': '0',
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
@@ -52,6 +52,15 @@ def parse_args():
         'cassandra_password': None,
         'cluster_id': '',
     }
+
+    sandesh_opts = {
+        'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+        'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+        'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+        'sandesh_ssl_enable': False,
+        'introspect_ssl_enable': False
+    }
+
     mesos_opts = {}
 
     config = ConfigParser.SafeConfigParser()
@@ -61,6 +70,8 @@ def parse_args():
             vnc_opts.update(dict(config.items("VNC")))
         if 'MESOS' in config.sections():
             mesos_opts.update(dict(config.items("MESOS")))
+        if 'SANDESH' in config.sections():
+            sandesh_opts.update(dict(config.items('SANDESH')))
         if 'DEFAULTS' in config.sections():
             defaults.update(dict(config.items("DEFAULTS")))
 
@@ -71,6 +82,7 @@ def parse_args():
     )
     defaults.update(vnc_opts)
     defaults.update(mesos_opts)
+    defaults.update(sandesh_opts)
     parser.set_defaults(**defaults)
     args = parser.parse_args()
 
@@ -80,4 +92,7 @@ def parse_args():
         args.pod_subnets = args.pod_subnets.split()
     if type(args.service_subnets) is str:
         args.service_subnets = args.service_subnets.split()
+    args.sandesh_config = SandeshConfig(args.sandesh_keyfile,
+        args.sandesh_certfile, args.sandesh_ca_cert,
+        args.sandesh_ssl_enable, args.introspect_ssl_enable)
     return args

@@ -22,6 +22,7 @@
 
 #include "ruleeng.h"
 #include "protobuf_collector.h"
+#include "structured_syslog_collector.h"
 #include "sflow_collector.h"
 #include "ipfix_collector.h"
 #include "viz_sandesh.h"
@@ -35,39 +36,32 @@ using boost::system::error_code;
 VizCollector::VizCollector(EventManager *evm, unsigned short listen_port,
             bool protobuf_collector_enabled,
             unsigned short protobuf_listen_port,
-            const std::vector<std::string> &cassandra_ips,
-            const std::vector<int> &cassandra_ports,
+            bool structured_syslog_collector_enabled,
+            unsigned short structured_syslog_listen_port,
             const std::string &redis_uve_ip, unsigned short redis_uve_port,
             const std::string &redis_password,
             const std::string &brokers,
             int syslog_port, int sflow_port, int ipfix_port,
             uint16_t partitions, bool dup,
-            const std::string &kafka_prefix, const TtlMap& ttl_map,
-            const std::string &cassandra_user,
-            const std::string &cassandra_password,
-            const std::string &cassandra_compaction_strategy,
+            const std::string &kafka_prefix,
+            const Options::Cassandra &cassandra_options,
             const std::string &zookeeper_server_list,
-            bool use_zookeeper, bool disable_all_db_writes,
-            bool disable_db_stats_writes, bool disable_db_messages_writes,
-            bool disable_db_messages_keyword_writes,
-            const DbWriteOptions &db_write_options) :
+            bool use_zookeeper,
+            const DbWriteOptions &db_write_options,
+            const SandeshConfig &sandesh_config) :
     db_initializer_(new DbHandlerInitializer(evm, DbGlobalName(dup),
         std::string("collector:DbIf"),
         boost::bind(&VizCollector::DbInitializeCb, this),
-        cassandra_ips, cassandra_ports, ttl_map, cassandra_user,
-        cassandra_password, cassandra_compaction_strategy,
+        cassandra_options,
         zookeeper_server_list, use_zookeeper,
-        disable_all_db_writes, disable_db_stats_writes,
-        disable_db_messages_writes, disable_db_messages_keyword_writes,
         db_write_options)),
     osp_(new OpServerProxy(evm, this, redis_uve_ip, redis_uve_port,
          redis_password, brokers, partitions, kafka_prefix)),
     ruleeng_(new Ruleeng(db_initializer_->GetDbHandler(), osp_.get())),
-    collector_(new Collector(evm, listen_port, db_initializer_->GetDbHandler(),
+    collector_(new Collector(evm, listen_port, sandesh_config,
+                             db_initializer_->GetDbHandler(),
         osp_.get(),
-        boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3, _4),
-        cassandra_ips, cassandra_ports, ttl_map, cassandra_user,
-        cassandra_password)),
+        boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3, _4))),
     syslog_listener_(new SyslogListeners(evm,
             boost::bind(&Ruleeng::rule_execute, ruleeng_.get(), _1, _2, _3, _4),
             db_initializer_->GetDbHandler(), syslog_port)),
@@ -83,9 +77,11 @@ VizCollector::VizCollector(EventManager *evm, unsigned short listen_port,
         name_ = boost::asio::ip::host_name(error);
     if (protobuf_collector_enabled) {
         protobuf_collector_.reset(new ProtobufCollector(evm,
-            protobuf_listen_port, cassandra_ips, cassandra_ports,
-            ttl_map, cassandra_user, cassandra_password,
-            db_initializer_->GetDbHandler()));
+            protobuf_listen_port, db_initializer_->GetDbHandler()));
+    }
+    if (structured_syslog_collector_enabled) {
+        structured_syslog_collector_.reset(new StructuredSyslogCollector(evm,
+            structured_syslog_listen_port, db_initializer_->GetDbHandler()));
     }
     CollectorPublish();
 }
@@ -193,6 +189,10 @@ void VizCollector::Shutdown() {
         protobuf_collector_->Shutdown();
         WaitForIdle();
     }
+    if (structured_syslog_collector_) {
+        structured_syslog_collector_->Shutdown();
+        WaitForIdle();
+    }
     if (sflow_collector_) {
         sflow_collector_->Shutdown();
         WaitForIdle();
@@ -216,6 +216,9 @@ void VizCollector::DbInitializeCb() {
     }
     if (protobuf_collector_) {
         protobuf_collector_->Initialize();
+    }
+    if (structured_syslog_collector_) {
+        structured_syslog_collector_->Initialize();
     }
     if (sflow_collector_) {
         sflow_collector_->Start();

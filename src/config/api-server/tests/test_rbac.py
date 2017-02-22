@@ -162,6 +162,9 @@ class TestRbacMtDisabled(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'rbac'),
             ('DEFAULTS', 'cloud_admin_role', 'cloud-admin'),
@@ -169,13 +172,18 @@ class TestRbacMtDisabled(test_case.ApiServerTestCase):
         ]
         super(TestRbacMtDisabled, cls).setUpClass(extra_config_knobs=extra_config_knobs)
 
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbacMtDisabled, cls).tearDownClass(*args, **kwargs)
+
     def setUp(self):
         super(TestRbacMtDisabled, self).setUp()
         self._vnc_lib = VncApi('u', 'p', api_server_host=self._api_server_ip,
                                api_server_port=self._api_server_port)
 
     def test_rbac_config(self):
-        rv = self._vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = self._vnc_lib.get_aaa_mode()
         self.assertNotEquals(rv["aaa-mode"], "rbac")
         self.assertEquals(rv["aaa-mode"], "no-auth")
 
@@ -191,6 +199,9 @@ class TestRbacMtEnabled(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'rbac'),
             ('DEFAULTS', 'cloud_admin_role', 'cloud-admin'),
@@ -198,13 +209,18 @@ class TestRbacMtEnabled(test_case.ApiServerTestCase):
         ]
         super(TestRbacMtEnabled, cls).setUpClass(extra_config_knobs=extra_config_knobs)
 
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbacMtEnabled, cls).tearDownClass(*args, **kwargs)
+
     def setUp(self):
         super(TestRbacMtEnabled, self).setUp()
         self._vnc_lib = VncApi('u', 'p', api_server_host=self._api_server_ip,
                                api_server_port=self._api_server_port)
 
     def test_rbac_config(self):
-        rv = self._vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = self._vnc_lib.get_aaa_mode()
         self.assertNotEquals(rv["aaa-mode"], "rbac")
         self.assertEquals(rv["aaa-mode"], "cloud-admin")
 
@@ -220,11 +236,19 @@ class TestRbacAaaModeRbac(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'rbac'),
             ('DEFAULTS', 'cloud_admin_role', 'cloud-admin'),
         ]
         super(TestRbacAaaModeRbac, cls).setUpClass(extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbacAaaModeRbac, cls).tearDownClass(*args, **kwargs)
 
     def setUp(self):
         super(TestRbacAaaModeRbac, self).setUp()
@@ -232,7 +256,7 @@ class TestRbacAaaModeRbac(test_case.ApiServerTestCase):
                                api_server_port=self._api_server_port)
 
     def test_rbac_config(self):
-        rv = self._vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = self._vnc_lib.get_aaa_mode()
         self.assertEquals(rv["aaa-mode"], "rbac")
 
         rv = self._vnc_lib._request(rest.OP_GET, '/multi-tenancy')
@@ -247,11 +271,19 @@ class TestRbacAaaModeAdminOnly(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'cloud-admin'),
             ('DEFAULTS', 'cloud_admin_role', 'cloud-admin'),
         ]
         super(TestRbacAaaModeAdminOnly, cls).setUpClass(extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbacAaaModeAdminOnly, cls).tearDownClass(*args, **kwargs)
 
     def setUp(self):
         super(TestRbacAaaModeAdminOnly, self).setUp()
@@ -259,7 +291,7 @@ class TestRbacAaaModeAdminOnly(test_case.ApiServerTestCase):
                                api_server_port=self._api_server_port)
 
     def test_rbac_config(self):
-        rv = self._vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = self._vnc_lib.get_aaa_mode()
         self.assertEquals(rv["aaa-mode"], "cloud-admin")
 
         rv = self._vnc_lib._request(rest.OP_GET, '/multi-tenancy')
@@ -274,11 +306,19 @@ class TestRbacAaaModeNoAuth(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'no-auth'),
             ('DEFAULTS', 'cloud_admin_role', 'cloud-admin'),
         ]
         super(TestRbacAaaModeNoAuth, cls).setUpClass(extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbacAaaModeNoAuth, cls).tearDownClass(*args, **kwargs)
 
     def setUp(self):
         super(TestRbacAaaModeNoAuth, self).setUp()
@@ -286,7 +326,7 @@ class TestRbacAaaModeNoAuth(test_case.ApiServerTestCase):
                                api_server_port=self._api_server_port)
 
     def test_rbac_config(self):
-        rv = self._vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = self._vnc_lib.get_aaa_mode()
         self.assertEquals(rv["aaa-mode"], "no-auth")
 
         rv = self._vnc_lib._request(rest.OP_GET, '/multi-tenancy')
@@ -300,11 +340,19 @@ class TestRbacAaaModeInvalid(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'invalid-value'),
             ('DEFAULTS', 'cloud_admin_role', 'cloud-admin'),
         ]
         super(TestRbacAaaModeInvalid, cls).setUpClass(extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbacAaaModeInvalid, cls).tearDownClass(*args, **kwargs)
 
     def setUp(self):
         super(TestRbacAaaModeInvalid, self).setUp()
@@ -312,7 +360,7 @@ class TestRbacAaaModeInvalid(test_case.ApiServerTestCase):
                                api_server_port=self._api_server_port)
 
     def test_rbac_config(self):
-        rv = self._vnc_lib._request(rest.OP_GET, '/aaa-mode')
+        rv = self._vnc_lib.get_aaa_mode()
         self.assertEquals(rv["aaa-mode"], "cloud-admin")
 
         rv = self._vnc_lib._request(rest.OP_GET, '/multi-tenancy')
@@ -322,14 +370,50 @@ class TestRbacAaaModeInvalid(test_case.ApiServerTestCase):
         super(TestRbacAaaModeInvalid, self).tearDown()
     # end tearDown
 
+class TestAuthModeInvalid(test_case.ApiServerTestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        extra_config_knobs = [
+            ('DEFAULTS', 'auth', 'no-auth'),
+        ]
+        super(TestAuthModeInvalid, cls).setUpClass(extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestAuthModeInvalid, cls).tearDownClass(*args, **kwargs)
+
+    def setUp(self):
+        super(TestAuthModeInvalid, self).setUp()
+
+    def test_aaa_mode(self):
+        rv = self._api_server.is_auth_disabled()
+        self.assertEquals(rv, True)
+
+    def tearDown(self):
+        super(TestAuthModeInvalid, self).tearDown()
+    # end tearDown
+
 class TestRbac(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         extra_config_knobs = [
             ('DEFAULTS', 'aaa_mode', 'rbac'),
         ]
         super(TestRbac, cls).setUpClass(extra_config_knobs=extra_config_knobs)
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRbac, cls).tearDownClass(*args, **kwargs)
 
     def setUp(self):
         super(TestRbac, self).setUp()

@@ -20,6 +20,7 @@ import gevent
 from gevent import queue
 from cfgm_common.vnc_object_db import VncObjectDBClient
 from netaddr import IPAddress
+from cfgm_common.zkclient import IndexAllocator
 from cfgm_common import vnc_greenlets
 from sandesh_common.vns.constants import DEVICE_MANAGER_KEYSPACE_NAME
 
@@ -44,11 +45,9 @@ class BgpRouterDM(DBBaseDM):
             obj = self.read_obj(self.uuid)
         self.name = obj['fq_name'][-1]
         self.params = obj['bgp_router_parameters']
-        if self.params is not None:
-            if self.params.get('autonomous_system') is None:
-                self.params[
-                    'autonomous_system'] = \
-                    GlobalSystemConfigDM.get_global_asn()
+        if self.params and self.params.get('autonomous_system') is None:
+            self.params[
+                'autonomous_system'] = GlobalSystemConfigDM.get_global_asn()
         self.update_single_ref('physical_router', obj)
         new_peers = {}
         for ref in obj.get('bgp_router_refs', []):
@@ -86,15 +85,15 @@ class BgpRouterDM(DBBaseDM):
         resp.response(req.context())
 
     def get_all_bgp_router_ips(self):
+        bgp_router_ips = {}
         if self.params['address'] is not None:
-            bgp_router_ips = set([self.params['address']])
-        else:
-            bgp_router_ips = set()
+            bgp_router_ips[self.name] = self.params['address']
+
         for peer_uuid in self.bgp_routers:
             peer = BgpRouterDM.get(peer_uuid)
             if peer is None or peer.params['address'] is None:
                 continue
-            bgp_router_ips.add(peer.params['address'])
+            bgp_router_ips[peer.name] = peer.params['address']
         return bgp_router_ips
     # end get_all_bgp_router_ips
 
@@ -268,11 +267,10 @@ class PhysicalRouterDM(DBBaseDM):
         create_set = new_vn_ip_set.difference(old_set)
         for vn_subnet in delete_set:
             (vn_uuid, subnet_prefix) = vn_subnet.split(':', 1)
-            ret = self.free_ip(
-                vn_uuid, subnet_prefix, self.vn_ip_map[ip_used_for][vn_subnet])
+            ret = self.free_ip(vn_uuid, self.vn_ip_map[ip_used_for][vn_subnet])
             if ret == False:
-                self._logger.error("Unable to free ip for vn/subnet/pr \
-                                  (%s/%s/%s)" % (
+                self._logger.error("Unable to free ip for vn/subnet/pr "
+                                   "(%s/%s/%s)" % (
                     vn_uuid,
                     subnet_prefix,
                     self.uuid))
@@ -280,8 +278,8 @@ class PhysicalRouterDM(DBBaseDM):
             ret = self._object_db.delete_ip(
                        self.uuid + ':' + vn_uuid + ':' + subnet_prefix, ip_used_for)
             if ret == False:
-                self._logger.error("Unable to free ip from db for vn/subnet/pr \
-                                  (%s/%s/%s)" % (
+                self._logger.error("Unable to free ip from db for vn/subnet/pr "
+                                   "(%s/%s/%s)" % (
                     vn_uuid,
                     subnet_prefix,
                     self.uuid))
@@ -297,8 +295,8 @@ class PhysicalRouterDM(DBBaseDM):
             (sub, length) = subnet_prefix.split('/')
             ip_addr = self.reserve_ip(vn_uuid, subnet_uuid)
             if ip_addr is None:
-                self._logger.error("Unable to allocate ip for vn/subnet/pr \
-                               (%s/%s/%s)" % (
+                self._logger.error("Unable to allocate ip for vn/subnet/pr "
+                                   "(%s/%s/%s)" % (
                     vn_uuid,
                     subnet_prefix,
                     self.uuid))
@@ -306,14 +304,14 @@ class PhysicalRouterDM(DBBaseDM):
             ret = self._object_db.add_ip(self.uuid + ':' + vn_uuid + ':' + subnet_prefix,
                                          ip_used_for, ip_addr + '/' + length)
             if ret == False:
-                self._logger.error("Unable to store ip for vn/subnet/pr \
-                               (%s/%s/%s)" % (
+                self._logger.error("Unable to store ip for vn/subnet/pr "
+                                   "(%s/%s/%s)" % (
                     self.uuid,
                     subnet_prefix,
                     self.uuid))
                 if self.free_ip(vn_uuid, ip_addr) == False:
-                    self._logger.error("Unable to free ip for vn/subnet/pr \
-                               (%s/%s/%s)" % (
+                    self._logger.error("Unable to free ip for vn/subnet/pr "
+                                       "(%s/%s/%s)" % (
                         self.uuid,
                         subnet_prefix,
                         self.uuid))
@@ -351,14 +349,14 @@ class PhysicalRouterDM(DBBaseDM):
 
         if (self.vendor is None or self.product is None or
                 self.vendor.lower() != "juniper" or self.product.lower()[:2] != "mx"):
-            self._logger.info("auto configuraion of physical router is not supported \
-               vendor family(%s:%s), ip: %s, not pushing netconf message" %
+            self._logger.info("auto configuraion of physical router is not supported "
+               "vendor family(%s:%s), ip: %s, not pushing netconf message" %
                               (str(self.vendor),  str(self.product), self.management_ip))
             return False
 
         if not self.vnc_managed:
-            self._logger.info("vnc managed property must be set for a physical router to get auto \
-                configured, ip: %s, not pushing netconf message" % (self.management_ip))
+            self._logger.info("vnc managed property must be set for a physical router to get auto "
+                "configured, ip: %s, not pushing netconf message" % (self.management_ip))
             return False
         return True
 
@@ -450,8 +448,8 @@ class PhysicalRouterDM(DBBaseDM):
                                 not resources["vlan_id"] or
                                 not resources["unit_id"]):
                             self._logger.error(
-                                "Cannot allocate PNF resources for \
-                                Virtual Machine Interface" + pi_vmi_uuid)
+                                "Cannot allocate PNF resources for "
+                                "Virtual Machine Interface" + pi_vmi_uuid)
                             return
                         logical_interface = JunosInterface(
                             pi.name + '.' + resources["unit_id"],
@@ -571,14 +569,14 @@ class PhysicalRouterDM(DBBaseDM):
                 peer = BgpRouterDM.get(peer_uuid)
                 if peer is None:
                     continue
-                local_as = bgp_router.params.get('local_autonomous_system') or \
-                               bgp_router.params.get('autonomous_system')
-                peer_as = peer.params.get('local_autonomous_system') or \
-                               peer.params.get('autonomous_system')
+                local_as = (bgp_router.params.get('local_autonomous_system') or
+                               bgp_router.params.get('autonomous_system'))
+                peer_as = (peer.params.get('local_autonomous_system') or
+                               peer.params.get('autonomous_system'))
                 external = (local_as != peer_as)
                 self.config_manager.add_bgp_peer(peer.params['address'],
-                                                 peer.params, attr, external)
-            self.config_manager.set_bgp_config(bgp_router.params)
+                                                 peer.params, attr, external, peer)
+            self.config_manager.set_bgp_config(bgp_router.params, bgp_router)
             self.config_manager.set_global_routing_options(bgp_router.params)
             bgp_router_ips = bgp_router.get_all_bgp_router_ips()
             tunnel_ip = self.dataplane_ip
@@ -633,7 +631,7 @@ class PhysicalRouterDM(DBBaseDM):
                         if vn_obj.get_forwarding_mode() == 'l2_l3':
                             irb_ips = vn_irb_ip_map['irb'].get(vn_id, [])
 
-                        ri_conf = { 'ri_name': vrf_name_l2 }
+                        ri_conf = { 'ri_name': vrf_name_l2, 'vn': vn_obj }
                         ri_conf['is_l2'] = True
                         ri_conf['is_l2_l3'] = (vn_obj.get_forwarding_mode() == 'l2_l3')
                         ri_conf['import_targets'] = import_set
@@ -658,7 +656,7 @@ class PhysicalRouterDM(DBBaseDM):
                                 'l3', 0)]
                         else:
                             lo0_ips = vn_irb_ip_map['lo0'].get(vn_id, [])
-                        ri_conf = { 'ri_name': vrf_name_l3 }
+                        ri_conf = { 'ri_name': vrf_name_l3, 'vn': vn_obj }
                         ri_conf['is_l2_l3'] = (vn_obj.get_forwarding_mode() == 'l2_l3')
                         ri_conf['import_targets'] = import_set
                         ri_conf['export_targets'] = export_set
@@ -675,8 +673,8 @@ class PhysicalRouterDM(DBBaseDM):
                     len(vn_obj.instance_ip_map) > 0):
                 service_port_ids = DMUtils.get_service_ports(vn_obj.vn_network_id)
                 if self.is_service_port_id_valid(service_port_ids[0]) == False:
-                    self._logger.error("DM can't allocate service interfaces for \
-                                          (vn, vn-id)=(%s,%s)" % (
+                    self._logger.error("DM can't allocate service interfaces for "
+                                       "(vn, vn-id)=(%s,%s)" % (
                         vn_obj.fq_name,
                         vn_obj.vn_network_id))
                 else:
@@ -693,7 +691,7 @@ class PhysicalRouterDM(DBBaseDM):
                         JunosInterface(
                             service_ports[0] + "." + str(service_port_ids[1]),
                             'l3', 0))
-                    ri_conf = { 'ri_name': vrf_name }
+                    ri_conf = { 'ri_name': vrf_name, 'vn': vn_obj }
                     ri_conf['import_targets'] = import_set
                     ri_conf['interfaces'] = interfaces
                     ri_conf['fip_map'] = vn_obj.instance_ip_map
@@ -1344,7 +1342,7 @@ class DMCassandraDB(VncObjectDBClient):
 
         self.pnf_vlan_allocator_map = {}
         self.pnf_unit_allocator_map = {}
-        self.pnf_network_allocator = self.create_index_allocator(
+        self.pnf_network_allocator = IndexAllocator(
             zkclient, self._zk_path_pfx+self._PNF_NETWORK_ALLOC_PATH,
             self._PNF_MAX_NETWORK_ID)
 
@@ -1367,7 +1365,7 @@ class DMCassandraDB(VncObjectDBClient):
     def get_pnf_vlan_allocator(self, pr_id):
         return self.pnf_vlan_allocator_map.setdefault(
             pr_id,
-            self.self.create_index_allocator(
+            IndexAllocator(
                 self._zkclient,
                 self._zk_path_pfx+self._PNF_VLAN_ALLOC_PATH+pr_id+'/',
                 self._PNF_MAX_VLAN)
@@ -1376,7 +1374,7 @@ class DMCassandraDB(VncObjectDBClient):
     def get_pnf_unit_allocator(self, pi_id):
         return self.pnf_unit_allocator_map.setdefault(
             pi_id,
-            self.self.create_index_allocator(
+            IndexAllocator(
                 self._zkclient,
                 self._zk_path_pfx+self._PNF_UNIT_ALLOC_PATH+pi_id+'/',
                 self._PNF_MAX_UNIT)
@@ -1491,8 +1489,8 @@ class DMCassandraDB(VncObjectDBClient):
             ret = self.delete(self._PR_VN_IP_CF, pr_uuid + ':' + vn_subnet,
                               [DMUtils.get_ip_cs_column_name(ip_used_for)])
             if ret == False:
-                self._logger.error("Unable to free ip from db for vn/pr/subnet/ip_used_for \
-                                        (%s/%s/%s)" % (pr_uuid, vn_subnet, ip_used_for))
+                self._logger.error("Unable to free ip from db for vn/pr/subnet/ip_used_for "
+                                   "(%s/%s/%s)" % (pr_uuid, vn_subnet, ip_used_for))
     # end
 
     def handle_pr_deletes(self, current_pr_set):

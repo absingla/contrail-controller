@@ -394,6 +394,38 @@ bool AclTable::IFNodeToUuid(IFMapNode *node, boost::uuids::uuid &u) {
     return true;
 }
 
+static void AddAceToAcl(AclSpec *acl_spec, const AclTable *acl_table,
+                        AccessControlList *cfg_acl,
+                        const MatchConditionType *match_condition,
+                        const ActionListType action_list,
+                        const string rule_uuid, uint32_t id) {
+    // ACE clean up
+    AclEntrySpec ace_spec;
+    ace_spec.id = id;
+
+    if (ace_spec.Populate(match_condition) == false) {
+        return;
+    }
+    // Make default as terminal rule,
+    // all the dynamic acl have non-terminal rules
+    if (cfg_acl->entries().dynamic) {
+        ace_spec.terminal = false;
+    } else {
+        ace_spec.terminal = true;
+    }
+
+    ace_spec.PopulateAction(acl_table, action_list);
+    ace_spec.rule_uuid = rule_uuid;
+    // Add the Ace to the acl
+    acl_spec->acl_entry_specs_.push_back(ace_spec);
+
+
+    // Trace acl entry object
+    AclEntrySandeshData ae_spec;
+    AclEntryObjectTrace(ae_spec, ace_spec);
+    ACL_TRACE(EntryTrace, ae_spec);
+}
+
 bool AclTable::IFNodeToReq(IFMapNode *node, DBRequest &req,
         const boost::uuids::uuid &u) {
 
@@ -423,31 +455,19 @@ bool AclTable::IFNodeToReq(IFMapNode *node, DBRequest &req,
     std::vector<AclRuleType>::const_iterator ir;
     uint32_t id = 1;
     for(ir = entrs.begin(); ir != entrs.end(); ++ir) {
-        // ACE clean up
-        AclEntrySpec ace_spec;
-        ace_spec.id = id++;
-
-        if (ace_spec.Populate(&(ir->match_condition)) == false) {
-            continue;
+        AddAceToAcl(&acl_spec, this, cfg_acl, &(ir->match_condition),
+                        ir->action_list, ir->rule_uuid, id++);
+        //Add reverse rule if needed
+        if ((ir->direction.compare("<>") == 0)) {
+            MatchConditionType rmatch_condition;
+            rmatch_condition = ir->match_condition;
+            rmatch_condition.src_address = ir->match_condition.dst_address;
+            rmatch_condition.dst_address = ir->match_condition.src_address;
+            rmatch_condition.src_port = ir->match_condition.dst_port;
+            rmatch_condition.dst_port = ir->match_condition.src_port;
+            AddAceToAcl(&acl_spec, this, cfg_acl, &rmatch_condition,
+                        ir->action_list, ir->rule_uuid, id++);
         }
-        // Make default as terminal rule, 
-        // all the dynamic acl have non-terminal rules
-        if (cfg_acl->entries().dynamic) {
-            ace_spec.terminal = false;
-        } else {
-            ace_spec.terminal = true;
-        }
-
-        ace_spec.PopulateAction(this, ir->action_list);
-        ace_spec.rule_uuid = ir->rule_uuid;
-        // Add the Ace to the acl
-        acl_spec.acl_entry_specs_.push_back(ace_spec);
-
-
-        // Trace acl entry object
-        AclEntrySandeshData ae_spec;
-        AclEntryObjectTrace(ae_spec, ace_spec);
-        ACL_TRACE(EntryTrace, ae_spec);
     }
 
     AclKey *key = new AclKey(acl_spec.acl_id);
@@ -942,6 +962,13 @@ void AclEntrySpec::AddMirrorEntry(Agent *agent) const {
         if (action.ta_type != TrafficAction::MIRROR_ACTION) {
             continue;
         }
+       // Check for nic assisted mirroring
+        if (action.ma.nic_assisted_mirroring) {
+            agent->mirror_table()->AddMirrorEntry(
+                    action.ma.analyzer_name,
+                    action.ma.nic_assisted_mirroring_vlan);
+            continue;
+        }
 
         IpAddress sip = agent->GetMirrorSourceIp(action.ma.ip);
          MirrorEntryData::MirrorEntryFlags mirror_flag =
@@ -949,8 +976,8 @@ void AclEntrySpec::AddMirrorEntry(Agent *agent) const {
                                            action.ma.juniper_header);
         if (mirror_flag == MirrorEntryData::DynamicNH_With_JuniperHdr) {
             agent->mirror_table()->AddMirrorEntry(action.ma.analyzer_name,
-                action.ma.vrf_name, sip, agent->mirror_port(), action.ma.ip,
-                action.ma.port);
+                    action.ma.vrf_name, sip, agent->mirror_port(), action.ma.ip,
+                    action.ma.port);
         } else if (mirror_flag == MirrorEntryData::DynamicNH_Without_JuniperHdr) {
             // remote_vm_analyzer mac provided from the config
             agent->mirror_table()->AddMirrorEntry(action.ma.analyzer_name,
@@ -988,11 +1015,22 @@ void AclEntrySpec::PopulateAction(const AclTable *acl_table,
         ActionSpec action(TrafficAction::ALERT_ACTION);
         action_l.push_back(action);
     }
-
-    if (!action_list.mirror_to.analyzer_name.empty()) {
-        ActionSpec maction;
-        maction.ta_type = TrafficAction::MIRROR_ACTION;
-        maction.simple_action = TrafficAction::MIRROR;
+    // Check for nic assisted mirroring
+    ActionSpec maction;
+    maction.ta_type = TrafficAction::MIRROR_ACTION;
+    maction.simple_action = TrafficAction::MIRROR;
+    // Check nic assisted mirroring supported.
+    // Then Copy only mirroring_vlan.
+    if (!action_list.mirror_to.analyzer_name.empty()
+        && action_list.mirror_to.nic_assisted_mirroring) {
+        maction.ma.nic_assisted_mirroring =
+            action_list.mirror_to.nic_assisted_mirroring;
+        maction.ma.nic_assisted_mirroring_vlan =
+            action_list.mirror_to.nic_assisted_mirroring_vlan;
+        maction.ma.analyzer_name = action_list.mirror_to.analyzer_name;
+        action_l.push_back(maction);
+        AddMirrorEntry(acl_table->agent());
+    } else if (!action_list.mirror_to.analyzer_name.empty()) {
         boost::system::error_code ec;
         maction.ma.vrf_name = std::string();
         maction.ma.analyzer_name = action_list.mirror_to.analyzer_name;

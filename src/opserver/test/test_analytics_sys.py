@@ -25,8 +25,8 @@ import fixtures
 import socket
 from utils.analytics_fixture import AnalyticsFixture
 from utils.generator_fixture import GeneratorFixture
+from utils.stats_fixture import StatsFixture
 from mockcassandra import mockcassandra
-from mockredis import mockredis
 import logging
 import time
 import pycassa
@@ -56,8 +56,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         cls.cassandra_port = AnalyticsTest.get_free_port()
         mockcassandra.start_cassandra(cls.cassandra_port)
-        cls.redis_port = AnalyticsTest.get_free_port()
-        mockredis.start_redis(cls.redis_port)
 
 
     @classmethod
@@ -66,7 +64,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
             return
 
         mockcassandra.stop_cassandra(cls.cassandra_port)
-        mockredis.stop_redis(cls.redis_port)
         pass
 
     def _update_analytics_start_time(self, start_time):
@@ -103,7 +100,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -124,7 +120,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -156,7 +151,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -206,7 +200,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         self._update_analytics_start_time(start_time)
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -237,7 +230,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         self._update_analytics_start_time(start_time)
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -269,7 +261,7 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
             return True
         
         vizd_obj = self.useFixture(
-            AnalyticsFixture(logging, builddir, -1,
+            AnalyticsFixture(logging, builddir,
                              self.__class__.cassandra_port, 
                              collector_ha_test=True))
         assert vizd_obj.verify_on_setup()
@@ -303,7 +295,7 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
                     ModuleNames[Module.COLLECTOR], 'UveTrace')
     #end test_06_send_tracebuffer
 
-    #@unittest.skip('verify source/module list')
+    @unittest.skip('verify source/module list')
     def test_07_table_source_module_list(self):
         '''
         This test verifies /analytics/table/<table>/column-values/Source
@@ -314,26 +306,30 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
             return True
 
         vizd_obj = self.useFixture(
-            AnalyticsFixture(logging, builddir, -1,
+            AnalyticsFixture(logging, builddir,
                              self.__class__.cassandra_port, 
                              collector_ha_test=True))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
-        exp_genlist1 = ['contrail-collector', 'contrail-analytics-api',
-                        'contrail-query-engine']
-        assert vizd_obj.verify_generator_list(vizd_obj.collectors[0], 
-                                              exp_genlist1)
-        exp_genlist2 = ['contrail-collector'] 
-        assert vizd_obj.verify_generator_list(vizd_obj.collectors[1], 
-                                              exp_genlist2)
+        source = socket.gethostname()
+        exp_genlist = [
+            source+':Analytics:contrail-collector:0',
+            source+':Analytics:contrail-analytics-api:0',
+            source+':Analytics:contrail-query-engine:0',
+            source+'dup:Analytics:contrail-collector:0'
+        ]
+        assert vizd_obj.verify_generator_list(vizd_obj.collectors,
+                                              exp_genlist)
         exp_src_list = [col.hostname for col in vizd_obj.collectors]
-        exp_mod_list = exp_genlist1 
+        exp_mod_list = ['contrail-collector', 'contrail-analytics-api',
+            'contrail-query-engine']
         assert vizd_obj.verify_table_source_module_list(exp_src_list, 
                                                         exp_mod_list)
         # stop the second redis_uve instance and verify the src/module list
         vizd_obj.redis_uves[1].stop()
         exp_src_list = [vizd_obj.collectors[0].hostname]
-        exp_mod_list = exp_genlist1
+        exp_mod_list = [gen.split(':')[2] \
+            for gen in vizd_obj.get_generator_list(vizd_obj.collectors[0])]
         assert vizd_obj.verify_table_source_module_list(exp_src_list, 
                                                         exp_mod_list)
     #end test_07_table_source_module_list
@@ -353,7 +349,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         self._update_analytics_start_time(start_time)
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_where_query()
@@ -378,7 +373,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         logging.info('%%% test_09_verify_object_table_query %%%')
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         collectors = [vizd_obj.get_collector()]
@@ -421,7 +415,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert vizd_obj.verify_on_setup()
         assert vizd_obj.verify_collector_obj_count()
@@ -454,7 +447,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
 
         vizd_obj = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port,
                              syslog_port = True))
         assert vizd_obj.verify_on_setup()
@@ -486,7 +478,6 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         logging.info('%%% test_12_verify_message_non_ascii %%%')
         analytics = self.useFixture(
             AnalyticsFixture(logging, builddir,
-                             self.__class__.redis_port,
                              self.__class__.cassandra_port))
         assert analytics.verify_on_setup()
         collectors = [analytics.get_collector()]
@@ -499,6 +490,135 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         # Verify vizd is still running
         assert analytics.verify_collector_gen(analytics.collectors[0])
     # end test_12_verify_message_non_ascii
+
+    #@unittest.skip('verify sandesh ssl')
+    def test_13_verify_sandesh_ssl(self):
+        '''
+        This test enables sandesh ssl on contrail-collector and all the
+        analytics generators in the AnalyticsFixture and verifies that the
+        secure sandesh connection is established between the Collector and all
+        the Generators.
+        '''
+        logging.info('%%% test_13_verify_sandesh_ssl %%%')
+        sandesh_cfg = {
+            'sandesh_keyfile': builddir+'/opserver/test/data/ssl/server-privkey.pem',
+            'sandesh_certfile': builddir+'/opserver/test/data/ssl/server.pem',
+            'sandesh_ca_cert': builddir+'/opserver/test/data/ssl/ca-cert.pem',
+            'sandesh_ssl_enable': 'True'
+        }
+        vizd_obj = self.useFixture(
+            AnalyticsFixture(logging, builddir,
+                             self.__class__.cassandra_port,
+                             sandesh_config=sandesh_cfg))
+        assert vizd_obj.verify_on_setup()
+        assert vizd_obj.verify_collector_obj_count()
+
+        source = socket.gethostname()
+        exp_genlist = [
+            source+':Analytics:contrail-collector:0',
+            source+':Analytics:contrail-analytics-api:0',
+            source+':Analytics:contrail-query-engine:0'
+        ]
+        assert vizd_obj.verify_generator_list(vizd_obj.collectors,
+                                              exp_genlist)
+
+        # start a python generator without enabling sandesh ssl
+        # and verify that it is not connected to the Collector.
+        test_gen1 = self.useFixture(
+            GeneratorFixture("contrail-test-generator1",
+                vizd_obj.get_collectors(), logging,
+                vizd_obj.get_opserver_port()))
+        assert not test_gen1.verify_on_setup()
+
+        # start a python generator with sandesh_ssl_enable = True
+        # and verify that it is connected to the Collector.
+        test_gen2 = self.useFixture(
+            GeneratorFixture("contrail-test-generator2",
+                vizd_obj.get_collectors(), logging,
+                vizd_obj.get_opserver_port(), sandesh_config=sandesh_cfg))
+        assert test_gen2.verify_on_setup()
+
+        # stop QE and verify the generator list
+        vizd_obj.query_engine.stop()
+        exp_genlist = [
+            source+':Analytics:contrail-collector:0',
+            source+':Analytics:contrail-analytics-api:0',
+            source+':Test:contrail-test-generator2:0'
+        ]
+        assert vizd_obj.verify_generator_list(vizd_obj.collectors,
+                                              exp_genlist)
+
+        # Start QE with sandesh_ssl_enable = False and verify that the
+        # QE is not connected to the Collector
+        vizd_obj.query_engine.set_sandesh_config(None)
+        vizd_obj.query_engine.start()
+        assert not vizd_obj.verify_generator_collector_connection(
+            vizd_obj.query_engine.http_port)
+        assert vizd_obj.verify_generator_list(vizd_obj.collectors,
+                                              exp_genlist)
+
+        # Restart Collector with sandesh_ssl_enable = False and verify the
+        # generator list in the Collector.
+        vizd_obj.collectors[0].stop()
+        vizd_obj.collectors[0].set_sandesh_config(None)
+        vizd_obj.collectors[0].start()
+        assert not vizd_obj.verify_generator_collector_connection(
+            test_gen2._http_port)
+        assert not vizd_obj.verify_generator_collector_connection(
+            vizd_obj.opserver.http_port)
+        exp_genlist = [
+            source+':Analytics:contrail-collector:0',
+            source+':Analytics:contrail-query-engine:0',
+            source+':Test:contrail-test-generator1:0'
+        ]
+        assert vizd_obj.verify_generator_list(vizd_obj.collectors,
+                                              exp_genlist)
+    # end test_13_verify_sandesh_ssl
+
+    #@unittest.skip('verify test_14_verify_qe_stats_collection query')
+    def test_14_verify_qe_stats_collection(self):
+        '''
+        This test checks if the QE is able to collect the stats
+        related to DB reads correctly
+        '''
+        logging.info('%%% test_14_verify_qe_stats_collection %%%')
+        analytics = self.useFixture(
+            AnalyticsFixture(logging, builddir,
+                             self.__class__.cassandra_port))
+        assert analytics.verify_on_setup()
+        # make stat table entries also
+        collectors = [analytics.get_collector()]
+        generator_obj = self.useFixture(
+            StatsFixture("VRouterAgent", collectors,
+                             logging, analytics.get_opserver_port()))
+        assert generator_obj.verify_on_setup()
+
+        logging.info("Starting stat gen " + str(UTCTimestampUsec()))
+
+        generator_obj.send_test_stat("t010","lxxx","samp1",1,1);
+        generator_obj.send_test_stat("t010","lyyy","samp1",2,2);
+        assert generator_obj.verify_test_stat("StatTable.StatTestState.st","-2m",
+            select_fields = [ "UUID", "st.s1", "st.i1", "st.d1" ],
+            where_clause = 'name|st.s1=t010|samp1', num = 2, check_rows =
+            [{ "st.s1":"samp1", "st.i1":2, "st.d1":2},
+             { "st.s1":"samp1", "st.i1":1, "st.d1":1}]);
+        # Get the current read stats for MessageTable
+        old_reads = analytics.get_db_read_stats_from_qe(analytics.query_engine, 'MessageTable')
+        # read some data from message table and issue thequery again
+        assert analytics.verify_message_table_moduleid()
+        new_reads = analytics.get_db_read_stats_from_qe(analytics.query_engine, 'MessageTable')
+        assert(old_reads < new_reads)
+        # Get the current read stats for stats table
+        old_reads = analytics.get_db_read_stats_from_qe(analytics.query_engine, 'StatTestState:st',True)
+        assert (old_reads > 0)
+        assert generator_obj.verify_test_stat("StatTable.StatTestState.st","-2m",
+            select_fields = [ "UUID", "st.s1", "st.i1", "st.d1" ],
+            where_clause = 'name|st.s1=t010|samp1', num = 2, check_rows =
+            [{ "st.s1":"samp1", "st.i1":2, "st.d1":2},
+             { "st.s1":"samp1", "st.i1":1, "st.d1":1}]);
+        new_reads = analytics.get_db_read_stats_from_qe(analytics.query_engine, 'StatTestState:st',True)
+        assert(new_reads > old_reads)
+    # end test_14_verify_qe_stats_collection
 
     @staticmethod
     def get_free_port():

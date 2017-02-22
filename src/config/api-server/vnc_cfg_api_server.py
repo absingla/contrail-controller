@@ -18,12 +18,15 @@ gevent.pywsgi.MAX_REQUEST_LINE = 65535
 import sys
 reload(sys)
 sys.setdefaultencoding('UTF8')
+import ConfigParser
 import functools
+import hashlib
 import logging
 import logging.config
 import signal
 import os
 import re
+import random
 import socket
 from cfgm_common import jsonutils as json
 from provision_defaults import *
@@ -114,7 +117,7 @@ _ACTION_RESOURCES = [
     {'uri': '/prop-collection-get', 'link_name': 'prop-collection-get',
      'method': 'GET', 'method_name': 'prop_collection_http_get'},
     {'uri': '/prop-collection-update', 'link_name': 'prop-collection-update',
-     'method': 'POST', 'method_name': 'prop_collection_update_http_post'},
+     'method': 'POST', 'method_name': 'prop_collection_http_post'},
     {'uri': '/ref-update', 'link_name': 'ref-update',
      'method': 'POST', 'method_name': 'ref_update_http_post'},
     {'uri': '/ref-relax-for-delete', 'link_name': 'ref-relax-for-delete',
@@ -336,7 +339,7 @@ class VncApiServer(object):
             if not prop_value:
                 continue
 
-            if is_simple and (not is_list_prop) and (not is_map_prop):
+            if is_simple:
                 try:
                     obj_dict[prop_name] = self._validate_simple_type(prop_name,
                                               prop_type, simple_type,
@@ -356,20 +359,6 @@ class VncApiServer(object):
                         prop_name, prop_value)
                     err_msg += str(e)
                     return False, err_msg
-            elif isinstance(prop_value, list):
-                for elem in prop_value:
-                    try:
-                        if is_simple:
-                            self._validate_simple_type(prop_name, prop_type,
-                                                       simple_type, elem,
-                                                       restrictions)
-                        else:
-                            self._validate_complex_type(prop_cls, elem)
-                    except Exception as e:
-                        err_msg = 'Error validating property %s elem %s ' %(
-                            prop_name, elem)
-                        err_msg += str(e)
-                        return False, err_msg
             else: # complex-type + value isn't dict or wrapped in list or map
                 err_msg = 'Error in property %s type %s value of %s ' %(
                     prop_name, prop_cls, prop_value)
@@ -697,6 +686,11 @@ class VncApiServer(object):
             if 'exclude_children' not in get_request().query:
                 obj_fields |= r_class.children_fields
 
+        (ok, result) = r_class.pre_dbe_read(obj_ids['uuid'], db_conn)
+        if not ok:
+            (code, msg) = result
+            raise cfgm_common.exceptions.HttpError(code, msg)
+
         try:
             (ok, result) = db_conn.dbe_read(obj_type, obj_ids,
                 list(obj_fields), ret_readonly=True)
@@ -717,6 +711,11 @@ class VncApiServer(object):
 
         if not self.is_admin_request():
             result = self.obj_view(resource_type, result)
+
+        (ok, err_msg) = r_class.post_dbe_read(result, db_conn)
+        if not ok:
+            (code, msg) = err_msg
+            raise cfgm_common.exceptions.HttpError(code, msg)
 
         rsp_body = {}
         rsp_body['uuid'] = id
@@ -832,6 +831,8 @@ class VncApiServer(object):
         # State modification starts from here. Ensure that cleanup is done for all state changes
         cleanup_on_failure = []
         obj_ids = {'uuid': id}
+        if 'uuid' not in obj_dict:
+            obj_dict['uuid'] = id
 
         def stateful_update():
             get_context().set_state('PRE_DBE_UPDATE')
@@ -1437,6 +1438,14 @@ class VncApiServer(object):
         self.route('/aaa-mode',      'GET', self.aaa_mode_http_get)
         self.route('/aaa-mode',      'PUT', self.aaa_mode_http_put)
 
+        # randomize the collector list
+        self._random_collectors = self._args.collectors
+        self._chksum = "";
+        if self._args.collectors:
+            self._chksum = hashlib.md5(''.join(self._args.collectors)).hexdigest()
+            self._random_collectors = random.sample(self._args.collectors, \
+                                                    len(self._args.collectors))
+
         # Initialize discovery client
         self._disc = None
         if self._args.disc_server_ip and self._args.disc_server_port:
@@ -1465,12 +1474,13 @@ class VncApiServer(object):
         hostname = socket.gethostname()
         self._sandesh.init_generator(module_name, hostname,
                                      node_type_name, instance_id,
-                                     self._args.collectors,
+                                     self._random_collectors,
                                      'vnc_api_server_context',
                                      int(self._args.http_server_port),
                                      ['cfgm_common', 'vnc_cfg_api_server.sandesh'], self._disc,
                                      logger_class=self._args.logger_class,
-                                     logger_config_file=self._args.logging_conf)
+                                     logger_config_file=self._args.logging_conf,
+                                     config=self._args.sandesh_config)
         self._sandesh.trace_buffer_create(name="VncCfgTraceBuf", size=1000)
         self._sandesh.trace_buffer_create(name="RestApiTraceBuf", size=1000)
         self._sandesh.trace_buffer_create(name="DBRequestTraceBuf", size=1000)
@@ -1768,7 +1778,7 @@ class VncApiServer(object):
     # end get_rabbit_health_check_interval
 
     def is_auth_disabled(self):
-        return self._args.auth is None
+        return self._args.auth is None or self._args.auth.lower() != 'keystone'
 
     def is_admin_request(self):
         if not self.is_multi_tenancy_set():
@@ -1844,7 +1854,7 @@ class VncApiServer(object):
                 'token_info': None,
                 'is_cloud_admin_role': False,
                 'is_global_read_only_role': False,
-                'permissions': PERMS_RWX
+                'permissions': 'RWX'
             }
             return result
 
@@ -2074,7 +2084,7 @@ class VncApiServer(object):
         return result
     # end prop_collection_http_get
 
-    def prop_collection_update_http_post(self):
+    def prop_collection_http_post(self):
         self._post_common(get_request(), None, None)
 
         request_params = get_request().json
@@ -2105,6 +2115,14 @@ class VncApiServer(object):
             req_oper = req_param.get('operation').lower()
             field_val = req_param.get('value')
             field_pos = str(req_param.get('position'))
+            prop_type = resource_class.prop_field_types[obj_field]['xsd_type']
+            prop_cls = cfgm_common.utils.str_to_class(prop_type, __name__)
+            prop_val_type = prop_cls.attr_field_type_vals[prop_cls.attr_fields[0]]['attr_type']
+            prop_val_cls = cfgm_common.utils.str_to_class(prop_val_type, __name__)
+            try:
+                self._validate_complex_type(prop_val_cls, field_val)
+            except Exception as e:
+                raise cfgm_common.exceptions.HttpError(400, str(e))
             if prop_coll_type == 'list':
                 if req_oper not in ('add', 'modify', 'delete'):
                     err_msg = 'Unsupported operation %s in request %s' %(
@@ -2233,7 +2251,7 @@ class VncApiServer(object):
         self._set_api_audit_info(apiConfig)
         log = VncApiConfigLog(api_log=apiConfig, sandesh=self._sandesh)
         log.send(sandesh=self._sandesh)
-    # end prop_collection_update_http_post
+    # end prop_collection_http_post
 
     def ref_update_http_post(self):
         self._post_common(get_request(), None, None)
@@ -2655,6 +2673,25 @@ class VncApiServer(object):
     def sigterm_handler(self):
         exit()
 
+    # sighup handler for applying new configs
+    def sighup_handler(self):
+        if self._args.conf_file:
+            config = ConfigParser.SafeConfigParser()
+            config.read(self._args.conf_file)
+            if 'DEFAULTS' in config.sections():
+                try:
+                    collectors = config.get('DEFAULTS', 'collectors')
+                    if type(collectors) is str:
+                        collectors = collectors.split()
+                        new_chksum = hashlib.md5("".join(collectors)).hexdigest()
+                        if new_chksum != self._chksum:
+                            self._chksum = new_chksum
+                            random_collectors = random.sample(collectors, len(collectors))
+                            self._sandesh.reconfig_collectors(random_collectors)
+                except ConfigParser.NoOptionError as e:
+                    pass
+    # end sighup_handler
+
     def _load_extensions(self):
         try:
             conf_sections = self._args.config_sections
@@ -3030,18 +3067,18 @@ class VncApiServer(object):
         if req_fields:
             allowed_fields.extend(req_fields)
 
+        obj_dicts = []
         if self.is_admin_request():
-            obj_dicts = []
             for obj_result in result:
                 if not exclude_hrefs:
                     obj_result['href'] = self.generate_url(
                         resource_type, obj_result['uuid'])
                 if is_detail:
+                    obj_result['name'] = obj_result['fq_name'][-1]
                     obj_dicts.append({resource_type: obj_result})
                 else:
                     obj_dicts.append(obj_result)
         else:
-            obj_dicts = []
             for obj_result in result:
                 # TODO(nati) we should do this using sql query
                 id_perms = obj_result.get('id_perms')
@@ -3066,6 +3103,7 @@ class VncApiServer(object):
 
                 if is_detail:
                     obj_result = self.obj_view(resource_type, obj_result)
+                    obj_result['name'] = obj_result['fq_name'][-1]
                     obj_dict.update(obj_result)
                     obj_dicts.append({resource_type: obj_dict})
                 else:
@@ -3506,8 +3544,9 @@ class VncApiServer(object):
         self._args.multi_tenancy = multi_tenancy
     # end
 
+    # check if token validatation needed
     def is_multi_tenancy_set(self):
-        return self._args.multi_tenancy or self.aaa_mode != 'no-auth'
+        return self.aaa_mode != 'no-auth'
 
     def is_rbac_enabled(self):
         return self.aaa_mode == 'rbac'
@@ -3657,6 +3696,7 @@ def main(args_str=None, server=None):
     """
     #hub.signal(signal.SIGCHLD, vnc_api_server.sigchld_handler)
     hub.signal(signal.SIGTERM, vnc_api_server.sigterm_handler)
+    hub.signal(signal.SIGHUP, vnc_api_server.sighup_handler)
     if pipe_start_app is None:
         pipe_start_app = vnc_api_server.api_bottle
     try:

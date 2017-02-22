@@ -22,6 +22,53 @@
 #include <database/cassandra/cql/cql_if_impl.h>
 #include <database/cassandra/cql/cql_lib_if.h>
 
+
+#define CQLIF_DEBUG "CqlTraceBufDebug"
+#define CQLIF_INFO "CqlTraceBufInfo"
+#define CQLIF_ERR  "CqlTraceBufErr"
+
+SandeshTraceBufferPtr CqlTraceDebugBuf(SandeshTraceBufferCreate(
+     CQLIF_DEBUG, 10000));
+SandeshTraceBufferPtr CqlTraceInfoBuf(SandeshTraceBufferCreate(
+     CQLIF_INFO, 10000));
+SandeshTraceBufferPtr CqlTraceErrBuf(SandeshTraceBufferCreate(
+     CQLIF_ERR, 20000));
+
+#define CQLIF_DEBUG_TRACE(_Msg)                                           \
+    do {                                                                  \
+         std::stringstream ss;                                            \
+         ss << __func__ << ":" << __FILE__ << ":" <<                      \
+             __LINE__ << ": " << _Msg;                                    \
+         CQL_DEBUG_TRACE(CqlTraceDebugBuf,ss.str());                      \
+       } while (false)                                                    \
+
+#define CQLIF_INFO_TRACE(_Msg)                                            \
+    do {                                                                  \
+         std::stringstream ss;                                            \
+         ss << __func__ << ":" << __FILE__ << ":" <<                      \
+             __LINE__ << ": " << _Msg;                                    \
+         CQL_INFO_TRACE(CqlTraceInfoBuf,ss.str());                        \
+       } while (false)                                                    \
+
+#define CQLIF_ERR_TRACE(_Msg)                                             \
+    do {                                                                  \
+         std::stringstream ss;                                            \
+         ss << __func__ << ":" << __FILE__ << ":" <<                      \
+             __LINE__ << ": " << _Msg;                                    \
+         CQL_ERR_TRACE(CqlTraceErrBuf,ss.str());                          \
+       } while (false)                                                    \
+
+#define CASS_LIB_TRACE(_Level, _Msg)                                      \
+    do {                                                                  \
+        if (_Level == log4cplus::ERROR_LOG_LEVEL) {                       \
+            CQL_ERR_TRACE(CqlTraceErrBuf, _Msg);                          \
+        }else if (_Level == log4cplus::DEBUG_LOG_LEVEL) {                 \
+            CQL_DEBUG_TRACE(CqlTraceDebugBuf, _Msg);                      \
+        }else {                                                           \
+            CQL_INFO_TRACE(CqlTraceInfoBuf, _Msg);                        \
+        }                                                                 \
+    } while (false)                                                       \
+
 #define CQLIF_LOG(_Level, _Msg)                                           \
     do {                                                                  \
         if (LoggingDisabled()) break;                                     \
@@ -722,10 +769,25 @@ bool DynamicCf2CassPrepareBind(interface::CassLibrary *cci,
 
 static std::string CassSelectFromTableInternal(const std::string &table,
     const GenDb::DbDataValueVec &rkeys,
-    const GenDb::ColumnNameRange &ck_range) {
+    const GenDb::ColumnNameRange &ck_range,
+    const GenDb::FieldNamesToReadVec &read_vec) {
     std::ostringstream query;
     // Table
-    query << "SELECT * FROM " << table;
+    if (read_vec.empty()) {
+        query << "SELECT * FROM " << table;
+    } else {
+        query << "SELECT ";
+        for (GenDb::FieldNamesToReadVec::const_iterator it = read_vec.begin();
+             it != read_vec.end(); it++) {
+            query << it->get<0>() << ",";
+            bool read_timestamp = it->get<3>();
+            if (read_timestamp) {
+                query << "WRITETIME(" << it->get<0>() << "),";
+            }
+        }
+        query.seekp(-1, query.cur);
+        query << " FROM " << table;
+    }
     int rk_size(rkeys.size());
     CassQueryPrinter cprinter(query);
     for (int i = 0; i < rk_size; i++) {
@@ -785,18 +847,20 @@ static std::string CassSelectFromTableInternal(const std::string &table,
 
 std::string PartitionKey2CassSelectFromTable(const std::string &table,
     const GenDb::DbDataValueVec &rkeys) {
-    return CassSelectFromTableInternal(table, rkeys, GenDb::ColumnNameRange());
+    return CassSelectFromTableInternal(table, rkeys, GenDb::ColumnNameRange(),
+                                       GenDb::FieldNamesToReadVec());
 }
 
 std::string PartitionKeyAndClusteringKeyRange2CassSelectFromTable(
     const std::string &table, const GenDb::DbDataValueVec &rkeys,
-    const GenDb::ColumnNameRange &ck_range) {
-    return CassSelectFromTableInternal(table, rkeys, ck_range);
+    const GenDb::ColumnNameRange &ck_range,
+    const GenDb::FieldNamesToReadVec &read_vec) {
+    return CassSelectFromTableInternal(table, rkeys, ck_range, read_vec);
 }
 
 std::string CassSelectFromTable(const std::string &table) {
     return CassSelectFromTableInternal(table, GenDb::DbDataValueVec(),
-        GenDb::ColumnNameRange());
+        GenDb::ColumnNameRange(), GenDb::FieldNamesToReadVec());
 }
 
 static GenDb::DbDataValue CassValue2DbDataValue(
@@ -880,7 +944,7 @@ static GenDb::DbDataValue CassValue2DbDataValue(
         return GenDb::DbDataValue();
       }
       default: {
-        CQLIF_LOG_ERR("Unhandled CassValueType: " << cvtype);
+        CQLIF_ERR_TRACE("Unhandled CassValueType: " << cvtype);
         assert(false && "Unhandled value type");
         return GenDb::DbDataValue();
       }
@@ -890,7 +954,7 @@ static GenDb::DbDataValue CassValue2DbDataValue(
 static bool PrepareSync(interface::CassLibrary *cci,
     CassSession *session, const char* query,
     CassPreparedPtr *prepared) {
-    CQLIF_LOG(DEBUG, "PrepareSync: " << query);
+    CQLIF_DEBUG_TRACE( "PrepareSync: " << query);
     CassFuturePtr future(cci->CassSessionPrepare(session, query), cci);
     cci->CassFutureWait(future.get());
 
@@ -898,7 +962,7 @@ static bool PrepareSync(interface::CassLibrary *cci,
     if (rc != CASS_OK) {
         CassString err;
         cci->CassFutureErrorMessage(future.get(), &err.data, &err.length);
-        CQLIF_LOG_ERR("PrepareSync: " << query << " FAILED: " << err.data);
+        CQLIF_ERR_TRACE("PrepareSync: " << query << " FAILED: " << err.data);
     } else {
         *prepared = CassPreparedPtr(cci->CassFutureGetPrepared(future.get()),
             cci);
@@ -918,7 +982,7 @@ static bool ExecuteQuerySyncInternal(interface::CassLibrary *cci,
     if (rc != CASS_OK) {
         CassString err;
         cci->CassFutureErrorMessage(future.get(), &err.data, &err.length);
-        CQLIF_LOG_ERR("SyncQuery: FAILED: " << err.data);
+        CQLIF_ERR_TRACE("SyncQuery: FAILED: " << err.data);
     } else {
         if (result) {
             *result = CassResultPtr(cci->CassFutureGetResult(future.get()),
@@ -930,7 +994,7 @@ static bool ExecuteQuerySyncInternal(interface::CassLibrary *cci,
 
 static bool ExecuteQuerySync(interface::CassLibrary *cci,
     CassSession *session, const char *query, CassConsistency consistency) {
-    CQLIF_LOG(DEBUG, "SyncQuery: " << query);
+    CQLIF_DEBUG_TRACE( "SyncQuery: " << query);
     CassStatementPtr statement(cci->CassStatementNew(query, 0), cci);
     return ExecuteQuerySyncInternal(cci, session, statement.get(), NULL,
         consistency);
@@ -939,7 +1003,7 @@ static bool ExecuteQuerySync(interface::CassLibrary *cci,
 static bool ExecuteQueryResultSync(interface::CassLibrary *cci,
     CassSession *session, const char *query,
     CassResultPtr *result, CassConsistency consistency) {
-    CQLIF_LOG(DEBUG, "SyncQuery: " << query);
+    CQLIF_DEBUG_TRACE( "SyncQuery: " << query);
     CassStatementPtr statement(cci->CassStatementNew(query, 0), cci);
     return ExecuteQuerySyncInternal(cci, session, statement.get(), result,
         consistency);
@@ -962,6 +1026,48 @@ static GenDb::DbOpResult::type CassError2DbOpResult(CassError rc) {
         return GenDb::DbOpResult::BACK_PRESSURE;
       default:
         return GenDb::DbOpResult::ERROR;
+    }
+}
+
+static void DynamicCfGetResult(interface::CassLibrary *cci,
+    CassResultPtr *result, const GenDb::FieldNamesToReadVec &read_vec,
+    GenDb::NewColVec *v_columns) {
+    // Row iterator
+    CassIteratorPtr riterator(cci->CassIteratorFromResult(result->get()), cci);
+    while (cci->CassIteratorNext(riterator.get())) {
+        const CassRow *row(cci->CassIteratorGetRow(riterator.get()));
+        GenDb::DbDataValueVec *cnames(new GenDb::DbDataValueVec);
+        GenDb::DbDataValueVec *values(new GenDb::DbDataValueVec);
+        GenDb::DbDataValueVec *timestamps(new GenDb::DbDataValueVec);
+        int i = 0;
+        for (GenDb::FieldNamesToReadVec::const_iterator it = read_vec.begin();
+             it != read_vec.end(); it++) {
+            bool row_key = it->get<1>();
+            bool row_column = it->get<2>();
+            bool read_timestamp = it->get<3>();
+            if (row_key) {
+                i++;
+                continue;
+            }
+            const CassValue *cvalue(cci->CassRowGetColumn(row, i));
+            assert(cvalue);
+            GenDb::DbDataValue db_value(CassValue2DbDataValue(cci, cvalue));
+            if (row_column) {
+                cnames->push_back(db_value);
+            } else {
+                values->push_back(db_value);
+                if (read_timestamp) {
+                    i++;
+                    const CassValue *ctimestamp(cci->CassRowGetColumn(row, i));
+                    assert(ctimestamp);
+                    GenDb::DbDataValue time_value(CassValue2DbDataValue(cci, ctimestamp));
+                    timestamps->push_back(time_value);
+                }
+            }
+            i++;
+        }
+        GenDb::NewCol *column(new GenDb::NewCol(cnames, values, 0, timestamps));
+        v_columns->push_back(column);
     }
 }
 
@@ -1133,7 +1239,7 @@ static void OnExecuteQueryAsync(CassFuture *future, void *data) {
     if (rc != CASS_OK) {
         CassString err;
         cci->CassFutureErrorMessage(future, &err.data, &err.length);
-        CQLIF_LOG_ERR("AsyncQuery: " << ctx->query_id_ << " FAILED: "
+        CQLIF_ERR_TRACE("AsyncQuery: " << ctx->query_id_ << " FAILED: "
             << err.data);
         ctx->cb_(db_rc, std::auto_ptr<GenDb::ColList>());
         return;
@@ -1174,7 +1280,7 @@ static void ExecuteQueryAsyncInternal(interface::CassLibrary *cci,
 static void ExecuteQueryAsync(interface::CassLibrary *cci,
     CassSession *session, const char *query,
     CassConsistency consistency, CassAsyncQueryCallback cb) {
-    CQLIF_LOG(DEBUG, "AsyncQuery: " << query);
+    CQLIF_DEBUG_TRACE( "AsyncQuery: " << query);
     CassStatementPtr statement(cci->CassStatementNew(query, 0), cci);
     ExecuteQueryAsyncInternal(cci, session, query, statement.get(),
         consistency, cb);
@@ -1205,6 +1311,20 @@ static bool DynamicCfGetResultAsync(interface::CassLibrary *cci,
     ExecuteQueryResultAsync(cci, session, query, consistency, cb,
         rctx.release());
     return true;
+}
+
+static bool DynamicCfGetResultSync(interface::CassLibrary *cci,
+    CassSession *session, const char *query,
+    const GenDb::FieldNamesToReadVec &read_vec,
+    CassConsistency consistency, GenDb::NewColVec *v_columns) {
+    CassResultPtr result(NULL, cci);
+    bool success(ExecuteQueryResultSync(cci, session, query, &result,
+        consistency));
+    if (!success) {
+        return success;
+    }
+    DynamicCfGetResult(cci, &result, read_vec, v_columns);
+    return success;
 }
 
 static bool DynamicCfGetResultSync(interface::CassLibrary *cci,
@@ -1279,7 +1399,7 @@ static bool SyncFutureWait(interface::CassLibrary *cci,
     if (rc != CASS_OK) {
         CassString err;
         cci->CassFutureErrorMessage(future, &err.data, &err.length);
-        CQLIF_LOG_ERR("SyncWait: FAILED: " << err.data);
+        CQLIF_ERR_TRACE("SyncWait: FAILED: " << err.data);
     }
     return rc == CASS_OK;
 }
@@ -1291,7 +1411,7 @@ static const CassTableMeta * GetCassTableMeta(
         cci->CassSchemaMetaKeyspaceByName(schema_meta, keyspace.c_str()));
     if (keyspace_meta == NULL) {
         if (log_error) {
-            CQLIF_LOG_ERR("No keyspace schema: Keyspace: " << keyspace <<
+            CQLIF_ERR_TRACE("No keyspace schema: Keyspace: " << keyspace <<
                 ", Table: " << table);
         }
         return NULL;
@@ -1302,7 +1422,7 @@ static const CassTableMeta * GetCassTableMeta(
         cci->CassKeyspaceMetaTableByName(keyspace_meta, table_lower.c_str()));
     if (table_meta == NULL) {
         if (log_error) {
-            CQLIF_LOG_ERR("No table schema: Keyspace: " << keyspace <<
+            CQLIF_ERR_TRACE("No table schema: Keyspace: " << keyspace <<
                 ", Table: " << table_lower);
         }
         return NULL;
@@ -1316,7 +1436,7 @@ static bool IsCassTableMetaPresent(interface::CassLibrary *cci,
     impl::CassSchemaMetaPtr schema_meta(cci->CassSessionGetSchemaMeta(
         session), cci);
     if (schema_meta.get() == NULL) {
-        CQLIF_LOG(DEBUG, "No schema meta: Keyspace: " << keyspace <<
+        CQLIF_DEBUG_TRACE( "No schema meta: Keyspace: " << keyspace <<
             ", Table: " << table);
         return false;
     }
@@ -1336,7 +1456,7 @@ static bool GetCassTableClusteringKeyCount(
     impl::CassSchemaMetaPtr schema_meta(cci->CassSessionGetSchemaMeta(
         session), cci);
     if (schema_meta.get() == NULL) {
-        CQLIF_LOG_ERR("No schema meta: Keyspace: " << keyspace <<
+        CQLIF_ERR_TRACE("No schema meta: Keyspace: " << keyspace <<
             ", Table: " << table);
         return false;
     }
@@ -1356,7 +1476,7 @@ static bool GetCassTablePartitionKeyCount(
     impl::CassSchemaMetaPtr schema_meta(cci->CassSessionGetSchemaMeta(
         session), cci);
     if (schema_meta.get() == NULL) {
-        CQLIF_LOG_ERR("No schema meta: Keyspace: " << keyspace <<
+        CQLIF_ERR_TRACE("No schema meta: Keyspace: " << keyspace <<
             ", Table: " << table);
         return false;
     }
@@ -1418,13 +1538,10 @@ static void CassLibraryLog(const CassLogMessage* message, void *data) {
         return;
     }
     log4cplus::LogLevel log4level(Cass2log4Level(message->severity));
-    log4cplus::Logger logger(log4cplus::Logger::getRoot());
-    if (logger.isEnabledFor(log4level)) {
-        log4cplus::tostringstream buf;
-        buf << "CassLibrary: " << message->file << ":" << message->line <<
+    std::stringstream buf;
+    buf << "CassLibrary: " << message->file << ":" << message->line <<
             " " << message->function << "] " << message->message;
-        logger.forcedLog(log4level, buf.str());
-    }
+    CASS_LIB_TRACE(log4level, buf.str());
 }
 
 
@@ -1504,7 +1621,7 @@ bool CqlIfImpl::CreateKeyspaceIfNotExistsSync(const std::string &keyspace,
     int n(snprintf(buf, sizeof(buf), kQCreateKeyspaceIfNotExists,
         keyspace.c_str(), replication_factor.c_str()));
     if (n < 0 || n >= (int)sizeof(buf)) {
-        CQLIF_LOG_ERR("FAILED (" << n << "): Keyspace: " <<
+        CQLIF_ERR_TRACE("FAILED (" << n << "): Keyspace: " <<
             keyspace << ", RF: " << replication_factor);
         return false;
     }
@@ -1519,7 +1636,7 @@ bool CqlIfImpl::UseKeyspaceSync(const std::string &keyspace,
     char buf[512];
     int n(snprintf(buf, sizeof(buf), kQUseKeyspace, keyspace.c_str()));
     if (n < 0 || n >= (int)sizeof(buf)) {
-        CQLIF_LOG_ERR("FAILED (" << n << "): Keyspace: " <<
+        CQLIF_ERR_TRACE("FAILED (" << n << "): Keyspace: " <<
             keyspace);
         return false;
     }
@@ -1720,6 +1837,23 @@ bool CqlIfImpl::SelectFromTableSync(const std::string &cfname,
     }
 }
 
+
+bool CqlIfImpl::SelectFromTableClusteringKeyRangeFieldNamesSync(const std::string &cfname,
+    const GenDb::DbDataValueVec &rkey,
+    const GenDb::ColumnNameRange &ck_range, CassConsistency consistency,
+    const GenDb::FieldNamesToReadVec &read_vec,
+    GenDb::NewColVec *out) {
+    if (session_state_ != SessionState::CONNECTED) {
+        return false;
+    }
+    std::string query(
+        impl::PartitionKeyAndClusteringKeyRange2CassSelectFromTable(cfname,
+        rkey, ck_range, read_vec));
+    assert(IsTableDynamic(cfname));
+    return impl::DynamicCfGetResultSync(cci_, session_.get(),
+        query.c_str(), read_vec, consistency, out);
+}
+
 bool CqlIfImpl::SelectFromTableClusteringKeyRangeSync(const std::string &cfname,
     const GenDb::DbDataValueVec &rkey,
     const GenDb::ColumnNameRange &ck_range, CassConsistency consistency,
@@ -1758,9 +1892,9 @@ bool CqlIfImpl::ConnectSync() {
     bool success(impl::SyncFutureWait(cci_, future.get()));
     if (success) {
         session_state_ = SessionState::CONNECTED;
-        CQLIF_LOG(INFO, "ConnectSync Done");
+        CQLIF_INFO_TRACE( "ConnectSync Done");
     } else {
-        CQLIF_LOG_ERR("ConnectSync FAILED");
+        CQLIF_ERR_TRACE("ConnectSync FAILED");
     }
     return success;
 }
@@ -1782,9 +1916,9 @@ bool CqlIfImpl::DisconnectSync() {
     bool success(impl::SyncFutureWait(cci_, future.get()));
     if (success) {
         session_state_ = SessionState::DISCONNECTED;
-        CQLIF_LOG(INFO, "DisconnectSync Done");
+        CQLIF_INFO_TRACE( "DisconnectSync Done");
     } else {
-        CQLIF_LOG_ERR("DisconnectSync FAILED");
+        CQLIF_ERR_TRACE("DisconnectSync FAILED");
     }
     return success;
 }
@@ -1850,7 +1984,7 @@ bool CqlIfImpl::ReconnectTimerExpired() {
 
 void CqlIfImpl::ReconnectTimerErrorHandler(std::string error_name,
     std::string error_message) {
-    CQLIF_LOG_ERR(error_name << " " << error_message);
+    CQLIF_ERR_TRACE(error_name << " " << error_message);
 }
 
 void CqlIfImpl::ConnectCallbackProcess(CassFuture *future) {
@@ -1858,7 +1992,7 @@ void CqlIfImpl::ConnectCallbackProcess(CassFuture *future) {
     if (code != CASS_OK) {
         impl::CassString err;
         cci_->CassFutureErrorMessage(future, &err.data, &err.length);
-        CQLIF_LOG(INFO, err.data);
+        CQLIF_INFO_TRACE( err.data);
         // Start a timer to reconnect
         reconnect_timer_->Start(kReconnectInterval,
             boost::bind(&CqlIfImpl::ReconnectTimerExpired, this),
@@ -1874,7 +2008,7 @@ void CqlIfImpl::DisconnectCallbackProcess(CassFuture *future) {
     if (code != CASS_OK) {
         impl::CassString err;
         cci_->CassFutureErrorMessage(future, &err.data, &err.length);
-        CQLIF_LOG_ERR(err.data);
+        CQLIF_ERR_TRACE(err.data);
     }
     session_state_ = SessionState::DISCONNECTED;
 }
@@ -1931,7 +2065,7 @@ bool CqlIfImpl::InsertIntoTablePrepareInternal(
     impl::CassPreparedPtr prepared(NULL, cci_);
     bool success(GetPrepareInsertIntoTable(v_columns->cfname_, &prepared));
     if (!success) {
-        CQLIF_LOG_ERR("CassPrepared statement NOT found: " <<
+        CQLIF_ERR_TRACE("CassPrepared statement NOT found: " <<
             v_columns->cfname_);
         return false;
     }
@@ -2266,6 +2400,23 @@ bool CqlIf::Db_GetRow(GenDb::ColList *out, const std::string &cfname,
     return success;
 }
 
+bool CqlIf::Db_GetRow(GenDb::ColList *out, const std::string &cfname,
+    const GenDb::DbDataValueVec &rowkey,
+    GenDb::DbConsistency::type dconsistency,
+    const GenDb::ColumnNameRange &crange,
+    const GenDb::FieldNamesToReadVec &read_vec) {
+    CassConsistency consistency(impl::Db2CassConsistency(dconsistency));
+    bool success(impl_->SelectFromTableClusteringKeyRangeFieldNamesSync(cfname,
+       rowkey, crange, consistency, read_vec, &out->columns_));
+    if (!success) {
+        IncrementTableReadFailStats(cfname);
+        IncrementErrors(GenDb::IfErrors::ERR_READ_COLUMN);
+        return success;
+    }
+    IncrementTableReadStats(cfname);
+    return success;
+}
+
 bool CqlIf::Db_GetMultiRow(GenDb::ColListVec *out, const std::string &cfname,
     const std::vector<GenDb::DbDataValueVec> &v_rowkey) {
     BOOST_FOREACH(const GenDb::DbDataValueVec &rkey, v_rowkey) {
@@ -2275,7 +2426,7 @@ bool CqlIf::Db_GetMultiRow(GenDb::ColListVec *out, const std::string &cfname,
         bool success(impl_->SelectFromTableSync(cfname, rkey,
             CASS_CONSISTENCY_ONE, &v_columns->columns_));
         if (!success) {
-            CQLIF_LOG_ERR("SELECT FROM Table: " << cfname << " Partition Key: "
+            CQLIF_ERR_TRACE("SELECT FROM Table: " << cfname << " Partition Key: "
                 << GenDb::DbDataValueVecToString(rkey) << " FAILED");
             IncrementTableReadFailStats(cfname);
             IncrementErrors(GenDb::IfErrors::ERR_READ_COLUMN);
@@ -2297,7 +2448,7 @@ bool CqlIf::Db_GetMultiRow(GenDb::ColListVec *out, const std::string &cfname,
         bool success(impl_->SelectFromTableClusteringKeyRangeSync(cfname,
             rkey, crange, CASS_CONSISTENCY_ONE, &v_columns->columns_));
         if (!success) {
-            CQLIF_LOG_ERR("SELECT FROM Table: " << cfname << " Partition Key: "
+            CQLIF_ERR_TRACE("SELECT FROM Table: " << cfname << " Partition Key: "
                 << GenDb::DbDataValueVecToString(rkey) <<
                 " Clustering Key Range: " << crange.ToString() << " FAILED");
             IncrementTableReadFailStats(cfname);

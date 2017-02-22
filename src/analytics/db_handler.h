@@ -34,6 +34,7 @@
 #include "uflow_types.h"
 #include "viz_constants.h"
 #include <database/cassandra/cql/cql_types.h>
+#include "configdb_connection.h"
 #include "usrdef_counters.h"
 #include "options.h"
 
@@ -89,15 +90,10 @@ public:
     typedef std::multimap<std::string, std::pair<Var, AttribMap> > TagMap;
 
     DbHandler(EventManager *evm, GenDb::GenDbIf::DbErrorHandler err_handler,
-        const std::vector<std::string> &cassandra_ips,
-        const std::vector<int> &cassandra_ports,
-        std::string name, const TtlMap& ttl_map,
-        const std::string& cassandra_user,
-        const std::string& cassandra_password,
-        const std::string& cassandra_compaction_strategy,
+        std::string name,
+        const Options::Cassandra &cassandra_options,
         const std::string &zookeeper_server_list,
-        bool use_zookeeper, bool disable_all_writes, bool disable_stats_writes,
-        bool disable_messages_writes, bool disable_messages_keyword_writes,
+        bool use_zookeeper,
         bool use_db_write_options,
         const DbWriteOptions &db_write_options);
     DbHandler(GenDb::GenDbIf *dbif, const TtlMap& ttl_map);
@@ -145,8 +141,11 @@ public:
     void ResetDbQueueWaterMarkInfo();
     std::vector<boost::asio::ip::tcp::endpoint> GetEndpoints() const;
     std::string GetName() const;
-    void UpdateUdc(Options *o, DiscoveryServiceClient *c) {
-        udc_->Update(o, c);
+    void UpdateConfigDBConnection(Options *o, DiscoveryServiceClient *c) {
+        cfgdb_connection_->Update(o, c);
+    }
+    boost::shared_ptr<ConfigDBConnection> GetConfigDBConnection() {
+        return cfgdb_connection_;
     }
     bool IsAllWritesDisabled() const;
     bool IsStatisticsWritesDisabled() const;
@@ -254,6 +253,7 @@ private:
     static tbb::mutex fmutex_;
     std::string tablespace_;
     std::string compaction_strategy_;
+    std::string flow_tables_compaction_strategy_;
     UniformInt8RandomGenerator gen_partition_no_;
     std::string zookeeper_server_list_;
     bool use_zookeeper_;
@@ -261,6 +261,7 @@ private:
     bool disable_statistics_writes_;
     bool disable_messages_writes_;
     bool disable_messages_keyword_writes_;
+    boost::shared_ptr<ConfigDBConnection> cfgdb_connection_;
     boost::scoped_ptr<UserDefinedCounters> udc_;
     Timer *udc_cfg_poll_timer_;
     static const int kUDCPollInterval = 120 * 1000; // in ms
@@ -308,16 +309,9 @@ class DbHandlerInitializer {
     DbHandlerInitializer(EventManager *evm,
         const std::string &db_name,
         const std::string &timer_task_name, InitializeDoneCb callback,
-        const std::vector<std::string> &cassandra_ips,
-        const std::vector<int> &cassandra_ports,
-        const TtlMap& ttl_map,
-        const std::string& cassandra_user,
-        const std::string& cassandra_password,
-        const std::string &cassandra_compaction_strategy,
+        const Options::Cassandra &cassandra_options,
         const std::string &zookeeper_server_list,
-        bool use_zookeeper, bool disable_all_db_writes,
-        bool disable_db_stats_writes, bool disable_db_messages_writes,
-        bool disable_db_messages_keyword_writes,
+        bool use_zookeeper,
         const DbWriteOptions &db_write_options);
     DbHandlerInitializer(EventManager *evm,
         const std::string &db_name,

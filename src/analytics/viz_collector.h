@@ -23,6 +23,7 @@
 
 class Ruleeng;
 class ProtobufCollector;
+class StructuredSyslogCollector;
 class SFlowCollector;
 class IpfixCollector;
 class Options;
@@ -33,22 +34,19 @@ public:
     VizCollector(EventManager *evm, unsigned short listen_port,
             bool protobuf_collector_enabled,
             unsigned short protobuf_listen_port,
-            const std::vector<std::string> &cassandra_ips,
-            const std::vector<int> &cassandra_ports,
+            bool structured_syslog_collector_enabled,
+            unsigned short structured_syslog_listen_port,
             const std::string &redis_uve_ip, unsigned short redis_uve_port,
             const std::string &redis_password,
             const std::string &brokers,
             int syslog_port, int sflow_port, int ipfix_port,
             uint16_t partitions, bool dup,
-            const std::string &kafka_prefix, const TtlMap &ttlmap,
-            const std::string& cassandra_user,
-            const std::string& cassandra_password,
-            const std::string &cassandra_compaction_strategy,
+            const std::string &kafka_prefix,
+            const Options::Cassandra &cassandra_options,
             const std::string &zookeeper_server_list,
-            bool use_zookeeper, bool disable_all_db_writes,
-            bool disable_db_stats_writes, bool disable_db_messages_writes,
-            bool disable_db_messages_keyword_writes,
-            const DbWriteOptions &db_write_options);
+            bool use_zookeeper,
+            const DbWriteOptions &db_write_options,
+            const SandeshConfig &sandesh_config);
     VizCollector(EventManager *evm, DbHandlerPtr db_handler,
                  Ruleeng *ruleeng,
                  Collector *collector, OpServerProxy *osp);
@@ -131,8 +129,8 @@ public:
         }
         return std::make_pair(bpart, npart);
     }
-    void UpdateUdc(Options *o, DiscoveryServiceClient *c) {
-        GetDbHandler()->UpdateUdc(o, c);
+    void UpdateConfigDBConnection(Options *o, DiscoveryServiceClient *c) {
+        GetDbHandler()->UpdateConfigDBConnection(o, c);
     }
 private:
     std::string DbGlobalName(bool dup=false);
@@ -146,6 +144,7 @@ private:
     SFlowCollector *sflow_collector_;
     IpfixCollector *ipfix_collector_;
     boost::scoped_ptr<ProtobufCollector> protobuf_collector_;
+    boost::scoped_ptr<StructuredSyslogCollector> structured_syslog_collector_;
     std::string name_;
     unsigned short listen_port_;
     uint32_t redis_gen_;

@@ -251,6 +251,13 @@ vector<string> BgpNeighborConfig::AuthKeysToString() const {
     return auth_data_.KeysToString();
 }
 
+
+bool StaticRouteConfig::operator<(const StaticRouteConfig &rhs) const {
+    BOOL_KEY_COMPARE(address, rhs.address);
+    BOOL_KEY_COMPARE(prefix_length, rhs.prefix_length);
+    return false;
+}
+
 BgpProtocolConfig::BgpProtocolConfig(const string &instance_name)
     : instance_name_(instance_name),
       admin_down_(false),
@@ -277,6 +284,7 @@ BgpInstanceConfig::BgpInstanceConfig(const string &name)
       has_pnf_(false),
       virtual_network_index_(0),
       virtual_network_allow_transit_(false),
+      virtual_network_pbb_evpn_enable_(false),
       vxlan_id_(0),
       last_change_at_(UTCTimestampUsec()) {
 }
@@ -291,6 +299,7 @@ void BgpInstanceConfig::Clear() {
     virtual_network_.clear();
     virtual_network_index_ = 0;
     virtual_network_allow_transit_ = false;
+    virtual_network_pbb_evpn_enable_ = false;
     vxlan_id_ = 0;
     inet_static_routes_.clear();
     inet6_static_routes_.clear();

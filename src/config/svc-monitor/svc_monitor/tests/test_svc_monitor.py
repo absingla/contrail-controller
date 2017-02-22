@@ -494,7 +494,6 @@ class SvcMonitorTest(unittest.TestCase):
         ServiceMonitorLogger.error = mock.MagicMock()
         ServiceMonitorLogger.uve_svc_instance = mock.MagicMock()
         VncObjectDBClient.__init__ = mock.MagicMock()
-        VncObjectDBClient._object_db = mock.MagicMock()
         VncObjectDBClient._cf_dict = \
             {'service_instance_table':None, 'pool_table':None, \
             'loadbalancer_table': None, 'healthmonitor_table':None}
@@ -770,21 +769,21 @@ class SvcMonitorTest(unittest.TestCase):
         self.assertEqual(driver_vip['pool_id'], config_vip.loadbalancer_pool)
     #end
 
-    def object_db_vn_read(self, obj_type, uuids):
+    def object_db_vn_read(self, obj_type, uuids, **kwargs):
         obj = {}
         obj['uuid'] = uuids[0]
         obj['fq_name'] = ['fake-domain', 'fake-project', uuids[0]]
         obj['parent_type'] = 'project'
         return True, [obj]
 
-    def object_db_vmi_read(self, obj_type, uuids):
+    def object_db_vmi_read(self, obj_type, uuids, **kwargs):
         obj = {}
         obj['uuid'] = 'left-vmi'
         obj['fq_name'] = ['fake-domain', 'fake-project',
                           'fake-domain__fake-project__fake-instance__1__left__0']
         return True, [obj]
 
-    def db_read(self, obj_type, uuids):
+    def db_read(self, obj_type, uuids, **kwargs):
         if obj_type == 'domain':
             obj = {}
             obj['fq_name'] = 'default-domain'
@@ -792,18 +791,11 @@ class SvcMonitorTest(unittest.TestCase):
             return (True, [obj])
         return (False, None)
 
-    def db_list(self, obj_type, is_detail=True):
-        if obj_type != 'domain':
-            return (False, None)
-
-        if is_detail:
-            obj = {}
-            obj['fq_name'] = 'default-domain'
-            obj['uuid'] = 'fake_uuid'
-            return (True, [obj])
-        else:
+    def db_list(self, obj_type):
+        if obj_type == 'domain':
             fq_name = 'default-domain'
             return (True, [([fq_name], obj_type)])
+        return (False, None)
 
     def test_svc_monitor_init(self):
         ServiceMonitorLogger.info.assert_any_call(test_utils.AnyStringWith('template created with uuid'))
@@ -853,7 +845,7 @@ class SvcMonitorTest(unittest.TestCase):
         ServiceMonitorLogger.error.assert_not_called()
 
     def test_svc_monitor_sas(self):
-        def db_read(obj_type, uuids):
+        def db_read(obj_type, uuids, **kwargs):
             return (True, [self._return_obj[obj_type]])
         config_db.DBBaseSM._object_db.reset()
         config_db.DBBaseSM._object_db.object_read = db_read
@@ -878,7 +870,7 @@ class SvcMonitorTest(unittest.TestCase):
         self.assertEqual(len(config_db.ServiceApplianceSetSM._dict), 0)
 
     def test_svc_monitor_pool_add(self):
-        def db_read(obj_type, uuids):
+        def db_read(obj_type, uuids, **kwargs):
             return (True, [self._return_obj[obj_type]])
 
         proj_obj = self.add_project('fakeproject', 'fakeproject')
@@ -936,7 +928,7 @@ class SvcMonitorTest(unittest.TestCase):
 
 
     def test_svc_monitor_pool_update(self):
-        def db_read(obj_type, uuids):
+        def db_read(obj_type, uuids, **kwargs):
             return (True, [self._return_obj[obj_type]])
 
         proj_obj = self.add_project('fakeproject', 'fakeproject')
@@ -1199,26 +1191,19 @@ class SvcMonitorTest(unittest.TestCase):
         ServiceMonitorLogger.info.assert_any_call(test_utils.AnyStringWith('Deleting vn'))
 
     def test_svc_monitor_restart_vm_create(self):
-        st_obj = self.add_st('fake-template', 'fake-template')
-        si_obj = self.add_si('fake-instance', 'fake-instance', st_obj)
-        si = config_db.ServiceInstanceSM.get('fake-instance')
-        st = config_db.ServiceTemplateSM.get('fake-template')
-        def db_read(obj_type, uuids):
+        def db_read(obj_type, uuids, **kwargs):
             obj = {}
-            obj['parent_type'] = "project"
             obj['uuid'] = uuids[0]
             if obj_type == 'service_template':
                 obj['fq_name'] = 'default-domain:fake-template'
-                return (True, [self.obj_to_dict(st_obj)])
+                return (True, [obj])
             elif obj_type == 'service_instance':
                 obj['fq_name'] = 'default-domain:default-project:fake-instance'
-                return (True, [self.obj_to_dict(si_obj)])
+                return (True, [obj])
             else:
                 return (False, None)
 
-        def db_list(obj_type, is_detail=False):
-            if is_detail:
-                return db_read(obj_type, ["fake_uuid"])
+        def db_list(obj_type):
             if obj_type == 'service_template':
                 fq_name = 'default-domain:fake-template'
                 return (True, [([fq_name], obj_type)])
@@ -1233,6 +1218,10 @@ class SvcMonitorTest(unittest.TestCase):
         config_db.DBBaseSM._object_db.object_read = db_read
         self._svc_monitor.create_service_instance = mock.MagicMock()
 
+        st_obj = self.add_st('fake-template', 'fake-template')
+        si_obj = self.add_si('fake-instance', 'fake-instance', st_obj)
+        si = config_db.ServiceInstanceSM.get('fake-instance')
+        st = config_db.ServiceTemplateSM.get('fake-template')
         st.virtualization_type = 'virtual-machine'
         st.params = {'service_type': 'firewall'}
         self._svc_monitor.post_init(self.vnc_mock, self.args)

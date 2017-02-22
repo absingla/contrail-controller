@@ -307,6 +307,7 @@ struct ServiceChainConfig {
 };
 
 struct StaticRouteConfig {
+    bool operator<(const StaticRouteConfig &) const;
     IpAddress address;
     int prefix_length;
     IpAddress nexthop;
@@ -382,7 +383,7 @@ class BgpInstanceConfig {
 public:
     typedef std::set<std::string> NeighborList;
     typedef std::set<std::string> RouteTargetList;
-    typedef std::vector<StaticRouteConfig> StaticRouteList;
+    typedef std::set<StaticRouteConfig> StaticRouteList;
     typedef std::vector<ServiceChainConfig> ServiceChainList;
     typedef std::vector<AggregateRouteConfig> AggregateRouteList;
 
@@ -428,6 +429,14 @@ public:
         virtual_network_allow_transit_ = allow_transit;
     }
 
+    bool virtual_network_pbb_evpn_enable() const {
+        return virtual_network_pbb_evpn_enable_;
+    }
+    void set_virtual_network_pbb_evpn_enable(bool pbb_evpn) {
+        virtual_network_pbb_evpn_enable_ = pbb_evpn;
+    }
+
+
     int vxlan_id() const { return vxlan_id_; }
     void set_vxlan_id(int vxlan_id) { vxlan_id_ = vxlan_id; }
 
@@ -468,6 +477,7 @@ private:
     std::string virtual_network_;
     int virtual_network_index_;
     bool virtual_network_allow_transit_;
+    bool virtual_network_pbb_evpn_enable_;
     int vxlan_id_;
     mutable uint64_t last_change_at_;
     StaticRouteList inet_static_routes_;

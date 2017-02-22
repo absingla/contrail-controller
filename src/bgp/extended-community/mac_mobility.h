@@ -18,10 +18,11 @@ public:
     static const int kSize = 8;
     typedef boost::array<uint8_t, kSize> bytes_type;
 
-    explicit MacMobility(uint32_t seq);
+    explicit MacMobility(uint32_t seq, bool sticky=false);
     explicit MacMobility(const bytes_type &data);
 
     uint32_t sequence_number() const;
+    bool sticky() const;
 
     const bytes_type &GetExtCommunity() const {
         return data_;
@@ -30,7 +31,9 @@ public:
     const uint64_t GetExtCommunityValue() const {
         return get_value(data_.begin(), 8);
     }
+
     std::string ToString();
+
 private:
     bytes_type data_;
 };

@@ -35,7 +35,7 @@ class StatsManager {
     struct InterfaceStats {
         InterfaceStats();
         void UpdateStats(uint64_t in_b, uint64_t in_p, uint64_t out_b,
-                         uint64_t out_p, uint64_t drop_p);
+                         uint64_t out_p);
         void UpdatePrevStats();
         void GetDiffStats(uint64_t *in_b, uint64_t *out_b) const;
 
@@ -46,7 +46,6 @@ class StatsManager {
         uint64_t in_bytes;
         uint64_t out_pkts;
         uint64_t out_bytes;
-        uint64_t drop_pkts;
         uint64_t prev_in_bytes;
         uint64_t prev_out_bytes;
         uint64_t prev_5min_in_bytes;
@@ -181,7 +180,7 @@ class StatsManager {
                        FlowRateComputeInfo &flow_info,
                        VrouterFlowRate &flow_rate) const;
     void BuildDropStats(const vr_drop_stats_req &r,
-                        VrouterDropStats &ds) const;
+                        AgentDropStats &ds) const;
     friend class AgentStatsCollectorTest;
 
  private:

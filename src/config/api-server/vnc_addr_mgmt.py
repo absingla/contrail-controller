@@ -88,8 +88,9 @@ class AddrMgmtSubnetExhausted(AddrMgmtError):
     # end __init__
 
     def __str__(self):
+        vn_fq_name_str = str([str(a) for a in self.vn_fq_name])
         return "Virtual-Network(%s) has exhausted subnet(%s)" %\
-            (self.vn_fq_name, self.subnet_val)
+            (vn_fq_name_str, self.subnet_val)
     # end __str__
 # end AddrMgmtSubnetExhausted
 
@@ -584,6 +585,7 @@ class AddrMgmt(object):
         ipam_fq_name_str = ':'.join(ipam_fq_name)
         subnet_objs = self._subnet_objs.get(ipam_uuid)
         if subnet_objs is None:
+            self._subnet_objs[ipam_uuid] = {}
             #read ipam to get ipam_subnets and generate subnet_objs
             (ok, ipam_dict) = self._uuid_to_obj_dict('network_ipam',
                                                      ipam_uuid)
@@ -602,6 +604,8 @@ class AddrMgmt(object):
                     subnet['ip_prefix_len'])
                 subnet_obj = self._create_subnet_obj_for_ipam_subnet(
                                  ipam_subnet, ipam_fq_name_str, should_persist)
+                if ipam_uuid not in self._subnet_objs:
+                    self._subnet_objs[ipam_uuid] = {}
                 self._subnet_objs[ipam_uuid][subnet_name] = subnet_obj
             subnet_objs = self._subnet_objs[ipam_uuid]
 
@@ -1471,8 +1475,6 @@ class AddrMgmt(object):
                 ip_addr = subnet_obj.ip_set_in_use(ipaddr=ip_addr)
                 return True
 
-        db_conn.config_log("Error: %s ip address not found" %(ip_addr),
-                           level=SandeshLevel.SYS_ERR)
         return False
     # end _ipam_ip_alloc_notify
 
@@ -1533,8 +1535,6 @@ class AddrMgmt(object):
                 if subnet_obj.ip_belongs(ip_addr):
                     subnet_obj.ip_free(IPAddress(ip_addr))
                     return True
-        db_conn.config_log("Error: %s ip address not found" %(ip_addr),
-                           level=SandeshLevel.SYS_ERR)
         return False
     # end _ipam_ip_free_req
 
@@ -1633,8 +1633,6 @@ class AddrMgmt(object):
                     subnet_obj.ip_reset_in_use(ip_addr)
                     return True
 
-        db_conn.config_log("Error: %s ip address not found" %(ip_addr),
-                           level=SandeshLevel.SYS_ERR)
         return False
     # end _ipam_ip_free_notify
 

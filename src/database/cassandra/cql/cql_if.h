@@ -9,7 +9,7 @@
 #include <vector>
 
 #include <tbb/atomic.h>
-
+#include <sandesh/sandesh.h>
 #include <database/gendb_if.h>
 #include <database/gendb_statistics.h>
 #include <database/cassandra/cql/cql_types.h>
@@ -54,6 +54,11 @@ class CqlIf : public GenDb::GenDbIf {
     virtual bool Db_GetRow(GenDb::ColList *out, const std::string &cfname,
         const GenDb::DbDataValueVec &rowkey,
         GenDb::DbConsistency::type dconsistency);
+    virtual bool Db_GetRow(GenDb::ColList *out, const std::string &cfname,
+        const GenDb::DbDataValueVec &rowkey,
+        GenDb::DbConsistency::type dconsistency,
+        const GenDb::ColumnNameRange &crange,
+        const GenDb::FieldNamesToReadVec &read_vec);
     virtual bool Db_GetMultiRow(GenDb::ColListVec *out,
         const std::string &cfname,
         const std::vector<GenDb::DbDataValueVec> &v_rowkey);

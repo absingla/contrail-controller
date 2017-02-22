@@ -3,11 +3,14 @@
  */
 
 #include <boost/uuid/uuid_io.hpp>
+#include <boost/scoped_ptr.hpp>
 #include <vnc_cfg_types.h>
 #include <base/util.h>
 #include <db/db_partition.h>
 
 #include <ifmap/ifmap_node.h>
+#include <ifmap/ifmap_link.h>
+#include <ifmap/ifmap_agent_table.h>
 #include <cmn/agent_cmn.h>
 #include <oper/operdb_init.h>
 #include <oper/ifmap_dependency_manager.h>
@@ -22,14 +25,53 @@
 #include <oper/sg.h>
 #include <oper/vm.h>
 #include <oper/interface_common.h>
+#include <oper/global_qos_config.h>
 #include <oper/qos_config.h>
+#include <oper/vrouter.h>
+#include <oper/global_vrouter.h>
 #include <oper/forwarding_class.h>
 #include<oper/qos_queue.h>
-
+#include <oper/bridge_domain.h>
 #include <vector>
 #include <string>
 
 using std::string;
+
+ConfigHelper::ConfigHelper(const ConfigManager *mgr,
+                           const Agent *agent) :
+    mgr_(mgr), link_table_(NULL), agent_(agent) {
+}
+
+IFMapNode *ConfigHelper::GetOtherAdjacentNode(IFMapLink *link,
+                                              IFMapNode *node) {
+    if (link->left() == node) return link->right();
+    if (link->right() == node) return link->left();
+    return NULL;
+}
+
+//Note: FindLink here checks for many-to-one node.
+IFMapNode *ConfigHelper::FindLink(const char *type,
+                                  IFMapNode *node) {
+    IFMapLink *link = NULL;
+    if (!link_table_) {
+        link_table_ = static_cast<IFMapAgentLinkTable *>(agent_->db()->
+                                  FindTable(IFMAP_AGENT_LINK_DB_NAME));
+    }
+
+    std::ostringstream key_with_node_in_right;
+    key_with_node_in_right << type << ",," << node->ToString();
+    link = link_table_->FindNextLink(key_with_node_in_right.str());
+    if (link && (strcmp(link->metadata().c_str(), type) == 0))
+        return GetOtherAdjacentNode(link, node);
+
+    std::ostringstream key_with_node_in_left;
+    key_with_node_in_left << type << "," << node->ToString() << ",";
+    link = link_table_->FindNextLink(key_with_node_in_left.str());
+    if (link && (strcmp(link->metadata().c_str(), type) == 0))
+        return GetOtherAdjacentNode(link, node);
+
+    return NULL;
+}
 
 class ConfigManagerNodeList {
 public:
@@ -49,7 +91,13 @@ public:
     typedef NodeList::iterator NodeListIterator;
 
     ConfigManagerNodeList(AgentDBTable *table) :
-        table_(table), enqueue_count_(0), process_count_(0) {
+        table_(table), oper_ifmap_table_(NULL), enqueue_count_(0),
+        process_count_(0) {
+    }
+
+    ConfigManagerNodeList(OperIFMapTable *table) :
+        table_(NULL), oper_ifmap_table_(table), enqueue_count_(0),
+        process_count_(0) {
     }
 
     ~ConfigManagerNodeList() {
@@ -85,9 +133,16 @@ public:
 
             DBRequest req;
             boost::uuids::uuid id = state->uuid();
-            if (table_->ProcessConfig(node, req, id)) {
-                table_->Enqueue(&req);
+            if (table_) {
+                if (table_->ProcessConfig(node, req, id)) {
+                    table_->Enqueue(&req);
+                }
             }
+
+            if (oper_ifmap_table_) {
+                oper_ifmap_table_->ProcessConfig(node);
+            }
+
             list_.erase(prev);
             weight--;
             count++;
@@ -103,6 +158,7 @@ public:
 
 private:
     AgentDBTable *table_;
+    OperIFMapTable *oper_ifmap_table_;
     NodeList list_;
     uint32_t enqueue_count_;
     uint32_t process_count_;
@@ -194,6 +250,7 @@ ConfigManager::ConfigManager(Agent *agent) :
     for (uint32_t i = 0; i < kMaxTimeout; i++) {
         process_config_count_[i] = 0;
     }
+    helper_.reset(new ConfigHelper(this, agent_));
 }
 
 ConfigManager::~ConfigManager() {
@@ -215,16 +272,34 @@ void ConfigManager::Init() {
     vm_list_.reset(new ConfigManagerNodeList(agent_->vm_table()));
     hc_list_.reset(new ConfigManagerNodeList
                        (agent_->health_check_table()));
+    bridge_domain_list_.reset(new ConfigManagerNodeList(
+                                  agent_->bridge_domain_table()));
     qos_config_list_.reset(new ConfigManagerNodeList(agent_->qos_config_table()));
     device_vn_list_.reset(new ConfigManagerDeviceVnList
                           (agent_->physical_device_vn_table()));
     qos_queue_list_.reset(new ConfigManagerNodeList(agent_->qos_queue_table()));
     forwarding_class_list_.reset(new
             ConfigManagerNodeList(agent_->forwarding_class_table()));
+
+    OperDB *oper_db = agent()->oper_db();
+    global_vrouter_list_.reset
+        (new ConfigManagerNodeList(oper_db->global_vrouter()));
+    virtual_router_list_.reset
+        (new ConfigManagerNodeList(oper_db->vrouter()));
+    global_qos_config_list_.reset
+        (new ConfigManagerNodeList(oper_db->global_qos_config()));
+    network_ipam_list_.reset
+        (new ConfigManagerNodeList(oper_db->network_ipam()));
+    virtual_dns_list_.reset(new ConfigManagerNodeList(oper_db->virtual_dns()));
 }
 
 uint32_t ConfigManager::Size() const {
     return
+        global_vrouter_list_->Size() +
+        virtual_router_list_->Size() +
+        global_qos_config_list_->Size() +
+        network_ipam_list_->Size() + + +
+        virtual_dns_list_->Size() +
         vmi_list_->Size() +
         physical_interface_list_->Size() +
         logical_interface_list_->Size() +
@@ -235,11 +310,17 @@ uint32_t ConfigManager::Size() const {
         vm_list_->Size() +
         hc_list_->Size() +
         device_vn_list_->Size() +
-        qos_config_list_->Size();
+        qos_config_list_->Size() +
+        bridge_domain_list_->Size();
 }
 
 uint32_t ConfigManager::ProcessCount() const {
     return
+        global_vrouter_list_->process_count() +
+        virtual_router_list_->process_count() +
+        global_qos_config_list_->process_count() +
+        network_ipam_list_->process_count() +
+        virtual_dns_list_->process_count() +
         vmi_list_->process_count() +
         physical_interface_list_->process_count() +
         logical_interface_list_->process_count() +
@@ -254,6 +335,10 @@ uint32_t ConfigManager::ProcessCount() const {
 }
 
 void ConfigManager::Start() {
+    if (agent_->ResourceManagerReady() == false) {
+        return;
+    }
+
     if (agent_->test_mode()) {
         trigger_->Set();
     } else {
@@ -292,6 +377,11 @@ int ConfigManager::Run() {
     uint32_t max_count = kIterationCount;
     uint32_t count = 0;
 
+    count += global_vrouter_list_->Process(max_count - count);
+    count += virtual_router_list_->Process(max_count - count);
+    count += global_qos_config_list_->Process(max_count - count);
+    count += network_ipam_list_->Process(max_count - count);
+    count += virtual_dns_list_->Process(max_count - count);
     count += sg_list_->Process(max_count - count);
     count += physical_interface_list_->Process(max_count - count);
     count += qos_queue_list_->Process(max_count - count);
@@ -300,6 +390,7 @@ int ConfigManager::Run() {
     count += vn_list_->Process(max_count - count);
     count += vm_list_->Process(max_count - count);
     count += vrf_list_->Process(max_count - count);
+    count += bridge_domain_list_->Process(max_count - count);
     count += logical_interface_list_->Process(max_count - count);
     count += vmi_list_->Process(max_count - count);
     count += device_list_->Process(max_count - count);
@@ -316,10 +407,6 @@ uint32_t ConfigManager::VmiNodeCount() const {
     return vmi_list_->Size();
 }
 
-void ConfigManager::DelVmiNode(IFMapNode *node) {
-    vmi_list_->Delete(agent_, this, node);
-}
-
 void ConfigManager::AddLogicalInterfaceNode(IFMapNode *node) {
     logical_interface_list_->Add(agent_, this, node);
 }
@@ -334,6 +421,10 @@ void ConfigManager::AddPhysicalDeviceNode(IFMapNode *node) {
 
 void ConfigManager::AddHealthCheckServiceNode(IFMapNode *node) {
     hc_list_->Add(agent_, this, node);
+}
+
+void ConfigManager::AddBridgeDomainNode(IFMapNode *node) {
+    bridge_domain_list_->Add(agent_, this, node);
 }
 
 void ConfigManager::AddSgNode(IFMapNode *node) {
@@ -379,6 +470,26 @@ void ConfigManager::DelPhysicalDeviceVn(const boost::uuids::uuid &dev,
 }
 uint32_t ConfigManager::PhysicalDeviceVnCount() const {
     return device_vn_list_->Size();
+}
+
+void ConfigManager::AddGlobalQosConfigNode(IFMapNode *node) {
+    global_qos_config_list_->Add(agent_, this, node);
+}
+
+void ConfigManager::AddNetworkIpamNode(IFMapNode *node) {
+    network_ipam_list_->Add(agent_, this, node);
+}
+
+void ConfigManager::AddVirtualDnsNode(IFMapNode *node) {
+    virtual_dns_list_->Add(agent_, this, node);
+}
+
+void ConfigManager::AddGlobalVrouterNode(IFMapNode *node) {
+    global_vrouter_list_->Add(agent_, this, node);
+}
+
+void ConfigManager::AddVirtualRouterNode(IFMapNode *node) {
+    virtual_router_list_->Add(agent_, this, node);
 }
 
 string ConfigManager::ProfileInfo() const {

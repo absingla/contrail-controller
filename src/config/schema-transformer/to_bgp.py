@@ -18,7 +18,9 @@ reload(sys)
 sys.setdefaultencoding('UTF8')
 import requests
 import ConfigParser
-
+import signal
+import random
+import hashlib
 import argparse
 
 from cfgm_common import vnc_cgitb
@@ -71,6 +73,7 @@ class SchemaTransformer(object):
             'network_policy': [],
             'virtual_machine_interface': [],
             'route_table': [],
+            'bgpvpn': [],
         },
         'virtual_machine': {
             'self': ['service_instance'],
@@ -111,6 +114,7 @@ class SchemaTransformer(object):
             'self': ['route_table'],
             'virtual_machine_interface': [],
             'route_table': [],
+            'bgpvpn': [],
         },
         'floating_ip': {
             'self': ['virtual_machine_interface'],
@@ -137,12 +141,16 @@ class SchemaTransformer(object):
         },
         'route_aggregate': {
             'self': ['service_instance'],
-        }
+        },
+        'bgpvpn': {
+            'self': ['virtual_network', 'logical_router'],
+            'virtual_network': [],
+            'logical_router': [],
+        },
     }
 
     def __init__(self, args=None):
         self._args = args
-
         self._fabric_rt_inst_obj = None
 
         # Initialize discovery client
@@ -180,6 +188,7 @@ class SchemaTransformer(object):
     def reinit(self):
         GlobalSystemConfigST.reinit()
         BgpRouterST.reinit()
+        BgpvpnST.reinit()
         LogicalRouterST.reinit()
         vn_list = list(VirtualNetworkST.list_vnc_obj())
         vn_id_list = set([vn.uuid for vn in vn_list])
@@ -211,8 +220,8 @@ class SchemaTransformer(object):
                     pass
                 except Exception as e:
                     self.logger.error(
-                            "Error while deleting routing instance %s: %s",
-                            ri.get_fq_name_str(), str(e))
+                            "Error while deleting routing instance %s: %s"%(
+                            ri.get_fq_name_str(), str(e)))
 
         # end for ri
 
@@ -220,7 +229,7 @@ class SchemaTransformer(object):
         sg_id_list = [sg.uuid for sg in sg_list]
         sg_acl_dict = {}
         vn_acl_dict = {}
-        for acl in DBBaseST.list_vnc_obj('access_control_list'):
+        for acl in DBBaseST.list_vnc_obj('access_control_list', fields=['access_control_list_hash']):
             delete = False
             if acl.parent_type == 'virtual-network':
                 if acl.parent_uuid in vn_id_list:
@@ -242,8 +251,8 @@ class SchemaTransformer(object):
                     pass
                 except Exception as e:
                     self.logger.error(
-                            "Error while deleting acl %s: %s",
-                            acl.uuid, str(e))
+                            "Error while deleting acl %s: %s"%(
+                            acl.uuid, str(e)))
         # end for acl
 
         gevent.sleep(0.001)
@@ -337,43 +346,29 @@ class SchemaTransformer(object):
             cls.reset()
         self._vnc_amqp.close()
     # end reset
+
+    def sighup_handler(self):
+        if self._conf_file:
+            config = ConfigParser.SafeConfigParser()
+            config.read(self._conf_file)
+            if 'DEFAULTS' in config.sections():
+                try:
+                    collectors = config.get('DEFAULTS', 'collectors')
+                    if type(collectors) is str:
+                        collectors = collectors.split()
+                        new_chksum = hashlib.md5("".join(collectors)).hexdigest()
+                        if new_chksum != self._chksum:
+                            self._chksum = new_chksum
+                            config.random_collectors = random.sample(collectors, len(collectors))
+                            self.logger.sandesh_reconfig_collectors(config)
+                except ConfigParser.NoOptionError as e:
+                    pass
+    # end sighup_handler
+
 # end class SchemaTransformer
 
 
 def parse_args(args_str):
-    '''
-    Eg. python to_bgp.py --rabbit_server localhost
-                         --rabbit_port 5672
-                         --rabbit_user guest
-                         --rabbit_password guest
-                         --db_engine cassandra
-                         --cassandra_server_list 10.1.2.3:9160
-                         # for RDBMS backend
-                         --db_engine rdbms
-                         --rdbms_server_list 127.0.0.1:3306
-                         --rdbms_connection_config sqlite:///.test.db
-                         --api_server_ip 10.1.2.3
-                         --api_server_port 8082
-                         --api_server_use_ssl False
-                         --zk_server_ip 10.1.2.3
-                         --zk_server_port 2181
-                         --collectors 127.0.0.1:8086
-                         --disc_server_ip 127.0.0.1
-                         --disc_server_port 5998
-                         --http_server_port 8090
-                         --log_local
-                         --log_level SYS_DEBUG
-                         --log_category test
-                         --log_file <stdout>
-                         --trace_file /var/log/contrail/schema.err
-                         --use_syslog
-                         --syslog_facility LOG_USER
-                         --cluster_id <testbed-name>
-                         --zk_timeout 400
-                         [--reset_config]
-    '''
-
-    # Source any specified config/ini file
     # Turn off help, so we      all options in response to -h
     conf_parser = argparse.ArgumentParser(add_help=False)
 
@@ -388,10 +383,7 @@ def parse_args(args_str):
         'rabbit_password': 'guest',
         'rabbit_vhost': None,
         'rabbit_ha_mode': False,
-        'db_engine': 'cassandra',
         'cassandra_server_list': '127.0.0.1:9160',
-        'rdbms_server_list': "127.0.0.1:3306",
-        'rdbms_connection_config': "",
         'api_server_ip': '127.0.0.1',
         'api_server_port': '8082',
         'api_server_use_ssl': False,
@@ -420,6 +412,8 @@ def parse_args(args_str):
         'kombu_ssl_certfile': '',
         'kombu_ssl_ca_certs': '',
         'zk_timeout': 400,
+        'logical_routers_enabled': True,
+        'acl_direction_comp': False,
     }
     secopts = {
         'use_certs': False,
@@ -436,14 +430,15 @@ def parse_args(args_str):
         'cassandra_user': None,
         'cassandra_password': None,
     }
-
-    # rdbms options
-    rdbmsopts = {
-        'rdbms_user'     : None,
-        'rdbms_password' : None,
-        'rdbms_connection': None
+    sandeshopts = {
+        'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+        'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+        'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+        'sandesh_ssl_enable': False,
+        'introspect_ssl_enable': False
     }
 
+    saved_conf_file = args.conf_file
     if args.conf_file:
         config = ConfigParser.SafeConfigParser()
         config.read(args.conf_file)
@@ -457,8 +452,8 @@ def parse_args(args_str):
 
         if 'CASSANDRA' in config.sections():
                 cassandraopts.update(dict(config.items('CASSANDRA')))
-        if 'RDBMS' in config.sections():
-                rdbmsopts.update(dict(config.items('RDBMS')))
+        if 'SANDESH' in config.sections():
+            sandeshopts.update(dict(config.items('SANDESH')))
 
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
@@ -473,20 +468,18 @@ def parse_args(args_str):
     defaults.update(secopts)
     defaults.update(ksopts)
     defaults.update(cassandraopts)
-    defaults.update(rdbmsopts)
+    defaults.update(sandeshopts)
     parser.set_defaults(**defaults)
+    def _bool(s):
+        """Convert string to bool (in argparse context)."""
+        if s.lower() not in ['true', 'false']:
+            raise ValueError('Need bool; got %r' % s)
+        return {'true': True, 'false': False}[s.lower()]
 
     parser.add_argument(
         "--cassandra_server_list",
         help="List of cassandra servers in IP Address:Port format",
         nargs='+')
-    parser.add_argument(
-        "--rdbms_server_list",
-        help="List of cassandra servers in IP Address:Port format",
-        nargs='+')
-    parser.add_argument(
-        "--rdbms_connection",
-        help="DB Connection string")
     parser.add_argument(
         "--reset_config", action="store_true",
         help="Warning! Destroy previous configuration and start clean")
@@ -552,22 +545,27 @@ def parse_args(args_str):
                         help="Start port for bgp-as-a-service proxy")
     parser.add_argument("--bgpaas_port_end", type=int,
                         help="End port for bgp-as-a-service proxy")
-    parser.add_argument("--zk_timeout",
+    parser.add_argument("--zk_timeout", type=int,
                         help="Timeout for ZookeeperClient")
-    parser.add_argument("--db_engine",
-        help="Database engine to use, default cassandra")
+    parser.add_argument("--logical_routers_enabled", type=_bool,
+                        help="Enabled logical routers")
+    parser.add_argument("--acl_direction_comp", type=_bool,
+                        help="Acl direction compression")
 
     args = parser.parse_args(remaining_argv)
+    args.conf_file = saved_conf_file
     if type(args.cassandra_server_list) is str:
         args.cassandra_server_list = args.cassandra_server_list.split()
     if type(args.collectors) is str:
         args.collectors = args.collectors.split()
-    if type(args.rdbms_server_list) is str:
-        args.rdbms_server_list =\
-            args.rdbms_server_list.split()
+    args.sandesh_config = SandeshConfig(args.sandesh_keyfile,
+        args.sandesh_certfile, args.sandesh_ca_cert,
+        args.sandesh_ssl_enable, args.introspect_ssl_enable)
 
     return args
 # end parse_args
+
+
 
 transformer = None
 
@@ -602,8 +600,24 @@ def run_schema_transformer(args):
             # auth failure or haproxy throws 503
             time.sleep(3)
 
+    #randomize collector list
+    args.random_collectors = args.collectors
+    if args.collectors:
+        args.random_collectors = random.sample(args.collectors, len(args.collectors))
+
     global transformer
     transformer = SchemaTransformer(args)
+    transformer._conf_file = args.conf_file
+    transformer._chksum = ""
+    # checksum of collector list
+    if args.collectors:
+        transformer._chksum = hashlib.md5("".join(args.collectors)).hexdigest()
+
+    """ @sighup
+    SIGHUP handler to indicate configuration changes
+    """
+    gevent.signal(signal.SIGHUP, transformer.sighup_handler)
+
     gevent.joinall(transformer._vnc_amqp._vnc_kombu.greenlets())
 # end run_schema_transformer
 
@@ -612,7 +626,9 @@ def main(args_str=None):
     global _zookeeper_client
     if not args_str:
         args_str = ' '.join(sys.argv[1:])
+
     args = parse_args(args_str)
+    args._args_list = args_str
     if args.cluster_id:
         client_pfx = args.cluster_id + '-'
         zk_path_pfx = args.cluster_id + '/'

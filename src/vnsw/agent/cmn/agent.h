@@ -37,6 +37,7 @@ class AgentStatsCollector;
 class FlowStatsCollector;
 class FlowStatsManager;
 class MetaDataIpAllocator;
+class ResourceManager;
 namespace OVSDB {
 class OvsdbClient;
 };
@@ -157,6 +158,12 @@ typedef boost::intrusive_ptr<const QosQueue> QosQueueConstRef;
 void intrusive_ptr_release(const QosQueueRef *p);
 void intrusive_ptr_add_ref(const QosQueueRef *p);
 
+class BridgeDomainEntry;
+typedef boost::intrusive_ptr<BridgeDomainEntry> BridgeDomainRef;
+typedef boost::intrusive_ptr<const BridgeDomainEntry> BridgeDomainConstRef;
+void intrusive_ptr_release(const BridgeDomainEntry *p);
+void intrusive_ptr_add_ref(const BridgeDomainEntry *p);
+
 //class SecurityGroup;
 typedef std::vector<int> SecurityGroupList;
 typedef std::vector<std::string> CommunityList;
@@ -191,6 +198,7 @@ class AgentQosConfigTable;
 class QosQueueTable;
 class MirrorCfgTable;
 class IntfMirrorCfgTable;
+class BridgeDomainTable;
 
 class XmppInit;
 class AgentXmppChannel;
@@ -218,6 +226,8 @@ class ServiceInstanceTable;
 class Agent;
 class RESTServer;
 class PortIpcHandler;
+class MacLearningProto;
+class MacLearningModule;
 
 extern void RouterIdDepInit(Agent *agent);
 
@@ -242,6 +252,17 @@ extern void RouterIdDepInit(Agent *agent);
 
 #define VROUTER_SERVER_PORT 20914
 
+/****************************************************************************
+ * Definitions related to config/resource backup/restore
+ ****************************************************************************/
+#define CFG_BACKUP_DIR "/var/lib/contrail/backup"
+#define CFG_BACKUP_COUNT 2
+#define CFG_BACKUP_IDLE_TIMEOUT (10*1000)
+#define CFG_RESTORE_AUDIT_TIMEOUT (15*1000)
+
+/****************************************************************************
+ * Task names
+ ****************************************************************************/
 #define kTaskFlowEvent "Agent::FlowEvent"
 #define kTaskFlowKSync "Agent::FlowKSync"
 #define kTaskFlowUpdate "Agent::FlowUpdate"
@@ -257,6 +278,11 @@ extern void RouterIdDepInit(Agent *agent);
 #define kTaskDBExclude "Agent::DBExcludeTask"
 #define kTaskConfigManager "Agent::ConfigManager"
 #define kTaskHttpRequstHandler "http::RequestHandlerTask"
+#define kAgentResourceRestoreTask    "Agent::ResoureRestore"
+#define kAgentResourceBackUpTask     "Agent::ResourceBackup"
+#define kTaskMacLearning "Agent::MacLearning"
+#define kTaskMacLearningMgmt "Agent::MacLearningMgmt"
+#define kTaskMacAging "Agent::MacAging"
 
 #define kInterfaceDbTablePrefix "db.interface"
 #define kVnDbTablePrefix  "db.vn"
@@ -298,6 +324,7 @@ public:
     static const uint32_t kFlowDelTokens = 16;
     static const uint32_t kFlowUpdateTokens = 16;
     static const uint8_t kInvalidQueueId = 255;
+    static const int kInvalidCpuId = -1;
     enum ForwardingMode {
         NONE,
         L2_L3,
@@ -326,7 +353,6 @@ public:
 
     Agent();
     virtual ~Agent();
-    void Shutdown();
 
     static Agent *GetInstance() {return singleton_;}
     static const std::string &NullString() {return null_string_;}
@@ -824,6 +850,22 @@ public:
     FlowProto *GetFlowProto() const { return flow_proto_; }
     void SetFlowProto(FlowProto *proto) { flow_proto_ = proto; }
 
+    MacLearningProto* mac_learning_proto() const {
+        return mac_learning_proto_;
+    }
+
+    void set_mac_learning_proto(MacLearningProto *mac_learning_proto) {
+        mac_learning_proto_ = mac_learning_proto;
+    }
+
+    MacLearningModule* mac_learning_module() const {
+        return mac_learning_module_;
+    }
+
+    void set_mac_learning_module(MacLearningModule *mac_learning_module) {
+        mac_learning_module_ = mac_learning_module;
+    }
+
     // Peer objects
     const Peer *local_peer() const {return local_peer_.get();}
     const Peer *local_vm_peer() const {return local_vm_peer_.get();}
@@ -837,6 +879,7 @@ public:
         return multicast_tree_builder_peer_.get();}
     const Peer *mac_vm_binding_peer() const {return mac_vm_binding_peer_.get();}
     const Peer *inet_evpn_peer() const {return inet_evpn_peer_.get();}
+    const Peer *mac_learning_peer() const {return mac_learning_peer_.get();}
 
     // Agent Modules
     AgentConfig *cfg() const; 
@@ -859,6 +902,9 @@ public:
 
     HealthCheckTable *health_check_table() const;
     void set_health_check_table(HealthCheckTable *table);
+
+    BridgeDomainTable *bridge_domain_table() const;
+    void set_bridge_domain_table(BridgeDomainTable *table);
 
     MetaDataIpAllocator *metadata_ip_allocator() const;
     void set_metadata_ip_allocator(MetaDataIpAllocator *allocator);
@@ -886,6 +932,9 @@ public:
 
     VNController *controller() const;
     void set_controller(VNController *val);
+
+    ResourceManager *resource_manager() const;
+    void set_resource_manager(ResourceManager *resource_manager);
 
     // Miscellaneous
     EventManager *event_manager() const {return event_mgr_;}
@@ -926,9 +975,6 @@ public:
     void set_vxlan_network_identifier_mode(VxLanNetworkIdentifierMode mode) {
         vxlan_network_identifier_mode_ = mode;
     }
-
-    bool headless_agent_mode() const {return headless_agent_mode_;}
-    void set_headless_agent_mode(bool mode) {headless_agent_mode_ = mode;}
 
     bool simulate_evpn_tor() const {return simulate_evpn_tor_;}
     void set_simulate_evpn_tor(bool mode) {simulate_evpn_tor_ = mode;}
@@ -1002,6 +1048,9 @@ public:
     void CopyFilteredParams();
     const std::string BuildDiscoveryClientName(std::string mod_name,
                                                std::string id);
+
+    bool ResourceManagerReady() const { return resource_manager_ready_; }
+    void SetResourceManagerReady();
 
     void Init(AgentParam *param);
     void InitPeers();
@@ -1128,9 +1177,9 @@ private:
     OperDB *oper_db_;
     DiagTable *diag_table_;
     VNController *controller_;
+    ResourceManager *resource_manager_;
 
     EventManager *event_mgr_;
-    TaskTbbKeepAwake *tbb_awake_task_;
     boost::shared_ptr<AgentXmppChannel> agent_xmpp_channel_[MAX_XMPP_SERVERS];
     AgentIfMapXmppChannel *ifmap_channel_[MAX_XMPP_SERVERS];
     XmppClient *xmpp_client_[MAX_XMPP_SERVERS];
@@ -1160,6 +1209,7 @@ private:
     VrfEntry *fabric_vrf_;
     InterfaceTable *intf_table_;
     HealthCheckTable *health_check_table_;
+    BridgeDomainTable *bridge_domain_table_;
     std::auto_ptr<MetaDataIpAllocator> metadata_ip_allocator_;
     NextHopTable *nh_table_;
     InetUnicastAgentRouteTable *uc_rt_table_;
@@ -1236,6 +1286,8 @@ private:
     Dhcpv6Proto *dhcpv6_proto_;
     Icmpv6Proto *icmpv6_proto_;
     FlowProto *flow_proto_;
+    MacLearningProto *mac_learning_proto_;
+    MacLearningModule *mac_learning_module_;
 
     std::auto_ptr<Peer> local_peer_;
     std::auto_ptr<Peer> local_vm_peer_;
@@ -1248,6 +1300,7 @@ private:
     std::auto_ptr<Peer> multicast_tree_builder_peer_;
     std::auto_ptr<Peer> mac_vm_binding_peer_;
     std::auto_ptr<Peer> inet_evpn_peer_;
+    std::auto_ptr<Peer> mac_learning_peer_;
 
     std::auto_ptr<AgentSignal> agent_signal_;
 
@@ -1260,12 +1313,12 @@ private:
     std::string mgmt_ip_;
     static Agent *singleton_;
     VxLanNetworkIdentifierMode vxlan_network_identifier_mode_;
-    bool headless_agent_mode_;
     const Interface *vhost_interface_;
     process::ConnectionState* connection_state_;
     bool test_mode_;
     bool xmpp_dns_test_mode_;
     bool init_done_;
+    bool resource_manager_ready_;
     bool simulate_evpn_tor_;
     bool tsn_enabled_;
     bool tor_agent_enabled_;

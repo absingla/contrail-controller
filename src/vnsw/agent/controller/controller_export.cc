@@ -23,7 +23,7 @@ RouteExport::State::State() :
     DBState(), exported_(false), fabric_multicast_exported_(false),
     force_chg_(false), label_(MplsTable::kInvalidLabel), vn_(), sg_list_(),
     tunnel_type_(TunnelType::INVALID), path_preference_(),
-    destination_(), source_(), ecmp_load_balance_() {
+    destination_(), source_(), ecmp_load_balance_(), isid_(0) {
 }
 
 bool RouteExport::State::Changed(const AgentRoute *route, const AgentPath *path) const {
@@ -55,6 +55,9 @@ bool RouteExport::State::Changed(const AgentRoute *route, const AgentPath *path)
     if(ecmp_load_balance_ != path->ecmp_load_balance())
         return true;
 
+    if (etree_leaf_ != path->etree_leaf())
+        return true;
+
     return false;
 }
 
@@ -67,6 +70,7 @@ void RouteExport::State::Update(const AgentRoute *route, const AgentPath *path) 
     tunnel_type_ = path->tunnel_type();
     path_preference_ = path->path_preference();
     ecmp_load_balance_ = path->ecmp_load_balance();
+    etree_leaf_ = path->etree_leaf();
 }
 
 RouteExport::RouteExport(AgentRouteTable *rt_table):
@@ -121,6 +125,10 @@ void RouteExport::Notify(const Agent *agent,
         if (!vs)
             return;
 
+        //Make sure that vrf has been subscribed before route is published.
+        if (vs->IsExportable(bgp_xmpp_peer->sequence_number()))
+            return;
+
         // There may be instances when decommisioned peer is not yet
         // unregistered while a new peer is already present. So there will be
         // two notifications. If its for decommisioned peer then ignore the same
@@ -147,6 +155,10 @@ void RouteExport::UnicastNotify(AgentXmppChannel *bgp_xmpp_peer,
     //then there will be no export from Bridge and check below can be removed.
     if (route->GetTableType() == Agent::BRIDGE)
         return;
+
+    if (route->vrf()->ShouldExportRoute() == false) {
+        return;
+    }
 
     AgentRouteTable *table = static_cast<AgentRouteTable *>
         (partition->parent());
@@ -342,7 +354,9 @@ void RouteExport::MulticastNotify(AgentXmppChannel *bgp_xmpp_peer,
         route->SetState(partition->parent(), id_, state);
     }
 
-    SubscribeFabricMulticast(agent, bgp_xmpp_peer, route, state);
+    if (route->vrf()->ShouldExportRoute()) {
+        SubscribeFabricMulticast(agent, bgp_xmpp_peer, route, state);
+    }
     SubscribeIngressReplication(agent, bgp_xmpp_peer, route, state);
 
     state->force_chg_ = false;
@@ -384,6 +398,17 @@ void RouteExport::SubscribeIngressReplication(Agent *agent,
             withdraw = true;
         }
 
+        if (route->vrf()->IsPbbVrf()) {
+            if (state->isid_ != active_path->vxlan_id()) {
+                uint32_t old_isid = state->isid_;
+                state->isid_ = active_path->vxlan_id();
+                withdraw_label = old_isid;
+                withdraw = true;
+            } else {
+                state->isid_ = active_path->vxlan_id();
+            }
+        }
+
         if (bridging == false)
             withdraw = true;
 
@@ -396,6 +421,7 @@ void RouteExport::SubscribeIngressReplication(Agent *agent,
         }
     }
 
+    state->isid_ = active_path->vxlan_id();
     //Update state values with new values if there is any change.
     //Also force change same i.e. update.
     if (active_path->tunnel_type() != state->tunnel_type_) {

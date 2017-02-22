@@ -11,8 +11,9 @@ LOG = logging.getLogger(__name__)
 
 class ServiceLbManager(object):
 
-    def __init__(self, vnc_lib=None):
+    def __init__(self, vnc_lib=None, logger=None):
         self._vnc_lib = vnc_lib
+        self.logger = logger
 
     def read(self, id):
         try:
@@ -21,95 +22,111 @@ class ServiceLbManager(object):
             return None
         return lb_obj
 
-    def list(self, project_id=None):
-        if project_id:
-            project_id = str(uuid.UUID(project_id))
-        else:
-            project_id = None
-        return self._vnc_lib.loadbalancers_list(parent_id=project_id)
+    def delete(self, service_id):
+        lb = LoadbalancerKM.get(service_id)
+        if not lb:
+            return
 
-    def update(self, obj):
-        return self._vnc_lib.loadbalancer_update(obj)
-
-    def get_loadbalancer_listener_back_refs(self, id):
-        try:
-            obj = self._vnc_lib.loadbalancer_read(id=id, fields = ['loadbalancer_listener_back_refs'])
-        except NoIdError:
+        vmi_ids = lb.virtual_machine_interfaces
+        self._vnc_lib.loadbalancer_delete(id=service_id)
+        if vmi_ids is None:
             return None
-        back_refs = getattr(obj, 'loadbalancer_listener_back_refs', None)
-        return back_refs
+        self._delete_virtual_interface(vmi_ids)
 
-    def _get_instance_ip_back_refs(self, id):
-        obj = self._vnc_lib.virtual_machine_interface_read(id = id, fields = ['instance_ip_back_refs'])
-        back_refs = getattr(obj, 'instance_ip_back_refs', None)
-        return back_refs
 
     def _create_virtual_interface(self, proj_obj, vn_obj, service_name,
-                                  cluster_ip):
-
-        vmi = VirtualMachineInterface(name=service_name, parent_obj=proj_obj)
-        vmi.set_virtual_network(vn_obj)
-        vmi.set_virtual_machine_interface_device_owner("K8S:LOADBALANCER")
+                                  vip_address=None, subnet_uuid=None):
+        #Check if VMI exists, if yes, delete it.
+        vmi_obj = VirtualMachineInterface(name=service_name, parent_obj=proj_obj)
         try:
-            self._vnc_lib.virtual_machine_interface_create(vmi)
-        except RefsExistError:
-            self._vnc_lib.virtual_machine_interface_update(vmi)
-        #VirtualMachineInterfaceKM.locate(vmi.uuid)
-        iip_refs = self._get_instance_ip_back_refs(vmi.uuid)
+            vmi_id = self._vnc_lib.fq_name_to_id('virtual-machine-interface',vmi_obj.get_fq_name())
+            if vmi_id:
+                self.logger.warning("Duplicate LB Interface %s, delete it" %
+                                    vmi_obj.get_fq_name())
+                vmi = VirtualMachineInterfaceKM.get(vmi_id)
+                iip_ids = vmi.instance_ips
+                for iip_id in list(iip_ids):
+                    iip_obj = self._vnc_lib.instance_ip_read(id=iip_id)
 
-        if iip_refs is not None:
-            iip = self._vnc_lib.instance_ip_read(id=iip_refs[0]['uuid'])
-            if iip.get_instance_ip_address() == cluster_ip:
-                return vmi, cluster_ip
+                    fip_refs = iip_obj.get_floating_ips()
+                    for fip_ref in fip_refs or []:
+                        fip = self._vnc_lib.floating_ip_read(id=fip_ref['uuid'])
+                        fip.set_virtual_machine_interface_list([])
+                        self._vnc_lib.floating_ip_update(fip)
+                        self._vnc_lib.floating_ip_delete(id=fip_ref['uuid'])
+                    self._vnc_lib.instance_ip_delete(id=iip_obj.uuid)
+                self._vnc_lib.virtual_machine_interface_delete(id=vmi_id)
+        except NoIdError:
+            pass
 
-            fip_refs = iip.get_floating_ips()
-            for ref in fip_refs or []:
-                self._vnc_lib.floating_ip_delete(id=ref['uuid'])
-            self._vnc_lib.instance_ip_delete(id=iip_refs[0]['uuid'])
+        #Create LB VMI
+        vmi_obj.uuid = str(uuid.uuid4())
+        vmi_obj.set_virtual_network(vn_obj)
+        vmi_obj.set_virtual_machine_interface_device_owner("K8S:LOADBALANCER")
+        sg_obj = SecurityGroup("default", proj_obj)
+        vmi_obj.add_security_group(sg_obj)
+        try:
+            self.logger.debug("Create LB Interface %s " % vmi_obj.get_fq_name())
+            self._vnc_lib.virtual_machine_interface_create(vmi_obj)
+            VirtualMachineInterfaceKM.locate(vmi_obj.uuid)
+        except BadRequest as e:
+            return None, None
 
-        iip_obj = InstanceIp(name=service_name)
+        try:
+            vmi_obj = self._vnc_lib.virtual_machine_interface_read(id=vmi_obj.uuid)
+        except NoIdError:
+            self.logger.warning("Read Service VMI failed for"
+                " service (" + service_name + ")" + " with NoIdError for vmi(" + vmi_id + ")")
+            return None, None
+
+        #Create InstanceIP <--- LB VMI
+        iip_uuid = str(uuid.uuid4())
+        iip_obj = InstanceIp(name=iip_uuid)
+        iip_obj.uuid = iip_uuid
         iip_obj.set_virtual_network(vn_obj)
-        iip_obj.set_virtual_machine_interface(vmi)
-        if cluster_ip:
-            iip_obj.set_instance_ip_address(cluster_ip)
+        if subnet_uuid:
+            iip_obj.set_subnet_uuid(subnet_uuid)
+        iip_obj.set_virtual_machine_interface(vmi_obj)
+        iip_obj.set_display_name(service_name)
+        if vip_address:
+            iip_obj.set_instance_ip_address(vip_address)
         try:
+            self.logger.debug("Create LB VMI InstanceIp %s " % iip_obj.get_fq_name())
             self._vnc_lib.instance_ip_create(iip_obj)
         except RefsExistError:
             self._vnc_lib.instance_ip_update(iip_obj)
-        #InstanceIpKM.locate(iip_obj.uuid)
-        iip = self._vnc_lib.instance_ip_read(id=iip_obj.uuid)
-        vip_address = iip.get_instance_ip_address()
+        InstanceIpKM.locate(iip_obj.uuid)
+        iip_obj = self._vnc_lib.instance_ip_read(id=iip_obj.uuid)
+        vip_address = iip_obj.get_instance_ip_address()
+        self.logger.debug("Created LB VMI InstanceIp %s with VIP %s" %
+                          (iip_obj.get_fq_name(), vip_address))
 
-        return vmi, vip_address
+        return vmi_obj, vip_address
 
-    def _delete_virtual_interface(self, vmi_list):
-        if vmi_list is None:
-            return
+    def _delete_virtual_interface(self, vmi_ids):
+        for vmi_id in vmi_ids:
+            vmi = VirtualMachineInterfaceKM.get(vmi_id)
+            if vmi:
+                # Delete vmi-->floating-ip
+                fip_ids = vmi.floating_ips.copy()
+                for fip_id in fip_ids:
+                    self._vnc_lib.floating_ip_delete(id=fip_id)
 
-        for vmi_ref in vmi_list:
-            interface_id = vmi_ref['uuid']
-            try:
-                vmi = self._vnc_lib.virtual_machine_interface_read(id=interface_id)
-            except NoIdError as ex:
-                LOG.error(ex)
-                continue
+                ip_ids = vmi.instance_ips.copy()
+                for ip_id in ip_ids:
+                    ip = InstanceIpKM.get(ip_id)
+                    if ip:
+                        fip_ids = ip.floating_ips.copy()
+                        for fip_id in fip_ids:
+                            # Delete vmi-->instance-ip-->floating-ip
+                            self._vnc_lib.floating_ip_delete(id=fip_id)
 
-            ip_refs = vmi.get_instance_ip_back_refs()
-            if ip_refs:
-                for ip_ref in ip_refs:
-                    try:
-                        ip = self._vnc_lib.instance_ip_read(id=ip_ref['uuid'])
-                    except NoIdError as ex:
-                        LOG.error(ex)
-                        continue
+                        # Delete vmi-->instance-ip
+                        self._vnc_lib.instance_ip_delete(id=ip_id)
 
-                    fip_refs = ip.get_floating_ips()
-                    for ref in fip_refs or []:
-                        self._vnc_lib.floating_ip_delete(id=ref['uuid'])
-
-                    self._vnc_lib.instance_ip_delete(id=ip_ref['uuid'])
-
-            self._vnc_lib.virtual_machine_interface_delete(id=interface_id)
+                # Delete vmi
+                self.logger.debug("Deleting LB Interface %s" % vmi.name)
+                self._vnc_lib.virtual_machine_interface_delete(id=vmi_id)
 
     def _check_provider_exists(self, loadbalancer_provider):
         """
@@ -124,24 +141,28 @@ class ServiceLbManager(object):
 
         return sas_obj
 
-    def create(self, vn_obj, service_id, service_name, proj_obj, cluster_ip, selectors):
+    def create(self, lb_provider, vn_obj, service_id, service_name,
+               proj_obj, vip_address=None, subnet_uuid=None, annotations=None):
         """
         Create a loadbalancer.
         """
         lb_obj = Loadbalancer(name=service_name, parent_obj=proj_obj,
-                              loadbalancer_provider='native')
+                              loadbalancer_provider=lb_provider)
         lb_obj.uuid = service_id
-        sas_obj = self._check_provider_exists(loadbalancer_provider='native')
+        sas_obj = self._check_provider_exists(loadbalancer_provider=lb_provider)
         if sas_obj is not None:
             lb_obj.set_service_appliance_set(sas_obj)
 
         vmi_obj, vip_address = self._create_virtual_interface(proj_obj,
-            vn_obj, service_name, cluster_ip)
+            vn_obj, service_name, vip_address, subnet_uuid)
         lb_obj.set_virtual_machine_interface(vmi_obj)
 
-        props = LoadbalancerType(provisioning_status='ACTIVE', 
+        id_perms = IdPermsType(enable=True)
+        props = LoadbalancerType(provisioning_status='ACTIVE', id_perms=id_perms,
                       operating_status='ONLINE', vip_address=vip_address)
         lb_obj.set_loadbalancer_properties(props)
+        for key in annotations:
+            lb_obj.add_annotations(KeyValuePair(key=key, value=annotations[key]))
 
         try:
             self._vnc_lib.loadbalancer_create(lb_obj)
@@ -149,52 +170,22 @@ class ServiceLbManager(object):
             self._vnc_lib.loadbalancer_update(lb_obj)
         return lb_obj
 
-    def delete(self, id):
-        try:
-            lb = self._vnc_lib.loadbalancer_read(id=id)
-        except NoIdError:
-            loadbalancerv2.EntityNotFound(name=self.resource_name, id=id)
-
-        lb_vmi_refs = lb.get_virtual_machine_interface_refs()
-
-        self._vnc_lib.loadbalancer_delete(id=id)
-        self._delete_virtual_interface(lb_vmi_refs)
-
 class ServiceLbListenerManager(object):
 
-    def __init__(self, vnc_lib=None):
+    def __init__(self, vnc_lib=None, logger=None):
         self._vnc_lib = vnc_lib
-
-    def _get_loadbalancers(self, ll):
-        loadbalancers = []
-        lb = {}
-        lb_refs = ll.get_loadbalancer_refs()
-        if lb_refs is None:
-            return None
-        lb['id'] = lb_refs[0]['uuid']
-        loadbalancers.append(lb)
-        return loadbalancers
+        self.logger = logger
 
     def read(self, id):
         return self._vnc_lib.loadbalancer_listener_read(id=id)
-
-    def list(self, tenant_id=None):
-        if tenant_id:
-            parent_id = str(uuid.UUID(tenant_id))
-        else:
-            parent_id = None
-        return self._vnc_lib.loadbalancer_listeners_list(parent_id=parent_id)
-
-    def update(self, obj):
-        return self._vnc_lib.loadbalancer_listener_update(obj)
 
     def delete(self, id):
         return self._vnc_lib.loadbalancer_listener_delete(id=id)
 
     def create(self, lb_obj, proj_obj, port):
 
-        obj_uuid = str(uuid.uuid1())
-        name = lb_obj.name + "-TCP-" + str(port['port'])
+        obj_uuid = str(uuid.uuid4())
+        name = lb_obj.name + "-" + port['protocol'] + "-" + str(port['port']) + "-" + obj_uuid
 
         id_perms = IdPermsType(enable=True)
         ll_obj = LoadbalancerListener(name, proj_obj, id_perms=id_perms,
@@ -208,14 +199,19 @@ class ServiceLbListenerManager(object):
         if port and port['protocol']:
             if port['protocol'] == "TCP":
                 props.set_protocol("TCP")
+            elif port['protocol'] == "HTTP":
+                props.set_protocol("HTTP")
+            elif port['protocol'] == "HTTPS":
+                props.set_protocol("HTTPS")
             else:
-                props.set_protocol("TCP") # SAS FIXME : UDP
+                props.set_protocol("UDP")
 
         if port and port['port']:
             props.set_protocol_port(port['port'])
 
         ll_obj.set_loadbalancer_listener_properties(props)
-        ll_obj.add_annotations(KeyValuePair(key='targetPort', value=port['targetPort']))
+        if 'targetPort' in port:
+            ll_obj.add_annotations(KeyValuePair(key='targetPort', value=str(port['targetPort'])))
 
         try:
             self._vnc_lib.loadbalancer_listener_create(ll_obj)
@@ -223,53 +219,35 @@ class ServiceLbListenerManager(object):
             self._vnc_lib.loadbalancer_listener_update(ll_obj)
 
         return ll_obj
-        #return self.make_dict(ll_obj)
-
-    def _get_listener_annotations(self, id):
-        try:
-            obj = self._vnc_lib.loadbalancer_listener_read(id=id, fields = ['annotations'])
-        except NoIdError:
-            return None
-        annotations = getattr(obj, 'annotations', None)
-        return annotations
-
-    def get_target_port_from_annotations(self, id):
-        annotations = self._get_listener_annotations(id)
-        if annotations:
-            try: 
-                for kvp in annotations.key_value_pair or []:
-                    if kvp['key'] == 'targetPort':
-                        return kvp['value']
-            except AttributeError:
-                pass
-
-        return None
 
 class ServiceLbPoolManager(object):
 
-    def __init__(self, vnc_lib=None):
+    def __init__(self, vnc_lib=None, logger=None):
         self._vnc_lib = vnc_lib
+        self.logger = logger
 
     def read(self, id):
         return self._vnc_lib.loadbalancer_pool_read(id=id)
 
-    def list(self, tenant_id=None):
-        if tenant_id:
-            parent_id = str(uuid.UUID(tenant_id))
-        else:
-            parent_id = None
-        return self._vnc_lib.loadbalancer_pools_list(parent_id=parent_id)
-
     def delete(self, id):
         return self._vnc_lib.loadbalancer_pool_delete(id=id)
 
-    def create(self, ll_obj, proj_obj, port):
+    def create(self, ll_obj, proj_obj, port, lb_algorithm=None, annotations=None):
         """
         Create a loadbalancer_pool object.
         """
-        pool_uuid = str(uuid.uuid1())
+        pool_uuid = str(uuid.uuid4())
         props = LoadbalancerPoolType()
-        props.set_protocol("TCP")
+        if port['protocol'] == "TCP":
+            props.set_protocol("TCP")
+        elif port['protocol'] == "HTTP":
+            props.set_protocol("HTTP")
+        elif port['protocol'] == "HTTPS":
+            props.set_protocol("HTTPS")
+        else:
+            props.set_protocol("UDP")
+        if lb_algorithm:
+            props.set_loadbalancer_method(lb_algorithm)
         id_perms = IdPermsType(enable=True)
         pool_obj = LoadbalancerPool(ll_obj.name, proj_obj, uuid=pool_uuid,
                                 loadbalancer_pool_properties=props,
@@ -283,8 +261,9 @@ class ServiceLbPoolManager(object):
                                      pool_id=pool_exists[0]['uuid'])
             pool_obj.set_loadbalancer_listener(ll_obj)
 
-        # Custom attributes ?
-
+        if annotations:
+            for key in annotations:
+                pool_obj.add_annotations(KeyValuePair(key=key, value=annotations[key]))
         try:
             self._vnc_lib.loadbalancer_pool_create(pool_obj)
         except RefsExistError:
@@ -294,49 +273,22 @@ class ServiceLbPoolManager(object):
 
 class ServiceLbMemberManager(object):
 
-    def __init__(self, vnc_lib=None):
+    def __init__(self, vnc_lib=None, logger=None):
         self._vnc_lib = vnc_lib
-
-    def _get_member_pool_id(self, member):
-        pool_uuid = member.parent_uuid
-        return pool_uuid
+        self.logger = logger
 
     def read(self, id):
         return self._vnc_lib.loadbalancer_member_read(id=id)
 
-    def list(self, tenant_id=None):
-        """ In order to retrive all the members for a specific tenant
-        the code iterates through all the pools.
-        """
-        if tenant_id is None:
-            return self._vnc_lib.loadbalancer_members_list()
-
-        pool_list = self._vnc_lib.loadbalancer_pools_list(tenant_id)
-        if 'loadbalancer-pools' not in pool_list:
-            return {}
-
-        member_list = []
-        for pool in pool_list['loadbalancer-pools']:
-            pool_members = self._vnc_lib.loadbalancer_members_list(
-                parent_id=pool['uuid'])
-            if 'loadbalancer-members' in pool_members:
-                member_list.extend(pool_members['loadbalancer-members'])
-
-        response = {'loadbalancer-members': member_list}
-        return response
-
-    def update(self, obj):
-        return self._vnc_lib.loadbalancer_member_update(obj)
-
     def delete(self, id):
         return self._vnc_lib.loadbalancer_member_delete(id=id)
 
-    def create(self, pool_obj, vmi_uuid, target_port):
+    def create(self, pool_obj, address, port, annotations):
         """
         Create a loadbalancer_member object.
         """
-        obj_uuid = str(uuid.uuid1())
-        props = LoadbalancerMemberType(protocol_port=target_port)
+        obj_uuid = str(uuid.uuid4())
+        props = LoadbalancerMemberType(address=address, protocol_port=port)
         id_perms = IdPermsType(enable=True)
 
         member_obj = LoadbalancerMember(
@@ -344,16 +296,26 @@ class ServiceLbMemberManager(object):
             id_perms=id_perms)
         member_obj.uuid = obj_uuid
 
-        member_obj.add_annotations(KeyValuePair(key='vmi', value=vmi_uuid))
+        if annotations:
+            for key in annotations:
+                member_obj.add_annotations(KeyValuePair(key=key, value=annotations[key]))
         self._vnc_lib.loadbalancer_member_create(member_obj)
-        #return self.make_dict(member_obj)
         return member_obj
 
-    def get_member_annotations(self, id):
-        try:
-            obj = self._vnc_lib.loadbalancer_member_read(id=id, fields = ['annotations'])
-        except NoIdError:
-            return None
-        annotations = getattr(obj, 'annotations', None)
-        return annotations
-
+    def update(self, member_id, address, port, annotations):
+        """
+        Update a loadbalancer_member object.
+        """
+        member_obj = self._vnc_lib.loadbalancer_member_read(id=member_id)
+        props = LoadbalancerMemberType(address=address, protocol_port=port)
+        member_obj.set_loadbalancer_member_properties(props)
+        if annotations:
+            kvps = []
+            for key in annotations.keys():
+                kvp = {}
+                kvp['key'] = key
+                kvp['value'] = annotations[key]
+                kvps.append(kvp)
+            member_obj.set_annotations(KeyValuePairs(kvps))
+        self._vnc_lib.loadbalancer_member_update(member_obj)
+        return member_obj

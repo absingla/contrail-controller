@@ -20,7 +20,7 @@
 #include "vncapi.h"
 
 RespBlock::RespBlock(HttpConnection *c, std::string uri,
-            boost::function<void(rapidjson::Document&,
+            boost::function<void(contrail_rapidjson::Document&,
                 boost::system::error_code&, std::string, int, std::string,
                 std::map<std::string, std::string>*)> cb):
         conn_(c), uri_(uri), cb_(cb)
@@ -66,7 +66,7 @@ RespBlock::ShowDetails()
         << conn_->Reason() << "(" << conn_->Status() << ")\n";
 }
 
-boost::function<void(rapidjson::Document&, boost::system::error_code&,
+boost::function<void(contrail_rapidjson::Document&, boost::system::error_code&,
         std::string, int, std::string, std::map<std::string, std::string>*)>
 RespBlock::GetCallBack()
 {
@@ -131,6 +131,28 @@ VncApi::CondTest(std::string s)
     return boost::starts_with(s, "X-AUTH-TOKEN:");
 }
 
+std::string VncApi::GetToken(RespBlock *rb) const {
+    contrail_rapidjson::Document jdoc;
+    jdoc.Parse<0>(rb->GetBody().c_str());
+
+    if (!jdoc.IsObject() || !jdoc.HasMember("access"))
+        return "";
+
+    if (!jdoc["access"].IsObject() || !jdoc["access"].HasMember("token"))
+        return "";
+
+    if (!jdoc["access"]["token"].IsObject())
+        return "";
+
+    if (!jdoc["access"]["token"].HasMember("id"))
+        return "";
+
+    if (!jdoc["access"]["token"]["id"].IsString())
+        return "";
+
+    return jdoc["access"]["token"]["id"].GetString();
+}
+
 void
 VncApi::KsRespHandler(RespBlock *rb, RespBlock *orb, std::string &str,
         boost::system::error_code &ec)
@@ -138,24 +160,22 @@ VncApi::KsRespHandler(RespBlock *rb, RespBlock *orb, std::string &str,
     if (client_) {
         if (str == "") {
             if (rb->GetConnection()->Status() == 200) {
-                rapidjson::Document jdoc;
+                contrail_rapidjson::Document jdoc;
                 jdoc.Parse<0>(rb->GetBody().c_str());
-                if (jdoc.IsObject() && jdoc.HasMember("access")) {
-                    std::string token = jdoc["access"]["token"]["id"]
-                        .GetString();
-                    if (!token.empty()) {
-                        hdr_.erase(std::remove_if(hdr_.begin(), hdr_.end(),
-                            boost::bind(&VncApi::CondTest,
-                                shared_from_this(), _1)), hdr_.end());
-                        hdr_.push_back(std::string("X-AUTH-TOKEN: ") + token);
-                        orb->GetConnection()->HttpGet(orb->GetUri(), false,
-                                false, true, hdr_, boost::bind(
-                                    &VncApi::RespHandler,
-                                shared_from_this(), orb, _1, _2));
-                        client_->RemoveConnection(rb->GetConnection());
-                        delete rb;
-                        return;
-                    }
+
+                std::string token = GetToken(rb);
+                if (!token.empty()) {
+                    hdr_.erase(std::remove_if(hdr_.begin(), hdr_.end(),
+                        boost::bind(&VncApi::CondTest,
+                            shared_from_this(), _1)), hdr_.end());
+                    hdr_.push_back(std::string("X-AUTH-TOKEN: ") + token);
+                    orb->GetConnection()->HttpGet(orb->GetUri(), false,
+                            false, true, hdr_, boost::bind(
+                                &VncApi::RespHandler,
+                            shared_from_this(), orb, _1, _2));
+                    client_->RemoveConnection(rb->GetConnection());
+                    delete rb;
+                    return;
                 }
             }
             client_->RemoveConnection(orb->GetConnection());
@@ -246,7 +266,7 @@ void
 VncApi::GetConfig(std::string type, std::vector<std::string> ids,
         std::vector<std::string> filters, std::vector<std::string> parents,
         std::vector<std::string> refs, std::vector<std::string> fields,
-        boost::function<void(rapidjson::Document&,
+        boost::function<void(contrail_rapidjson::Document&,
             boost::system::error_code &ec, std::string version, int status,
             std::string reason,
             std::map<std::string, std::string> *headers)> cb)
@@ -278,7 +298,7 @@ VncApi::RespHandler(RespBlock *rb, std::string &str,
                 rb->Clear();
                 Reauthenticate(rb);
             } else {
-                rapidjson::Document jdoc;
+                contrail_rapidjson::Document jdoc;
                 if (rb->GetConnection()->Status() == 200)
                     jdoc.Parse<0>(rb->GetBody().c_str());
                 rb->GetCallBack()(jdoc, ec,

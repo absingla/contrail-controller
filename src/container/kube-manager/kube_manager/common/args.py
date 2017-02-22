@@ -6,8 +6,10 @@ import sys
 
 import argparse
 from vnc_api.vnc_api import *
-from pysandesh.sandesh_base import Sandesh, SandeshSystem
-from sandesh_common.vns.constants import HttpPortKubeManager
+from pysandesh.sandesh_base import Sandesh, SandeshSystem, SandeshConfig
+from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
+from sandesh_common.vns.constants import (HttpPortKubeManager,ApiServerPort,\
+    DiscoveryServerPort)
 
 def parse_args():
     conf_parser = argparse.ArgumentParser(add_help=False)
@@ -27,6 +29,14 @@ def parse_args():
         'use_syslog': False,
         'syslog_facility': Sandesh._DEFAULT_SYSLOG_FACILITY,
         'kube_object_cache': 'True',
+        'disc_server_ip': 'localhost',
+        'disc_server_port': DiscoveryServerPort,
+        'log_level': SandeshLevel.SYS_DEBUG,
+        'log_file': '/var/log/contrail/contrail-kube-manager.log',
+        'api_service_link_local' : 'True',
+        'orchestrator' : 'kubernetes',
+        'token' : '',
+        'nested_mode': '0',
     }
 
     vnc_opts = {
@@ -43,9 +53,38 @@ def parse_args():
         'kombu_ssl_ca_certs': '',
         'cassandra_user': None,
         'cassandra_password': None,
+        'cassandra_server_list': '',
         'cluster_id': '',
+        'vnc_endpoint_ip': 'localhost',
+        'vnc_endpoint_port': ApiServerPort,
+        'admin_user' : '',
+        'admin_password' : '',
+        'admin_tenant' : '',
+        'public_network_name':'__public__',
+        'public_fip_pool_name':'__fip_pool_public__',
     }
-    k8s_opts = {}
+
+    k8s_opts = {
+        'kubernetes_api_server': 'localhost',
+        'kubernetes_api_port': '8080',
+        'kubernetes_api_secure_port': None,
+        'kubernetes_api_secure_ip': None,
+        'kubernetes_service_name': 'kubernetes',
+        'service_subnets': '',
+        'pod_subnets': '',
+    }
+
+    sandesh_opts = {
+        'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+        'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+        'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+        'sandesh_ssl_enable': False,
+        'introspect_ssl_enable': False
+    }
+
+    auth_opts = {
+        'auth_token_url': None
+    }
 
     config = ConfigParser.SafeConfigParser()
     if args.config_file:
@@ -54,6 +93,10 @@ def parse_args():
             vnc_opts.update(dict(config.items("VNC")))
         if 'KUBERNETES' in config.sections():
             k8s_opts.update(dict(config.items("KUBERNETES")))
+        if 'SANDESH' in config.sections():
+            sandesh_opts.update(dict(config.items('SANDESH')))
+        if 'AUTH' in config.sections():
+            auth_opts.update(dict(config.items("AUTH")))
         if 'DEFAULTS' in config.sections():
             defaults.update(dict(config.items("DEFAULTS")))
 
@@ -64,6 +107,8 @@ def parse_args():
     )
     defaults.update(vnc_opts)
     defaults.update(k8s_opts)
+    defaults.update(sandesh_opts)
+    defaults.update(auth_opts)
     parser.set_defaults(**defaults)
     args = parser.parse_args()
 
@@ -73,4 +118,7 @@ def parse_args():
         args.pod_subnets = args.pod_subnets.split()
     if type(args.service_subnets) is str:
         args.service_subnets = args.service_subnets.split()
+    args.sandesh_config = SandeshConfig(args.sandesh_keyfile,
+        args.sandesh_certfile, args.sandesh_ca_cert,
+        args.sandesh_ssl_enable, args.introspect_ssl_enable)
     return args

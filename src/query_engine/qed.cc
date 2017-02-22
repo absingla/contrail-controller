@@ -25,6 +25,7 @@
 #include "nodeinfo_types.h"
 #include "query_engine/options.h"
 #include "query.h"
+#include "qe_sandesh.h"
 #include <base/misc_utils.h>
 #include <query_engine/buildinfo.h>
 #include <sandesh/sandesh_http.h>
@@ -54,6 +55,9 @@ bool QedVersion(std::string &version) {
 
 static EventManager * pevm = NULL;
 static DiscoveryServiceClient *ds_client = NULL;
+static Options options;
+static TaskTrigger *qe_dbstats_task_trigger;
+static Timer *qe_dbstats_timer;
 
 static void WaitForIdle() {
     static const int kTimeout = 15;
@@ -87,6 +91,11 @@ static void ShutdownQe() {
         delete ds_client;
     }
     WaitForIdle();
+    if (qe_dbstats_timer) {
+        TimerManager::DeleteTimer(qe_dbstats_timer);
+        delete qe_dbstats_task_trigger;
+        qe_dbstats_timer = NULL;
+    }
     Sandesh::Uninit();
     ConnectionStateManager::
         GetInstance()->Shutdown();
@@ -99,11 +108,72 @@ static void terminate_qe (int param)
   pevm->Shutdown();
 }
 
+static void reconfig_qe(int signum) {
+    options.ParseReConfig();
+}
+
+static bool QEDbStatsTrigger() {
+    qe_dbstats_task_trigger->Set();
+    return false;
+}
+
+/*
+ * Send the database stats to the collector periodically
+ */
+static bool SendQEDbStats(QESandeshContext &ctx) {
+    // DB stats
+    std::vector<GenDb::DbTableInfo> vdbti, vstats_dbti;
+    GenDb::DbErrors dbe;
+    QueryEngine *qe = ctx.QE();
+    if ((qe->GetDbHandler()).get() != NULL) {
+        qe->GetDiffStats(&vdbti, &dbe, &vstats_dbti);
+    }
+    map<string,GenDb::DbTableStat> mtstat, msstat;
+
+    for (size_t idx=0; idx<vdbti.size(); idx++) {
+        GenDb::DbTableStat dtis;
+        dtis.set_reads(vdbti[idx].get_reads());
+        dtis.set_read_fails(vdbti[idx].get_read_fails());
+        dtis.set_writes(vdbti[idx].get_writes());
+        dtis.set_write_fails(vdbti[idx].get_write_fails());
+        dtis.set_write_back_pressure_fails(vdbti[idx].get_write_back_pressure_fails());
+        mtstat.insert(make_pair(vdbti[idx].get_table_name(), dtis));
+    }
+
+    for (size_t idx=0; idx<vstats_dbti.size(); idx++) {
+        GenDb::DbTableStat dtis;
+        dtis.set_reads(vstats_dbti[idx].get_reads());
+        dtis.set_read_fails(vstats_dbti[idx].get_read_fails());
+        dtis.set_writes(vstats_dbti[idx].get_writes());
+        dtis.set_write_fails(vstats_dbti[idx].get_write_fails());
+        dtis.set_write_back_pressure_fails(
+            vstats_dbti[idx].get_write_back_pressure_fails());
+        msstat.insert(make_pair(vstats_dbti[idx].get_table_name(), dtis));
+    }
+
+    QEDbStats qe_db_stats;
+    qe_db_stats.set_table_info(mtstat);
+    qe_db_stats.set_errors(dbe);
+    qe_db_stats.set_stats_info(msstat);
+
+    cass::cql::DbStats cql_stats;
+    if (qe->GetCqlStats(&cql_stats)) {
+        qe_db_stats.set_cql_stats(cql_stats);
+    }
+    qe_db_stats.set_name(Sandesh::source());
+    QEDbStatsUve::Send(qe_db_stats);
+    qe_dbstats_timer->Cancel();
+    qe_dbstats_timer->Start(60*1000, boost::bind(&QEDbStatsTrigger),
+                               NULL);
+    return true;
+}
+
 int
 main(int argc, char *argv[]) {
     EventManager evm;
     pevm = &evm;
-    Options options;
+
+    srand(unsigned(time(NULL)));
 
     // Increase max number of threads available by a factor of 4
     TaskScheduler::SetThreadAmpFactor( 
@@ -211,20 +281,23 @@ main(int argc, char *argv[]) {
     // subscribe to the collector service with discovery only if the
     // collector list is not configured.
     if (use_collector_list) {
-        std::vector<std::string> collectors(options.collector_server_list());
+        std::vector<std::string> collectors(
+            options.randomized_collector_server_list());
         if (!collectors.size()) {
             collectors = options.default_collector_server_list();
         }
         success = Sandesh::InitGenerator(module_name, options.hostname(),
                     g_vns_constants.NodeTypeNames.find(node_type)->second,
                     instance_id, &evm, options.http_server_port(), 0,
-                    collectors, NULL);
+                    collectors, NULL, Sandesh::DerivedStats(),
+                    options.sandesh_config());
     } else {
         const std::vector<std::string> collectors;
         success = Sandesh::InitGenerator(module_name, options.hostname(),
                     g_vns_constants.NodeTypeNames.find(node_type)->second,
                     instance_id, &evm, options.http_server_port(), csf,
-                    collectors, NULL);
+                    collectors, NULL, Sandesh::DerivedStats(),
+                    options.sandesh_config());
     }
     if (!success) {
         LOG(ERROR, "SANDESH: Initialization FAILED ... exiting");
@@ -284,11 +357,23 @@ main(int argc, char *argv[]) {
             max_tasks,
             options.max_slice(),
             options.cassandra_user(),
-            options.cassandra_password()));
+            options.cassandra_password(),
+            options.cluster_id()));
     }
+    QESandeshContext qec(qe.get());
+    Sandesh::set_client_context(&qec);
+    qe_dbstats_task_trigger =
+        new TaskTrigger(boost::bind(&SendQEDbStats, qec),
+                    TaskScheduler::GetInstance()->GetTaskId("QE::DBStats"), 0);
+    qe_dbstats_timer = TimerManager::CreateTimer(*evm.io_service(),
+        "QE Db stats timer",
+        TaskScheduler::GetInstance()->GetTaskId("QE::DBStats"), 0);
+    qe_dbstats_timer->Start(5*1000, boost::bind(&QEDbStatsTrigger), NULL);
 
     signal(SIGTERM, terminate_qe);
+    signal(SIGHUP, reconfig_qe);
     evm.Run();
 
     return 0;
 }
+

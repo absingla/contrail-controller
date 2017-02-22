@@ -41,7 +41,7 @@ bool
 StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks, 
         const QEOpServerProxy::AggRowT& aggs, std::string& jstr) {
 
-    rapidjson::Document dd;
+    contrail_rapidjson::Document dd;
     dd.SetObject();  
 
     try {
@@ -50,31 +50,43 @@ StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks,
             switch (it->second.which()) {
                 case QEOpServerProxy::STRING : {
                         string mapit = boost::get<string>(it->second);
-                        rapidjson::Value val(rapidjson::kStringType);
-                        val.SetString(mapit.c_str());
-                        dd.AddMember(it->first.c_str(), val, dd.GetAllocator());              
+                        contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
+                        val.SetString(mapit.c_str(), dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(it->first.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 case QEOpServerProxy::UUID : {
                         boost::uuids::uuid mapit = boost::get<boost::uuids::uuid>(it->second);
-                        rapidjson::Value val(rapidjson::kStringType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
                         std::string ustr = to_string(mapit);
                         val.SetString(ustr.c_str(), dd.GetAllocator());
-                        dd.AddMember(it->first.c_str(), val, dd.GetAllocator()); 
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(it->first.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator()); 
                     }
                     break;
                 case QEOpServerProxy::UINT64 : {
                         uint64_t mapit = boost::get<uint64_t>(it->second);
-                        rapidjson::Value val(rapidjson::kNumberType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                         val.SetUint64(mapit);
-                        dd.AddMember(it->first.c_str(), val, dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(it->first.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 case QEOpServerProxy::DOUBLE : {
                         double mapit = boost::get<double>(it->second);
-                        rapidjson::Value val(rapidjson::kNumberType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                         val.SetDouble(mapit);
-                        dd.AddMember(it->first.c_str(), val, dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(it->first.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 default:
@@ -106,25 +118,29 @@ StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks,
 
                 case QEOpServerProxy::UINT64 : {
                         uint64_t mapit = boost::get<uint64_t>(it->second);
-                        rapidjson::Value val(rapidjson::kNumberType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                         val.SetUint64(mapit);
-                        dd.AddMember(sname.c_str(), dd.GetAllocator(),
-                            val, dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(sname.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 case QEOpServerProxy::DOUBLE : {
                         double mapit = boost::get<double>(it->second);
-                        rapidjson::Value val(rapidjson::kNumberType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                         val.SetDouble(mapit);
-                        dd.AddMember(sname.c_str(), dd.GetAllocator(),
-                            val, dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(sname.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 case QEOpServerProxy::TDIGEST : {
                         boost::shared_ptr<TDigest> mapit =
                             boost::get<boost::shared_ptr<TDigest> >(it->second);
                         
-                        rapidjson::Value val(rapidjson::kObjectType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kObjectType);
                         float ptiles[7] = {.01,.05,.25,.5,.75,.95,.99};
                         std::string stiles[7] = {"01","05","25","50","75","95","99"};
 #if 0
@@ -138,22 +154,28 @@ StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks,
                         }
 #endif
                         for (size_t idx=0; idx<7; idx++) {
-                            rapidjson::Value sval(rapidjson::kNumberType);
+                            contrail_rapidjson::Value sval(contrail_rapidjson::kNumberType);
                             sval.SetDouble(TDigest_percentile(mapit.get(), ptiles[idx]));
-                            val.AddMember(stiles[idx].c_str(), dd.GetAllocator(),
-                                sval, dd.GetAllocator());
+                            contrail_rapidjson::Value vk;
+                            val.AddMember(vk.SetString(stiles[idx].c_str(),
+                                                       dd.GetAllocator()),
+                                          sval, dd.GetAllocator());
                         }
-                        dd.AddMember(sname.c_str(), dd.GetAllocator(),
-                            val, dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(sname.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 case QEOpServerProxy::CENTROID : {
                         boost::shared_ptr<Centroid> mapit =
                             boost::get<boost::shared_ptr<Centroid> >(it->second);
-                        rapidjson::Value val(rapidjson::kNumberType);
+                        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                         val.SetDouble(Centroid_get_mean(mapit.get()));
-                        dd.AddMember(sname.c_str(), dd.GetAllocator(),
-                            val, dd.GetAllocator());
+                        contrail_rapidjson::Value vk;
+                        dd.AddMember(vk.SetString(sname.c_str(),
+                                                  dd.GetAllocator()),
+                                     val, dd.GetAllocator());
                     }
                     break;
                 default:
@@ -165,8 +187,8 @@ StatsSelect::Jsonify(const std::map<std::string, StatVal>&  uniks,
     } catch (const std::out_of_range& oor) {
         QE_ASSERT(0);
     }
-    rapidjson::StringBuffer sb;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+    contrail_rapidjson::StringBuffer sb;
+    contrail_rapidjson::Writer<contrail_rapidjson::StringBuffer> writer(sb);
     dd.Accept(writer);
     jstr = sb.GetString();
     //QE_LOG_NOQID(INFO, "Jsonify row " << jstr);

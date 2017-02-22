@@ -13,16 +13,20 @@
 using std::copy;
 using std::string;
 
-MacMobility::MacMobility(uint32_t seq) {
+MacMobility::MacMobility(uint32_t seq, bool sticky) {
     data_[0] = BgpExtendedCommunityType::Evpn;
     data_[1] = BgpExtendedCommunityEvpnSubType::MacMobility;
-    data_[2] = 0x01;  // Flags
-    data_[3] = 0x00;  // Reserved
+    data_[2] = (sticky ? 0x01 : 0x0);  // sticky
+    data_[3] = 0x00; // Reserved
     put_value(&data_[4], 4, seq);
 }
 
 MacMobility::MacMobility(const bytes_type &data) {
     copy(data.begin(), data.end(), data_.begin());
+}
+
+bool MacMobility::sticky() const {
+    return (data_[2] & 0x1);
 }
 
 uint32_t MacMobility::sequence_number() const {
@@ -38,6 +42,7 @@ uint32_t MacMobility::sequence_number() const {
 
 std::string MacMobility::ToString() {
     char temp[50];
-    snprintf(temp, sizeof(temp), "mobility:%d", sequence_number());
+    snprintf(temp, sizeof(temp), "mobility:%s:%d",
+             (sticky() ? "sticky" : "non-sticky"), sequence_number());
     return string(temp);
 }

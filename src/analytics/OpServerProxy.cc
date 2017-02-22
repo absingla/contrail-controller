@@ -376,7 +376,7 @@ class OpServerProxy::OpServerImpl {
             // If redis returns error for async request, then perhaps it
             // is busy executing a script and it has reached the maximum
             // execution time limit.
-            BOOST_ASSERT_MSG(reply->type != REDIS_REPLY_ERROR, reply->str);
+            assert(reply->type != REDIS_REPLY_ERROR);
 
             if (rpi) {
                 rpi->ProcessCallback(reply);
@@ -429,7 +429,7 @@ class OpServerProxy::OpServerImpl {
 
             LOG(DEBUG, "message ==" << reply->element[2]->str);
 
-            rapidjson::Document document;	// Default template parameter uses UTF8 and MemoryPoolAllocator.
+            contrail_rapidjson::Document document;	// Default template parameter uses UTF8 and MemoryPoolAllocator.
             if (document.ParseInsitu<0>(reply->element[2]->str).HasParseError()) {
                 assert(0);
             }
@@ -717,23 +717,25 @@ OpServerProxy::UVENotif(const std::string &type,
     if (deleted) {
         impl_->KafkaPub(pt, kstr.c_str(), genstr, string());
     } else {
-        rapidjson::Document dd;
+        contrail_rapidjson::Document dd;
         dd.SetObject();
         for (map<string,string>::const_iterator it = value.begin();
                     it != value.end(); it++) {
-            rapidjson::Value sval(rapidjson::kStringType);
-            sval.SetString((it->second).c_str());
-            dd.AddMember(it->first.c_str(), sval, dd.GetAllocator());
+            contrail_rapidjson::Value sval(contrail_rapidjson::kStringType);
+            sval.SetString((it->second).c_str(), dd.GetAllocator());
+            contrail_rapidjson::Value skey(contrail_rapidjson::kStringType);
+            dd.AddMember(skey.SetString(it->first.c_str(), dd.GetAllocator()),
+                         sval, dd.GetAllocator());
         }
-        rapidjson::StringBuffer sb;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+        contrail_rapidjson::StringBuffer sb;
+        contrail_rapidjson::Writer<contrail_rapidjson::StringBuffer> writer(sb);
         dd.Accept(writer);
         string jsonline(sb.GetString());
 
         impl_->KafkaPub(pt, kstr.c_str(), genstr, jsonline);
     }
 
-    rapidjson::Document dd;
+    contrail_rapidjson::Document dd;
     dd.SetObject();
 
     return true;

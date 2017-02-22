@@ -73,6 +73,10 @@ void Options::Initialize(EventManager &evm,
     string default_config_db_server(host_ip + ":9042");
     default_config_db_server_list.push_back(default_config_db_server);
 
+    vector<string> default_rabbitmq_server_list;
+    string default_rabbitmq_server(host_ip + ":5672");
+    default_rabbitmq_server_list.push_back(default_rabbitmq_server);
+
     // Command line and config file options.
     opt::options_description config("Configuration options");
     config.add_options()
@@ -185,6 +189,50 @@ void Options::Initialize(EventManager &evm,
              "IFMAP end of rib timeout")
         ("IFMAP.peer_response_wait_time", opt::value<int>()->default_value(60),
              "IFMAP peer response wait time")
+        ("IFMAP.rabbitmq_server_list",
+             opt::value<vector<string> >()->default_value(
+             default_rabbitmq_server_list, default_rabbitmq_server),
+             "RabbitMQ server list")
+        ("IFMAP.rabbitmq_user",
+             opt::value<string>()->default_value("guest"),
+             "RabbitMQ user")
+        ("IFMAP.rabbitmq_password",
+             opt::value<string>()->default_value("guest"),
+             "RabbitMQ password")
+        ("IFMAP.rabbitmq_vhost",
+             opt::value<string>()->default_value(""),
+             "RabbitMQ vhost")
+        ("IFMAP.rabbitmq_use_ssl",
+             opt::value<bool>()->default_value(false),
+             "Use SSL for RabbitMQ connection")
+        ("IFMAP.rabbitmq_ssl_version",
+             opt::value<string>()->default_value(""),
+             "SSL version for RabbitMQ connection")
+        ("IFMAP.rabbitmq_ssl_keyfile",
+             opt::value<string>()->default_value(""),
+             "Keyfile for SSL RabbitMQ connection")
+        ("IFMAP.rabbitmq_ssl_certfile",
+             opt::value<string>()->default_value(""),
+             "Certificate file for SSL RabbitMQ connection")
+        ("IFMAP.rabbitmq_ssl_ca_certs",
+             opt::value<string>()->default_value(""),
+             "CA Certificate file for SSL RabbitMQ connection")
+
+        ("SANDESH.sandesh_keyfile", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/private/server-privkey.pem"),
+            "Sandesh ssl private key")
+        ("SANDESH.sandesh_certfile", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/certs/server.pem"),
+            "Sandesh ssl certificate")
+        ("SANDESH.sandesh_ca_cert", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/certs/ca-cert.pem"),
+            "Sandesh CA ssl certificate")
+        ("SANDESH.sandesh_ssl_enable",
+             opt::bool_switch(&sandesh_config_.sandesh_ssl_enable),
+             "Enable ssl for sandesh connection")
+        ("SANDESH.introspect_ssl_enable",
+             opt::bool_switch(&sandesh_config_.introspect_ssl_enable),
+             "Enable ssl for introspect connection")
         ;
 
     config_file_options_.add(config);
@@ -345,7 +393,44 @@ bool Options::Process(int argc, char *argv[],
     GetOptValue<int>(var_map,
                      ifmap_config_options_.peer_response_wait_time,
                      "IFMAP.peer_response_wait_time");
+    GetOptValue< vector<string> >(var_map,
+                     ifmap_config_options_.rabbitmq_server_list,
+                     "IFMAP.rabbitmq_server_list");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_user,
+                     "IFMAP.rabbitmq_user");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_password,
+                     "IFMAP.rabbitmq_password");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_vhost,
+                     "IFMAP.rabbitmq_vhost");
+    GetOptValue<bool>(var_map,
+                     ifmap_config_options_.rabbitmq_use_ssl,
+                     "IFMAP.rabbitmq_use_ssl");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_ssl_version,
+                     "IFMAP.rabbitmq_ssl_version");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_ssl_keyfile,
+                     "IFMAP.rabbitmq_ssl_keyfile");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_ssl_certfile,
+                     "IFMAP.rabbitmq_ssl_certfile");
+    GetOptValue<string>(var_map,
+                     ifmap_config_options_.rabbitmq_ssl_ca_certs,
+                     "IFMAP.rabbitmq_ssl_ca_certs");
 
+    GetOptValue<string>(var_map, sandesh_config_.keyfile,
+                        "SANDESH.sandesh_keyfile");
+    GetOptValue<string>(var_map, sandesh_config_.certfile,
+                        "SANDESH.sandesh_certfile");
+    GetOptValue<string>(var_map, sandesh_config_.ca_cert,
+                        "SANDESH.sandesh_ca_cert");
+    GetOptValue<bool>(var_map, sandesh_config_.sandesh_ssl_enable,
+                      "SANDESH.sandesh_ssl_enable");
+    GetOptValue<bool>(var_map, sandesh_config_.introspect_ssl_enable,
+                      "SANDESH.introspect_ssl_enable");
     return true;
 }
 

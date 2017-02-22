@@ -62,42 +62,46 @@ tbb::mutex DbHandler::fmutex_;
 
 DbHandler::DbHandler(EventManager *evm,
         GenDb::GenDbIf::DbErrorHandler err_handler,
-        const std::vector<std::string> &cassandra_ips,
-        const std::vector<int> &cassandra_ports,
-        std::string name, const TtlMap& ttl_map,
-        const std::string& cassandra_user,
-        const std::string& cassandra_password,
-        const std::string &cassandra_compaction_strategy,
+        std::string name,
+        const Options::Cassandra &cassandra_options,
         const std::string &zookeeper_server_list,
-        bool use_zookeeper, bool disable_all_writes,
-        bool disable_statistics_writes, bool disable_messages_writes,
-        bool disable_messages_keyword_writes, bool use_db_write_options,
+        bool use_zookeeper,
+        bool use_db_write_options,
         const DbWriteOptions &db_write_options) :
-    dbif_(new cass::cql::CqlIf(evm, cassandra_ips,
-        cassandra_ports[0], cassandra_user, cassandra_password)),
+    dbif_(new cass::cql::CqlIf(evm, cassandra_options.cassandra_ips_,
+        cassandra_options.cassandra_ports_[0], cassandra_options.user_,
+        cassandra_options.password_)),
     name_(name),
     drop_level_(SandeshLevel::INVALID),
-    ttl_map_(ttl_map),
-    tablespace_(g_viz_constants.COLLECTOR_KEYSPACE_CQL),
-    compaction_strategy_(cassandra_compaction_strategy),
+    ttl_map_(cassandra_options.ttlmap_),
+    compaction_strategy_(cassandra_options.compaction_strategy_),
+    flow_tables_compaction_strategy_(
+        cassandra_options.flow_tables_compaction_strategy_),
     gen_partition_no_((uint8_t)g_viz_constants.PARTITION_MIN,
         (uint8_t)g_viz_constants.PARTITION_MAX),
     zookeeper_server_list_(zookeeper_server_list),
     use_zookeeper_(use_zookeeper),
-    disable_all_writes_(disable_all_writes),
-    disable_statistics_writes_(disable_statistics_writes),
-    disable_messages_writes_(disable_messages_writes),
-    disable_messages_keyword_writes_(disable_messages_keyword_writes),
-    udc_(new UserDefinedCounters(evm, 0)),
+    disable_all_writes_(cassandra_options.disable_all_db_writes_),
+    disable_statistics_writes_(cassandra_options.disable_db_stats_writes_),
+    disable_messages_writes_(cassandra_options.disable_db_messages_writes_),
+    disable_messages_keyword_writes_(cassandra_options.disable_db_messages_keyword_writes_),
     udc_cfg_poll_timer_(TimerManager::CreateTimer(*evm->io_service(),
         "udc config poll timer",
         TaskScheduler::GetInstance()->GetTaskId("vnc-api http client"))),
     use_db_write_options_(use_db_write_options) {
+    cfgdb_connection_.reset(new ConfigDBConnection(evm, 0));
+    udc_.reset(new UserDefinedCounters(cfgdb_connection_));
     error_code error;
     col_name_ = boost::asio::ip::host_name(error);
     udc_cfg_poll_timer_->Start(kUDCPollInterval,
         boost::bind(&DbHandler::PollUDCCfg, this),
         boost::bind(&DbHandler::PollUDCCfgErrorHandler, this, _1, _2));
+
+    if (cassandra_options.cluster_id_.empty()) {
+        tablespace_ = g_viz_constants.COLLECTOR_KEYSPACE_CQL;
+    } else {
+        tablespace_ = g_viz_constants.COLLECTOR_KEYSPACE_CQL + '_' + cassandra_options.cluster_id_;
+    }
 
     if (use_db_write_options_) {
         // Set disk-usage watermark defaults
@@ -162,9 +166,11 @@ DbHandler::DbHandler(GenDb::GenDbIf *dbif, const TtlMap& ttl_map) :
     disable_statistics_writes_(false),
     disable_messages_writes_(false),
     disable_messages_keyword_writes_(false),
-    udc_(new UserDefinedCounters(0, 0)),
     udc_cfg_poll_timer_(NULL),
     use_db_write_options_(false) {
+    cfgdb_connection_.reset(new ConfigDBConnection(0, 0));
+    udc_.reset(new UserDefinedCounters(cfgdb_connection_));
+
 }
 
 DbHandler::~DbHandler() {
@@ -328,7 +334,7 @@ bool DbHandler::CreateTables() {
 
     for (std::vector<GenDb::NewCf>::const_iterator it = vizd_flow_tables.begin();
             it != vizd_flow_tables.end(); it++) {
-        if (!dbif_->Db_AddColumnfamily(*it, compaction_strategy_)) {
+        if (!dbif_->Db_AddColumnfamily(*it, flow_tables_compaction_strategy_)) {
             DB_LOG(ERROR, it->cfname_ << " FAILED");
             return false;
         }
@@ -1230,7 +1236,7 @@ DbHandler::StatTableInsertTtl(uint64_t ts,
 
     // Encoding of all attribs
 
-    rapidjson::Document dd;
+    contrail_rapidjson::Document dd;
     dd.SetObject();
 
     AttribMap attribs_buf;
@@ -1238,12 +1244,14 @@ DbHandler::StatTableInsertTtl(uint64_t ts,
             it != attribs.end(); it++) {
         switch (it->second.type) {
             case STRING: {
-                    rapidjson::Value val(rapidjson::kStringType);
+                    contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
                     std::string nm = it->first + std::string("|s");
                     pair<AttribMap::iterator,bool> rt = 
                         attribs_buf.insert(make_pair(nm, it->second));
-                    val.SetString(it->second.str.c_str());
-                    dd.AddMember(rt.first->first.c_str(), val, dd.GetAllocator());
+                    val.SetString(it->second.str.c_str(), dd.GetAllocator());
+                    contrail_rapidjson::Value vk;
+                    dd.AddMember(vk.SetString(rt.first->first.c_str(),
+                                 dd.GetAllocator()), val, dd.GetAllocator());
                     string field_name = it->first;
                      if (field_name.compare("fields.value") == 0) {
                          if (statName.compare("FieldNames") == 0) {
@@ -1255,21 +1263,25 @@ DbHandler::StatTableInsertTtl(uint64_t ts,
                 }
                 break;
             case UINT64: {
-                    rapidjson::Value val(rapidjson::kNumberType);
+                    contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                     std::string nm = it->first + std::string("|n");
                     pair<AttribMap::iterator,bool> rt = 
                         attribs_buf.insert(make_pair(nm, it->second));
                     val.SetUint64(it->second.num);
-                    dd.AddMember(rt.first->first.c_str(), val, dd.GetAllocator());
+                    contrail_rapidjson::Value vk;
+                    dd.AddMember(vk.SetString(rt.first->first.c_str(),
+                                 dd.GetAllocator()), val, dd.GetAllocator());
                 }
                 break;
             case DOUBLE: {
-                    rapidjson::Value val(rapidjson::kNumberType);
+                    contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
                     std::string nm = it->first + std::string("|d");
                     pair<AttribMap::iterator,bool> rt = 
                         attribs_buf.insert(make_pair(nm, it->second));
                     val.SetDouble(it->second.dbl);
-                    dd.AddMember(rt.first->first.c_str(), val, dd.GetAllocator());
+                    contrail_rapidjson::Value vk;
+                    dd.AddMember(vk.SetString(rt.first->first.c_str(),
+                                 dd.GetAllocator()), val, dd.GetAllocator());
                 }
                 break;                
             default:
@@ -1277,8 +1289,8 @@ DbHandler::StatTableInsertTtl(uint64_t ts,
         }
     }
 
-    rapidjson::StringBuffer sb;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+    contrail_rapidjson::StringBuffer sb;
+    contrail_rapidjson::Writer<contrail_rapidjson::StringBuffer> writer(sb);
     dd.Accept(writer);
     string jsonline(sb.GetString());
 
@@ -1465,50 +1477,68 @@ class FlowValueJsonPrinter : public boost::static_visitor<> {
     }
     void operator()(const boost::uuids::uuid &tuuid) {
         std::string tuuid_s(to_string(tuuid));
-        rapidjson::Value val(rapidjson::kStringType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
         val.SetString(tuuid_s.c_str(), dd_.GetAllocator());
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const std::string &tstring) {
-        rapidjson::Value val(rapidjson::kStringType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
         val.SetString(tstring.c_str(), dd_.GetAllocator());
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const uint8_t &t8) {
-        rapidjson::Value val(rapidjson::kNumberType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
         val.SetUint(t8);
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const uint16_t &t16) {
-        rapidjson::Value val(rapidjson::kNumberType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
         val.SetUint(t16);
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const uint32_t &tu32) {
-        rapidjson::Value val(rapidjson::kNumberType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
         val.SetUint(tu32);
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const uint64_t &tu64) {
-        rapidjson::Value val(rapidjson::kNumberType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
         val.SetUint64(tu64);
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const double &tdouble) {
-        rapidjson::Value val(rapidjson::kNumberType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kNumberType);
         val.SetDouble(tdouble);
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const IpAddress &tipaddr) {
-        rapidjson::Value val(rapidjson::kStringType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
         val.SetString(tipaddr.to_string().c_str(), dd_.GetAllocator());
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const GenDb::Blob &tblob) {
-        rapidjson::Value val(rapidjson::kStringType);
+        contrail_rapidjson::Value val(contrail_rapidjson::kStringType);
         val.SetString(reinterpret_cast<const char *>(tblob.data()),
             tblob.size(), dd_.GetAllocator());
-        dd_.AddMember(name_.c_str(), val, dd_.GetAllocator());
+        contrail_rapidjson::Value vk;
+        dd_.AddMember(vk.SetString(name_.c_str(), dd_.GetAllocator()), val,
+                      dd_.GetAllocator());
     }
     void operator()(const boost::blank &tblank) {
     }
@@ -1516,13 +1546,13 @@ class FlowValueJsonPrinter : public boost::static_visitor<> {
         name_ = name;
     }
     std::string GetJson() {
-        rapidjson::StringBuffer sb;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+        contrail_rapidjson::StringBuffer sb;
+        contrail_rapidjson::Writer<contrail_rapidjson::StringBuffer> writer(sb);
         dd_.Accept(writer);
         return sb.GetString();
     }
  private:
-    rapidjson::Document dd_;
+    contrail_rapidjson::Document dd_;
     std::string name_;
 };
 
@@ -1867,23 +1897,15 @@ bool DbHandler::UnderlayFlowSampleInsert(const UFlowData& flow_data,
 DbHandlerInitializer::DbHandlerInitializer(EventManager *evm,
     const std::string &db_name, const std::string &timer_task_name,
     DbHandlerInitializer::InitializeDoneCb callback,
-    const std::vector<std::string> &cassandra_ips,
-    const std::vector<int> &cassandra_ports, const TtlMap& ttl_map,
-    const std::string &cassandra_user, const std::string &cassandra_password,
-    const std::string &cassandra_compaction_strategy,
+    const Options::Cassandra &cassandra_options,
     const std::string &zookeeper_server_list,
-    bool use_zookeeper, bool disable_all_db_writes,
-    bool disable_db_stats_writes, bool disable_db_messages_writes,
-    bool disable_db_messages_keyword_writes,
+    bool use_zookeeper,
     const DbWriteOptions &db_write_options) :
     db_name_(db_name),
     db_handler_(new DbHandler(evm,
         boost::bind(&DbHandlerInitializer::ScheduleInit, this),
-        cassandra_ips, cassandra_ports, db_name, ttl_map,
-        cassandra_user, cassandra_password, cassandra_compaction_strategy,
-        zookeeper_server_list, use_zookeeper,
-        disable_all_db_writes, disable_db_stats_writes,
-        disable_db_messages_writes, disable_db_messages_keyword_writes,
+        db_name,
+        cassandra_options, zookeeper_server_list, use_zookeeper,
         true, db_write_options)),
     callback_(callback),
     db_init_timer_(TimerManager::CreateTimer(*evm->io_service(),

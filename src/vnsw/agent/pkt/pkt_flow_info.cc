@@ -873,9 +873,16 @@ void PktFlowInfo::FloatingIpDNat(const PktInfo *pkt, PktControlInfo *in,
             continue;
         }
 
-        if (pkt->ip_daddr.to_v4() == it->floating_ip_) {
-            break;
+        if (pkt->ip_daddr.to_v4() != it->floating_ip_) {
+            continue;
         }
+
+        // Check if floating-ip direction matches
+        if (it->AllowDNat() == false) {
+            continue;
+        }
+
+        break;
     }
 
     if (it == fip_list.end()) {
@@ -960,6 +967,11 @@ void PktFlowInfo::FloatingIpSNat(const PktInfo *pkt, PktControlInfo *in,
         }
 
         if (pkt->ip_saddr != it->fixed_ip_) {
+            continue;
+        }
+
+        // Check if floating-ip direction matches
+        if (it->AllowSNat() == false) {
             continue;
         }
 
@@ -1564,6 +1576,9 @@ void PktFlowInfo::GenerateTrafficSeen(const PktInfo *pkt,
 
     // TODO : No need for one more route lookup
     const AgentRoute *rt = NULL;
+    bool enqueue_traffic_seen = false;
+    const VmInterface *vm_intf = dynamic_cast<const VmInterface *>(in->intf_);
+
     IpAddress sip = pkt->ip_saddr;
     if (pkt->family == Address::INET ||
         pkt->family == Address::INET6) {
@@ -1575,16 +1590,28 @@ void PktFlowInfo::GenerateTrafficSeen(const PktInfo *pkt,
     }
     // Generate event if route was waiting for traffic
     if (rt && rt->WaitForTraffic()) {
-        if (pkt->family == Address::INET) {
-            agent->oper_db()->route_preference_module()->EnqueueTrafficSeen
-                (sip, 32, in->intf_->id(), pkt->vrf, pkt->smac);
-        } else if (pkt->family == Address::INET6) {
-            agent->oper_db()->route_preference_module()->EnqueueTrafficSeen
-                (sip, 128, in->intf_->id(), pkt->vrf, pkt->smac);
+        enqueue_traffic_seen = true;
+    } else if (vm_intf) {
+        //L3 route is not in wait for traffic state
+        //EVPN route could be in wait for traffic, if yes
+        //enqueue traffic seen
+        rt = FlowEntry::GetEvpnRoute(in->vrf_, pkt->smac, sip,
+                vm_intf->ethernet_tag());
+        if (rt && rt->WaitForTraffic()) {
+            enqueue_traffic_seen = true;
         }
     }
-}
 
+    if (enqueue_traffic_seen) {
+        uint8_t plen = 32;
+        if (pkt->family == Address::INET6) {
+            plen = 128;
+        }
+        flow_table->agent()->oper_db()->route_preference_module()->
+            EnqueueTrafficSeen(sip, plen, in->intf_->id(),
+                               pkt->vrf, pkt->smac);
+    }
+}
 
 // Apply flow limits for in and out VMs
 void PktFlowInfo::ApplyFlowLimits(const PktControlInfo *in,
@@ -1674,10 +1701,11 @@ void PktFlowInfo::UpdateEvictedFlowStats(const PktInfo *pkt) {
     FlowMgmtManager *mgr = agent->pkt()->flow_mgmt_manager(
                                flow_table->table_index());
 
+    /* Enqueue stats update request with UUID of the flow */
     if (flow.get() && flow->deleted() == false) {
         mgr->FlowStatsUpdateEvent(flow.get(), pkt->agent_hdr.cmd_param_2,
                                   pkt->agent_hdr.cmd_param_3,
-                                  pkt->agent_hdr.cmd_param_4);
+                                  pkt->agent_hdr.cmd_param_4, flow->uuid());
     }
 }
 

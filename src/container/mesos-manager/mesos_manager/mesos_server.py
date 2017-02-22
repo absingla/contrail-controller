@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
+# Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
 #
 
 """
@@ -22,8 +22,8 @@ class MesosServer(object):
         self._homepage_links = []
         self._cni_data = {}
 
-        self._base_url = "http://%s:%s" % (self._args.listen_ip_addr,
-                                           self._args.listen_port)
+        self._base_url = "http://%s:%s" % (self._args.mesos_api_server,
+                                           self._args.mesos_api_port)
         self._pipe_start_app = None
         bottle.route('/', 'GET', self.homepage_http_get)
 
@@ -33,6 +33,13 @@ class MesosServer(object):
             LinkObject(
                 'action',
                 self._base_url , '/add_cni_info', 'Add CNI information'))
+
+        # Del CNI information
+        bottle.route('/del_cni_info',  'POST', self.del_cni_info)
+        self._homepage_links.append(
+            LinkObject(
+                'action',
+                self._base_url , '/del_cni_info', 'Del CNI information'))
 
         # Get CNI information
         bottle.route('/get_cni_info', 'GET', self.get_cni_info_all)
@@ -67,7 +74,7 @@ class MesosServer(object):
             self._pipe_start_app = bottle.app()
 
     def process_cni_data(self, container_id, data):
-        self.logger.info("Server: Got CNI data for Container Id: %d."
+        self.logger.info("Server: Got CNI data for Container Id: %s."
             %(container_id))
         print data
         cni_data_obj = MESOSCniDataObject(data)
@@ -84,11 +91,6 @@ class MesosServer(object):
         return self._cni_data[container_id]
     # end
 
-    def delete_cni_data(self, container_id):
-        if container_id in self._cni_data:
-            del self._cni_data[container_id]
-    # end
-
     def get_cni_data(self, container_id, service_type):
         if container_id in self._cni_data:
             return self._cni_data[container_id]
@@ -101,11 +103,11 @@ class MesosServer(object):
     # end get_args
 
     def get_ip_addr(self):
-        return self._args.listen_ip_addr
+        return self._args.mesos_api_server
     # end get_ip_addr
 
     def get_port(self):
-        return self._args.listen_port
+        return self._args.mesos_api_port
     # end get_port
 
     def get_pipe_start_app(self):
@@ -121,18 +123,37 @@ class MesosServer(object):
             elif 'application/xml' in ctype:
                 data = xmltodict.parse(bottle.request.body.read())
         except Exception as e:
-            self.syslog('Unable to parse publish request')
-            self.syslog(bottle.request.body.buf)
+            self.logger.info('Unable to parse publish request')
+            self.logger.info(bottle.request.body.buf)
             bottle.abort(415, 'Unable to parse publish request')
-
         for key, value in data.items():
             json_req[key] = value
-
         cid = json_req['cid']
         self.create_cni_data(cid, json_req)
 
         return json_req
     # end add_cni_info
+
+    def del_cni_info(self):
+	json_req = {}
+        ctype = bottle.request.headers['content-type']
+        try:
+            if 'application/json' in ctype:
+                data = bottle.request.json
+            elif 'application/xml' in ctype:
+                data = xmltodict.parse(bottle.request.body.read())
+        except Exception as e:
+            self.logger.info('Unable to parse publish request')
+            self.logger.info(bottle.request.body.buf)
+            bottle.abort(415, 'Unable to parse publish request')
+        for key, value in data.items():
+            json_req[key] = value
+        container_id = json_req['cid']
+        if container_id in self._cni_data:
+            del self._cni_data[container_id]
+	    self.process_cni_data(container_id, json_req)
+	return json_req
+    # end del_cni_info
 
     def get_cni_info_all(self):
         return self._cni_data
@@ -193,8 +214,8 @@ class MesosServer(object):
             bottle.run(app=pipe_start_app, host=self.get_ip_addr(),
                        port=self.get_port(), server='gevent')
         except Exception as e:
-            import pdb; pdb.set_trace()
             self.cleanup()
     # start_server
 
 # end class MesosServer
+

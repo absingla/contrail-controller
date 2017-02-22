@@ -428,6 +428,20 @@ systemlog sandesh IFMapJsonLoadError {
     3: string message2
     /** Parse error string */
     4: string parse_error
+    /** UUID of the erroneous object */
+    5: string uuid
+}
+
+/**
+ * @description: System log for IFMap module
+ * @severity: ERROR
+ * @cause: Error detected while reading a row from the database
+ * @action: Contact your technical support representative
+ */
+systemlog sandesh IFMapGetRowError {
+    1: string message
+    2: string table_name
+    3: string uuid
 }
 
 /**
@@ -767,6 +781,13 @@ trace sandesh IFMapJsonLoadErrorTrace {
     2: u32 position
     3: string message2
     4: string parse_error
+    5: string uuid
+}
+
+trace sandesh IFMapGetRowErrorTrace {
+    1: string message
+    2: string table_name
+    3: string uuid
 }
 
 trace sandesh IFMapUSSplitBlocked {

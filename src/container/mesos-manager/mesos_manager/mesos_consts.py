@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
+# Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
 #
 
 _WEB_HOST = '127.0.0.1'
@@ -28,4 +28,5 @@ MESOS_LABEL_SERVICE_SUBNET  = "service_subnet"
 MESOS_LABEL_PUBLIC_NETWORK  = "public"
 MESOS_LABEL_PUBLIC_SUBNET   = "public_subnet"
 MESOS_LABEL_POLICY          = "policy"
+
 

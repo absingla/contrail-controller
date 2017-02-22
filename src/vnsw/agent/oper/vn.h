@@ -94,7 +94,9 @@ struct VnData : public AgentOperDBData {
            int vxlan_id, int vnid, bool bridging,
            bool layer3_forwarding, bool admin_state, bool enable_rpf,
            bool flood_unknown_unicast, Agent::ForwardingMode forwarding_mode,
-           const boost::uuids::uuid &qos_config_uuid, bool mirror_destination) :
+           const boost::uuids::uuid &qos_config_uuid, bool mirror_destination,
+           bool pbb_etree_enable, bool pbb_evpn_enable,
+           bool layer2_control_word) :
         AgentOperDBData(agent, node), name_(name), vrf_name_(vrf_name),
         acl_id_(acl_id), mirror_acl_id_(mirror_acl_id),
         mirror_cfg_acl_id_(mc_acl_id), ipam_(ipam), vn_ipam_data_(vn_ipam_data),
@@ -103,7 +105,9 @@ struct VnData : public AgentOperDBData {
         enable_rpf_(enable_rpf),
         flood_unknown_unicast_(flood_unknown_unicast),
         forwarding_mode_(forwarding_mode), qos_config_uuid_(qos_config_uuid),
-        mirror_destination_(mirror_destination){
+        mirror_destination_(mirror_destination),
+        pbb_etree_enable_(pbb_etree_enable), pbb_evpn_enable_(pbb_evpn_enable),
+        layer2_control_word_(layer2_control_word) {
     };
     virtual ~VnData() { }
 
@@ -124,6 +128,9 @@ struct VnData : public AgentOperDBData {
     Agent::ForwardingMode forwarding_mode_;
     boost::uuids::uuid qos_config_uuid_;
     bool mirror_destination_;
+    bool pbb_etree_enable_;
+    bool pbb_evpn_enable_;
+    bool layer2_control_word_;
 };
 
 class VnEntry : AgentRefCount<VnEntry>, public AgentOperDBEntry {
@@ -198,6 +205,18 @@ public:
         return mirror_destination_;
     }
 
+    bool pbb_etree_enable() const {
+        return pbb_etree_enable_;
+    }
+
+    bool pbb_evpn_enable() const {
+        return pbb_evpn_enable_;
+    }
+
+    bool layer2_control_word() const {
+        return layer2_control_word_;
+    }
+
 private:
     friend class VnTable;
 
@@ -224,6 +243,9 @@ private:
     boost::scoped_ptr<AgentRouteResync> route_resync_walker_;
     AgentQosConfigConstRef qos_config_;
     bool mirror_destination_;
+    bool pbb_etree_enable_;
+    bool pbb_evpn_enable_;
+    bool layer2_control_word_;
     DISALLOW_COPY_AND_ASSIGN(VnEntry);
 };
 
@@ -264,7 +286,8 @@ public:
                const string &vrf_name, const std::vector<VnIpam> &ipam,
                const VnData::VnIpamDataMap &vn_ipam_data, int vn_id,
                int vxlan_id, bool admin_state, bool enable_rpf,
-               bool flood_unknown_unicast);
+               bool flood_unknown_unicast, bool pbb_etree_enable,
+               bool pbb_evpn_enable, bool layer2_control_word);
     void DelVn(const uuid &vn_uuid);
     void ResyncVxlan(const boost::uuids::uuid &vn);
     VnEntry *Find(const uuid &vn_uuid);
@@ -311,6 +334,34 @@ private:
     DISALLOW_COPY_AND_ASSIGN(VnTable);
 };
 
+class OperNetworkIpam : public OperIFMapTable {
+public:
+
+    OperNetworkIpam(Agent *agent, DomainConfig *domain_config);
+    virtual ~OperNetworkIpam();
+
+    void ConfigDelete(IFMapNode *node);
+    void ConfigAddChange(IFMapNode *node);
+    void ConfigManagerEnqueue(IFMapNode *node);
+private:
+    DomainConfig *domain_config_;
+    DISALLOW_COPY_AND_ASSIGN(OperNetworkIpam);
+};
+
+class OperVirtualDns : public OperIFMapTable {
+public:
+
+    OperVirtualDns(Agent *agent, DomainConfig *domain_config);
+    virtual ~OperVirtualDns();
+
+    void ConfigDelete(IFMapNode *node);
+    void ConfigAddChange(IFMapNode *node);
+    void ConfigManagerEnqueue(IFMapNode *node);
+private:
+    DomainConfig *domain_config_;
+    DISALLOW_COPY_AND_ASSIGN(OperVirtualDns);
+};
+
 class DomainConfig {
 public:
     typedef std::map<std::string, autogen::IpamType> IpamDomainConfigMap;
@@ -325,8 +376,10 @@ public:
     void Terminate();
     void RegisterIpamCb(Callback cb);
     void RegisterVdnsCb(Callback cb);
-    void IpamSync(DBTablePartBase *partition, DBEntryBase *dbe);
-    void VDnsSync(DBTablePartBase *partition, DBEntryBase *dbe);
+    void IpamDelete(IFMapNode *node);
+    void IpamAddChange(IFMapNode *node);
+    void VDnsDelete(IFMapNode *node);
+    void VDnsAddChange(IFMapNode *node);
     bool GetIpam(const std::string &name, autogen::IpamType *ipam);
     bool GetVDns(const std::string &vdns, autogen::VirtualDnsType *vdns_type);
 
@@ -340,10 +393,6 @@ private:
     VdnsDomainConfigMap vdns_config_;
     std::vector<Callback> ipam_callback_;
     std::vector<Callback> vdns_callback_;
-    Agent *agent_;
-    DBTableBase::ListenerId network_ipam_listener_id_;
-    DBTableBase::ListenerId vdns_listener_id_;
-
 
     DISALLOW_COPY_AND_ASSIGN(DomainConfig);
 };

@@ -12,6 +12,7 @@ def MapBuildDir(list):
 env = BuildEnv.Clone()
 
 env.Prepend(CPPPATH = env['TOP'])
+env.Append(CPPPATH = [env['TOP'] + '/base/sandesh'])
 env.Prepend(CPPPATH = env['TOP'] + '/dns')
 env.Prepend(CPPPATH = env['TOP'] + '/dns/cmn')
 env.Prepend(CPPPATH = env['TOP'] + '/ifmap')
@@ -24,10 +25,12 @@ env.Prepend(CPPPATH = env['TOP'] + '/http/client')
 env.Prepend(LIBS=['ifmap_vnc', 'ifmap_server', 'ifmap_common', 'net', 'ifmapio',
                   'xmpp', 'ds', 'sandeshvns', 'peer_sandesh',
                   'httpc', 'curl', 'process_info',
-                  'db', 'io', 'base', 'xml', 'pugixml', 'libxml2',
+                  'db', 'io', 'base', 'cassandra_cql', 'SimpleAmqpClient', 'rabbitmq',
+                  'cassandra', 'gendb', 'xml', 'pugixml', 'libxml2',
+                  'cpuinfo', 'process_info', 'nodeinfo',
                   'boost_regex', 'boost_chrono', 'boost_program_options',
                   'crypto', 'ssl',
-                  'boost_filesystem'])
+                  'boost_filesystem', 'bgp_schema'])
 env.Prepend(LIBS=['dns_cfg', 'cmn', 'mgr', 'agent_xmpp', 'bind_interface', 'dns_uve'])
 env.Append(LIBS=['sandesh', 'http', 'http_parser'])
 
@@ -43,6 +46,7 @@ if sys.platform != 'darwin':
     env.Prepend(LINKFLAGS =
                      ['-Wl,--whole-archive',
                       '-lbase', '-lifmap_server', '-rdynamic',
+                      '-lcpuinfo', '-lprocess_info', '-lnodeinfo',
                       '-Wl,--no-whole-archive'])
 
 contrail_dns = env.Program(target = 'contrail-dns', source = ['main.cc'])
@@ -63,7 +67,7 @@ doc_files += env.SandeshGenDoc('bind/bind.sandesh')
 
 # Please update sandesh/common/vns.sandesh on process name change
 env.Alias('install', env.Install(env['INSTALL_BIN'], contrail_dns))
-env.Alias('install', env.Install(env['INSTALL_CONF'] + '/dns', 'contrail-dns.conf'))
+env.Alias('install', env.Install(env['INSTALL_CONF'], 'contrail-dns.conf'))
 env.Alias('install', env.Install(env['INSTALL_CONF'] + 
     '/dns', 'applynamedconfig.py'))
 env.Alias('install', env.Install(env['INSTALL_CONF'] +
@@ -74,6 +78,10 @@ env.Alias('install', env.InstallAs(env['INSTALL_INITD'] +
     '/contrail-dns', 'contrail-dns.initd.supervisord'))
 env.Alias('install', env.InstallAs(env['INSTALL_INITD'] + 
     '/contrail-named', 'contrail-named.initd.supervisord'))
+env.Alias('install', env.InstallAs(env['INSTALL_SYSTEMD'] +
+    '/contrail-dns.service', 'systemd/contrail-dns.service'))
+env.Alias('install', env.InstallAs(env['INSTALL_SYSTEMD'] +
+    '/contrail-named.service', 'systemd/contrail-named.service'))
 env.Alias('install', env.Install(env['INSTALL_MESSAGE_DOC'] +
     '/contrail-dns/', doc_files))
 

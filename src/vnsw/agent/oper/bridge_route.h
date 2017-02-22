@@ -38,7 +38,9 @@ public:
                                                uint32_t tunnel_type,
                                                Composite::Type type,
                                                ComponentNHKeyList
-                                               &component_nh_key_list);
+                                               &component_nh_key_list,
+                                               bool pbb_nh,
+                                               bool learning_enabled);
     static AgentRouteData *BuildBgpPeerData(const Peer *peer,
                                             const string &vrf_name,
                                             const std::string &vn_name,
@@ -48,7 +50,9 @@ public:
                                             uint32_t tunnel_type,
                                             Composite::Type type,
                                             ComponentNHKeyList
-                                            &component_nh_key_list);
+                                            &component_nh_key_list,
+                                            bool pbb_nh,
+                                            bool learning_enabled);
     static void AddBridgeBroadcastRoute(const Peer *peer,
                                         const string &vrf_name,
                                         uint32_t ethernet_tag,
@@ -82,6 +86,7 @@ public:
     const VmInterface *FindVmFromDhcpBinding(const MacAddress &mac);
     BridgeRouteEntry *FindRoute(const MacAddress &mac);
     BridgeRouteEntry *FindRouteNoLock(const MacAddress &mac);
+    BridgeRouteEntry *FindRoute(const MacAddress &mac, Peer::Type peer);
 
 private:
     DBTableWalker::WalkId walkid_;

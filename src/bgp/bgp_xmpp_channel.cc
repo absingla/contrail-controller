@@ -22,6 +22,7 @@
 #include "bgp/bgp_xmpp_peer_close.h"
 #include "bgp/inet/inet_table.h"
 #include "bgp/inet6/inet6_table.h"
+#include "bgp/extended-community/etree.h"
 #include "bgp/extended-community/load_balance.h"
 #include "bgp/extended-community/mac_mobility.h"
 #include "bgp/extended-community/router_mac.h"
@@ -467,10 +468,8 @@ BgpXmppChannel::BgpXmppChannel(XmppChannel *channel,
       bgp_server_(bgp_server),
       peer_(new XmppPeer(bgp_server, this)),
       peer_close_(new BgpXmppPeerClose(this)),
-      close_manager_(BgpObjectFactory::Create<PeerCloseManager>(
-                         peer_close_.get())),
       peer_stats_(new PeerStats(this)),
-      bgp_policy_(peer_->PeerType(), RibExportPolicy::XMPP, -1, 0),
+      bgp_policy_(BgpProto::XMPP, RibExportPolicy::XMPP, -1, 0),
       manager_(manager),
       delete_in_progress_(false),
       deleted_(false),
@@ -487,6 +486,8 @@ BgpXmppChannel::BgpXmppChannel(XmppChannel *channel,
             channel->GetTaskInstance(),
             boost::bind(&BgpXmppChannel::MembershipResponseHandler, this, _1)),
       lb_mgr_(new LabelBlockManager()) {
+    close_manager_.reset(
+        BgpObjectFactory::Create<PeerCloseManager>(peer_close_.get()));
     if (bgp_server) {
         eor_receive_timer_ =
             TimerManager::CreateTimer(*bgp_server->ioservice(),
@@ -925,6 +926,13 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
         return false;
     }
 
+    // Rules for routes in master instance:
+    // - Label must be 0
+    // - Only the first nexthop is used
+    // - Tunnel encapsulation is not required
+    // - Do not add SourceRd and ExtCommunitySpec
+    bool master = (vrf_name == BgpConfigManager::kMasterInstance);
+
     // vector<Address::Family> family_list = list_of(Address::INET)(Address::EVPN);
     vector<Address::Family> family_list = list_of(Address::INET);
     BOOST_FOREACH(Address::Family family, family_list) {
@@ -999,14 +1007,14 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
                             router_mac.GetExtCommunityValue());
                     }
                 } else {
-                    if (nit->label > 0xFFFFF) {
+                    if (nit->label > 0xFFFFF || (master && nit->label)) {
                         BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
                             BGP_LOG_FLAG_ALL,
-                            "Bad label " << nit->vni <<
+                            "Bad label " << nit->label <<
                             " for inet route " << inet_prefix.ToString());
                         return false;
                     }
-                    if (!nit->label)
+                    if (!master && !nit->label)
                         continue;
                 }
 
@@ -1048,7 +1056,7 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
 
                 // Mark the path as infeasible if all tunnel encaps published
                 // by agent are invalid.
-                if (!no_tunnel_encap && no_valid_tunnel_encap) {
+                if (!no_tunnel_encap && no_valid_tunnel_encap && !master) {
                     flags = BgpPath::NoTunnelEncap;
                 }
 
@@ -1056,9 +1064,14 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
                 nexthop.address_ = nhop_address;
                 nexthop.label_ =
                     family == Address::INET ? nit->label : nit->vni;
-                nexthop.source_rd_ = RouteDistinguisher(
-                    nhop_address.to_v4().to_ulong(), instance_id);
+                if (!master) {
+                    nexthop.source_rd_ = RouteDistinguisher(
+                        nhop_address.to_v4().to_ulong(), instance_id);
+                }
                 nexthops.push_back(nexthop);
+
+                if (master)
+                    break;
             }
 
             // Skip if there are no valid next hops for the inet/evpn route.
@@ -1096,7 +1109,8 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
 
             BgpAttrSourceRd source_rd(
                 RouteDistinguisher(nh_address.to_v4().to_ulong(), instance_id));
-            attrs.push_back(&source_rd);
+            if (!master)
+                attrs.push_back(&source_rd);
 
             // Process security group list.
             const SecurityGroupListType &isg_list =
@@ -1107,7 +1121,11 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
                 ext.communities.push_back(sg.GetExtCommunityValue());
             }
 
-            if (item.entry.sequence_number) {
+            if (item.entry.mobility.seqno) {
+                MacMobility mm(item.entry.mobility.seqno,
+                               item.entry.mobility.sticky);
+                ext.communities.push_back(mm.GetExtCommunityValue());
+            } else if (item.entry.sequence_number) {
                 MacMobility mm(item.entry.sequence_number);
                 ext.communities.push_back(mm.GetExtCommunityValue());
             }
@@ -1119,7 +1137,7 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
 
             if (!comm.communities.empty())
                 attrs.push_back(&comm);
-            if (!ext.communities.empty())
+            if (!master && !ext.communities.empty())
                 attrs.push_back(&ext);
 
             BgpAttrPtr attr = bgp_server_->attr_db()->Locate(attrs);
@@ -1386,7 +1404,11 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
                 ext.communities.push_back(sg.GetExtCommunityValue());
             }
 
-            if (item.entry.sequence_number) {
+            if (item.entry.mobility.seqno) {
+                MacMobility mm(item.entry.mobility.seqno,
+                               item.entry.mobility.sticky);
+                ext.communities.push_back(mm.GetExtCommunityValue());
+            } else if (item.entry.sequence_number) {
                 MacMobility mm(item.entry.sequence_number);
                 ext.communities.push_back(mm.GetExtCommunityValue());
             }
@@ -1646,10 +1668,17 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
             ext.communities.push_back(sg.GetExtCommunityValue());
         }
 
-        if (item.entry.sequence_number) {
+        if (item.entry.mobility.seqno) {
+            MacMobility mm(item.entry.mobility.seqno,
+                           item.entry.mobility.sticky);
+            ext.communities.push_back(mm.GetExtCommunityValue());
+        } else if (item.entry.sequence_number) {
             MacMobility mm(item.entry.sequence_number);
             ext.communities.push_back(mm.GetExtCommunityValue());
         }
+
+        ETree etree(item.entry.etree_leaf);
+        ext.communities.push_back(etree.GetExtCommunityValue());
 
         if (!ext.communities.empty())
             attrs.push_back(&ext);
@@ -2026,7 +2055,7 @@ void BgpXmppChannel::FlushDeferQ(string vrf_name) {
 // Mark all current subscriptions as 'stale'. This is called when peer close
 // process is initiated by BgpXmppChannel via PeerCloseManager.
 void BgpXmppChannel::StaleCurrentSubscriptions() {
-    CHECK_CONCURRENCY("xmpp::StateMachine");
+    CHECK_CONCURRENCY(peer_close_->GetTaskName());
     BOOST_FOREACH(SubscribedRoutingInstanceList::value_type &entry,
                   routing_instances_) {
         entry.second.SetGrStale();
@@ -2037,7 +2066,7 @@ void BgpXmppChannel::StaleCurrentSubscriptions() {
 
 // Mark all current subscriptions as 'llgr_stale'.
 void BgpXmppChannel::LlgrStaleCurrentSubscriptions() {
-    CHECK_CONCURRENCY("xmpp::StateMachine");
+    CHECK_CONCURRENCY(peer_close_->GetTaskName());
     BOOST_FOREACH(SubscribedRoutingInstanceList::value_type &entry,
                   routing_instances_) {
         assert(entry.second.IsGrStale());
@@ -2049,7 +2078,7 @@ void BgpXmppChannel::LlgrStaleCurrentSubscriptions() {
 
 // Sweep all current subscriptions which are still marked as 'stale'.
 void BgpXmppChannel::SweepCurrentSubscriptions() {
-    CHECK_CONCURRENCY("xmpp::StateMachine");
+    CHECK_CONCURRENCY(peer_close_->GetTaskName());
     for (SubscribedRoutingInstanceList::iterator i = routing_instances_.begin();
             i != routing_instances_.end();) {
         if (i->second.IsGrStale()) {
@@ -2727,6 +2756,7 @@ void BgpXmppChannelManager::FillPeerInfo(const BgpXmppChannel *channel) const {
 
     PeerStatsData peer_stats_data;
     peer_stats_data.set_name(channel->Peer()->ToUVEKey());
+    peer_stats_data.set_encoding("XMPP");
     PeerStats::FillPeerUpdateStats(channel->Peer()->peer_stats(),
                                    &peer_stats_data);
     PeerStatsUve::Send(peer_stats_data, "ObjectXmppPeerInfo");

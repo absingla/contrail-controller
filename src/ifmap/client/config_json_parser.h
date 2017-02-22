@@ -9,52 +9,64 @@
 #include <map>
 #include <string>
 
+#include "config_client_manager.h"
+
+#include "base/queue_task.h"
 #include "ifmap/ifmap_table.h"
 #include "ifmap/ifmap_origin.h"
 
-#include <boost/function.hpp>
 #include "rapidjson/document.h"
 
+#include <boost/function.hpp>
+
 struct AutogenProperty;
-class DB;
-struct DBRequest;
+class ConfigCass2JsonAdapter;
 
 class ConfigJsonParser {
 public:
     typedef boost::function<
-        bool(const rapidjson::Value &, std::auto_ptr<AutogenProperty > *)
+        bool(const contrail_rapidjson::Value &, std::auto_ptr<AutogenProperty > *)
     > MetadataParseFn;
     typedef std::map<std::string, MetadataParseFn> MetadataParseMap;
-    typedef std::list<struct DBRequest *> RequestList;
 
-    ConfigJsonParser(DB *db);
+    ConfigJsonParser(ConfigClientManager *mgr);
 
     void MetadataRegister(const std::string &metadata, MetadataParseFn parser);
     void MetadataClear(const std::string &module);
-    bool Receive(const std::string &in_message, bool add_change,
+    bool Receive(const ConfigCass2JsonAdapter &adapter,
                  IFMapOrigin::Origin origin);
-
-    void TmpParseDocument(const rapidjson::Document &document);
+    ConfigClientManager *config_mgr() const { return mgr_; }
+    ConfigClientManager *config_mgr() { return mgr_; }
 
 private:
-    bool ParseDocument(const rapidjson::Document &document, bool add_change,
-                       IFMapOrigin::Origin origin, RequestList *req_list) const;
-    bool ParseNameType(const rapidjson::Document &document,
+    bool ParseDocument(const ConfigCass2JsonAdapter &adapter,
+        IFMapOrigin::Origin origin, ConfigClientManager::RequestList *req_list,
+        IFMapTable::RequestKey *key) const;
+    bool ParseNameType(const ConfigCass2JsonAdapter &adapter,
                        IFMapTable::RequestKey *key) const;
-    bool ParseProperties(const rapidjson::Document &document, bool add_change,
-            const IFMapTable::RequestKey &key, IFMapOrigin::Origin origin,
-            RequestList *req_list) const;
-    bool ParseLinks(const rapidjson::Document &document, bool add_change,
-            const IFMapTable::RequestKey &key, IFMapOrigin::Origin origin,
-            RequestList *req_list) const;
-    bool ParseRef(const rapidjson::Value &ref_entry, bool add_change,
-            IFMapOrigin::Origin origin, const std::string &to_underscore,
-            const std::string &neigh_type, const IFMapTable::RequestKey &key,
-            RequestList *req_list) const;
-    IFMapTable::RequestKey *CloneKey(const IFMapTable::RequestKey &src) const;
-    void EnqueueListToTables(RequestList *req_list) const;
+    bool ParseProperties(const ConfigCass2JsonAdapter &adapter,
+        const IFMapTable::RequestKey &key, IFMapOrigin::Origin origin,
+        ConfigClientManager::RequestList *req_list) const;
+    bool ParseOneProperty(const ConfigCass2JsonAdapter &adapter,
+        const contrail_rapidjson::Value &key_node,
+        const contrail_rapidjson::Value &value_node,
+        const IFMapTable::RequestKey &key, IFMapOrigin::Origin origin,
+        ConfigClientManager::RequestList *req_list) const;
+    bool ParseLinks(const ConfigCass2JsonAdapter &adapter,
+        const IFMapTable::RequestKey &key, IFMapOrigin::Origin origin,
+        ConfigClientManager::RequestList *req_list) const;
+    bool ParseRef(const ConfigCass2JsonAdapter &adapter,
+        const contrail_rapidjson::Value &ref_entry,
+        IFMapOrigin::Origin origin, const std::string &refer,
+        const IFMapTable::RequestKey &key,
+        ConfigClientManager::RequestList *req_list) const;
+    bool ParseOneRef(const ConfigCass2JsonAdapter &adapter,
+        const contrail_rapidjson::Value &arr,
+        const IFMapTable::RequestKey &key, IFMapOrigin::Origin origin,
+        ConfigClientManager::RequestList *req_list, const std::string &key_str,
+        size_t pos) const;
 
-    DB *db_;
+    ConfigClientManager *mgr_;
     MetadataParseMap metadata_map_;
 };
 

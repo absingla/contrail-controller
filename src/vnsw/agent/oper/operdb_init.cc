@@ -45,6 +45,7 @@
 #include <oper/qos_config.h>
 #include <oper/qos_queue.h>
 #include <oper/global_qos_config.h>
+#include <oper/bridge_domain.h>
 
 using boost::assign::map_list_of;
 using boost::assign::list_of;
@@ -98,6 +99,9 @@ void OperDB::CreateDBTables(DB *db) {
     DB::RegisterFactory("db.qos_config.0",
                         boost::bind(&AgentQosConfigTable::CreateTable,
                         agent_, _1, _2));
+    DB::RegisterFactory("db.bridge_domain.0",
+                        boost::bind(&BridgeDomainTable::CreateTable,
+                                    agent_, _1, _2));
 
     InterfaceTable *intf_table;
     intf_table = static_cast<InterfaceTable *>(db->CreateTable("db.interface.0"));
@@ -197,10 +201,16 @@ void OperDB::CreateDBTables(DB *db) {
         static_cast<AgentQosConfigTable *>(db->CreateTable("db.qos_config.0"));
     agent_->set_qos_config_table(qos_config_table);
 
+    BridgeDomainTable *bd_table;
+    bd_table =
+        static_cast<BridgeDomainTable *>(db->CreateTable("db.bridge_domain.0"));
+    assert(bd_table);
+    agent_->set_bridge_domain_table(bd_table);
+
     acl_table->ListenerInit();
 
     multicast_ = std::auto_ptr<MulticastHandler>(new MulticastHandler(agent_));
-    global_vrouter_ = std::auto_ptr<GlobalVrouter> (new GlobalVrouter(this));
+    global_vrouter_ = std::auto_ptr<GlobalVrouter> (new GlobalVrouter(agent_));
     route_preference_module_ =
         std::auto_ptr<PathPreferenceModule>(new PathPreferenceModule(agent_));
     route_preference_module_->Init();
@@ -222,9 +232,15 @@ void OperDB::CreateDBTables(DB *db) {
                                              "db.physical_device_vn.0");
     agent_->set_physical_device_vn_table(dev_vn_table);
     profile_.reset(new AgentProfile(agent_, true));
-    vrouter_ = std::auto_ptr<VRouter> (new VRouter(this));
     bgp_as_a_service_ = std::auto_ptr<BgpAsAService>(new BgpAsAService(agent_));
-    global_qos_config_ = std::auto_ptr<GlobalQosConfig>(new GlobalQosConfig(this));
+
+    vrouter_ = std::auto_ptr<VRouter> (new VRouter(agent_));
+    global_qos_config_ =
+        std::auto_ptr<GlobalQosConfig>(new GlobalQosConfig(agent_));
+    network_ipam_ = std::auto_ptr<OperNetworkIpam>
+        (new OperNetworkIpam(agent_, domain_config_.get()));
+    virtual_dns_ = std::auto_ptr<OperVirtualDns>
+        (new OperVirtualDns(agent_, domain_config_.get()));
 }
 
 void OperDB::Init() {
@@ -289,6 +305,7 @@ OperDB::~OperDB() {
 }
 
 void OperDB::Shutdown() {
+    agent_->mpls_table()->FreeReserveLabel(0, MplsTable::kStartLabel);
     instance_manager_->Terminate();
     if (nexthop_manager_.get()) {
         nexthop_manager_->Terminate();

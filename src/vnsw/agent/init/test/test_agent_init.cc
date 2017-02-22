@@ -15,17 +15,14 @@ namespace opt = boost::program_options;
 using std::map;
 using std::string;
 
-class FlowTest : public ::testing::Test {
+class AgentParamTest : public ::testing::Test {
 public:
     virtual void SetUp()  { }
 
     virtual void TearDown() { }
 };
 
-void RouterIdDepInit(Agent *agent) {
-}
-
-TEST_F(FlowTest, Agent_Conf_file_1) {
+TEST_F(AgentParamTest, Agent_Conf_file_1) {
     AgentParam param;
     param.Init("controller/src/vnsw/agent/init/test/cfg.ini", "test-param");
 
@@ -92,7 +89,7 @@ TEST_F(FlowTest, Agent_Conf_file_1) {
     EXPECT_EQ(param.get_nic_queue(105), 8);
 }
 
-TEST_F(FlowTest, Agent_Conf_file_2) {
+TEST_F(AgentParamTest, Agent_Conf_file_2) {
     AgentParam param;
     param.Init("controller/src/vnsw/agent/init/test/cfg1.ini", "test-param");
 
@@ -120,7 +117,7 @@ TEST_F(FlowTest, Agent_Conf_file_2) {
     EXPECT_EQ(param.services_queue_limit(), 1024);
 }
 
-TEST_F(FlowTest, Agent_Flows_Option_1) {
+TEST_F(AgentParamTest, Agent_Flows_Option_1) {
     int argc = 1;
     char *argv[] = {
         (char *) "",
@@ -140,7 +137,7 @@ TEST_F(FlowTest, Agent_Flows_Option_1) {
     EXPECT_EQ(param.flow_update_tokens(), 500);
 }
 
-TEST_F(FlowTest, Agent_Flows_Option_Arguments) {
+TEST_F(AgentParamTest, Agent_Flows_Option_Arguments) {
     int argc = 19;
     char *argv[] = {
         (char *) "",
@@ -170,7 +167,7 @@ TEST_F(FlowTest, Agent_Flows_Option_Arguments) {
     EXPECT_EQ(param.flow_update_tokens(), 1000);
 }
 
-TEST_F(FlowTest, Agent_Tbb_Option_1) {
+TEST_F(AgentParamTest, Agent_Tbb_Option_1) {
     int argc = 1;
     char *argv[] = {
         (char *) "",
@@ -184,16 +181,18 @@ TEST_F(FlowTest, Agent_Tbb_Option_1) {
     EXPECT_EQ(param.tbb_exec_delay(), 10);
     EXPECT_EQ(param.tbb_schedule_delay(), 25);
     EXPECT_EQ(param.tbb_keepawake_timeout(), 50);
+    EXPECT_STREQ(param.ksync_thread_cpu_pin_policy().c_str(), "last");
 }
 
-TEST_F(FlowTest, Agent_Tbb_Option_Arguments) {
-    int argc = 9;
+TEST_F(AgentParamTest, Agent_Tbb_Option_Arguments) {
+    int argc = 11;
     char *argv[] = {
         (char *) "",
         (char *) "--TASK.thread_count",                 (char *)"4",
         (char *) "--TASK.log_exec_threshold",           (char *)"100",
         (char *) "--TASK.log_schedule_threshold",      (char *)"200",
         (char *) "--TASK.tbb_keepawake_timeout",      (char *)"300",
+        (char *) "--TASK.ksync_thread_cpu_pin_policy", (char *)"2",
     };
 
     AgentParam param;
@@ -204,10 +203,11 @@ TEST_F(FlowTest, Agent_Tbb_Option_Arguments) {
     EXPECT_EQ(param.tbb_exec_delay(), 100);
     EXPECT_EQ(param.tbb_schedule_delay(), 200);
     EXPECT_EQ(param.tbb_keepawake_timeout(), 300);
+    EXPECT_STREQ(param.ksync_thread_cpu_pin_policy().c_str(), "2");
 }
 
 // Check that linklocal flows are updated when the system limits are lowered
-TEST_F(FlowTest, Agent_Conf_file_3) {
+TEST_F(AgentParamTest, Agent_Conf_file_3) {
     struct rlimit rl;
     rl.rlim_max = 1024;
     rl.rlim_cur = 512;
@@ -226,7 +226,7 @@ TEST_F(FlowTest, Agent_Conf_file_3) {
     }
 }
 
-TEST_F(FlowTest, Agent_Conf_file_4) {
+TEST_F(AgentParamTest, Agent_Conf_file_4) {
     struct rlimit rl;
     rl.rlim_max = 32;
     rl.rlim_cur = 32;
@@ -240,7 +240,7 @@ TEST_F(FlowTest, Agent_Conf_file_4) {
     }
 }
 
-TEST_F(FlowTest, Agent_Conf_Xen_1) {
+TEST_F(AgentParamTest, Agent_Conf_Xen_1) {
     AgentParam param;
     param.Init("controller/src/vnsw/agent/init/test/cfg-xen.ini", "test-param");
 
@@ -252,7 +252,7 @@ TEST_F(FlowTest, Agent_Conf_Xen_1) {
     EXPECT_EQ(param.xen_ll_plen(), 24);
 }
 
-TEST_F(FlowTest, Agent_Param_1) {
+TEST_F(AgentParamTest, Agent_Param_1) {
     int argc = 25;
     char *argv[] = {
         (char *) "",
@@ -298,7 +298,7 @@ TEST_F(FlowTest, Agent_Param_1) {
     EXPECT_EQ(param.pkt0_tx_buffer_count(), 3000);
 }
 
-TEST_F(FlowTest, Agent_Arg_Override_Config_1) {
+TEST_F(AgentParamTest, Agent_Arg_Override_Config_1) {
     int argc = 9;
     char *argv[] = {
         (char *) "",
@@ -324,7 +324,7 @@ TEST_F(FlowTest, Agent_Arg_Override_Config_1) {
     EXPECT_EQ(param.xen_ll_plen(), 16);
 }
 
-TEST_F(FlowTest, Agent_Arg_Override_Config_2) {
+TEST_F(AgentParamTest, Agent_Arg_Override_Config_2) {
     int argc = 7;
     char *argv[] = {
         (char *) "",
@@ -350,7 +350,7 @@ TEST_F(FlowTest, Agent_Arg_Override_Config_2) {
 /* Some command line args have default values. If user has not passed these
  * command line args, but has specified values in config file, then values
  * specified config file should be taken */
-TEST_F(FlowTest, Default_Cmdline_arg1) {
+TEST_F(AgentParamTest, Default_Cmdline_arg1) {
     int argc = 3;
     char *argv[] = {
         (char *) "",
@@ -375,7 +375,7 @@ TEST_F(FlowTest, Default_Cmdline_arg1) {
 /* Some command line args have default values. If user has not passed these
  * command line args, and has NOT specified values in config file, then
  * verify that default value from command line args is picked up */
-TEST_F(FlowTest, Default_Cmdline_arg2) {
+TEST_F(AgentParamTest, Default_Cmdline_arg2) {
     uint16_t http_server_port = ContrailPorts::HttpPortAgent();
     uint16_t flow_timeout = Agent::kDefaultFlowCacheTimeout;
     AgentParam param;
@@ -395,7 +395,7 @@ TEST_F(FlowTest, Default_Cmdline_arg2) {
 /* Some command line args have default values. If user has explicitly passed 
  * values for these command line args and has also specified values in config 
  * file, then values specified on command line should be taken */
-TEST_F(FlowTest, Default_Cmdline_arg3) {
+TEST_F(AgentParamTest, Default_Cmdline_arg3) {
     int argc = 11;
     char *argv[] = {
         (char *) "",
@@ -418,7 +418,7 @@ TEST_F(FlowTest, Default_Cmdline_arg3) {
     EXPECT_EQ(param.agent_mode(), AgentParam::TSN_AGENT);
 }
 
-TEST_F(FlowTest, MultitokenVector) {
+TEST_F(AgentParamTest, MultitokenVector) {
     int argc = 3;
     char *argv[argc];
     char argv_0[] = "";
@@ -438,6 +438,51 @@ TEST_F(FlowTest, MultitokenVector) {
     collector_server_list.push_back("30.30.30.3:300");
     TASK_UTIL_EXPECT_VECTOR_EQ(param.collector_server_list(),
                      collector_server_list);
+}
+
+TEST_F(AgentParamTest, Restart_1) {
+    int argc = 13;
+    char *argv[] = {
+        (char *) "",
+        (char *) "--RESTART.backup_enable", (char *)"true",
+        (char *) "--RESTART.backup_idle_timeout", (char *)"20",
+        (char *) "--RESTART.backup_dir", (char *)"/tmp/2",
+        (char *) "--RESTART.backup_count", (char *)"20",
+        (char *) "--RESTART.restore_enable", (char *)"true",
+        (char *) "--RESTART.restore_audit_timeout", (char *)"20"
+    };
+
+    // Config file without RESTART section
+    AgentParam param;
+    param.Init("controller/src/vnsw/agent/init/test/cfg.ini",
+               "test-param");
+    EXPECT_TRUE(param.restart_backup_enable());
+    EXPECT_EQ(param.restart_backup_idle_timeout(), CFG_BACKUP_IDLE_TIMEOUT);
+    EXPECT_STREQ(param.restart_backup_dir().c_str(), CFG_BACKUP_DIR);
+    EXPECT_EQ(param.restart_backup_count(), CFG_BACKUP_COUNT);
+    EXPECT_TRUE(param.restart_restore_enable());
+    EXPECT_EQ(param.restart_restore_audit_timeout(), CFG_RESTORE_AUDIT_TIMEOUT);
+
+    // Parameters from config-file
+    param.Init("controller/src/vnsw/agent/init/test/restart.ini",
+               "test-param");
+    EXPECT_FALSE(param.restart_backup_enable());
+    EXPECT_EQ(param.restart_backup_idle_timeout(), 10);
+    EXPECT_STREQ(param.restart_backup_dir().c_str(), "/tmp/1");
+    EXPECT_EQ(param.restart_backup_count(), 10);
+    EXPECT_FALSE(param.restart_restore_enable());
+    EXPECT_EQ(param.restart_restore_audit_timeout(), 10);
+
+    // Parameters from command line arguments
+    param.ParseArguments(argc, argv);
+    param.Init("controller/src/vnsw/agent/init/test/restart.ini", "test-param");
+    param.ParseArguments(argc, argv);
+    EXPECT_TRUE(param.restart_backup_enable());
+    EXPECT_EQ(param.restart_backup_idle_timeout(), 20);
+    EXPECT_STREQ(param.restart_backup_dir().c_str(), "/tmp/2");
+    EXPECT_EQ(param.restart_backup_count(), 20);
+    EXPECT_TRUE(param.restart_restore_enable());
+    EXPECT_EQ(param.restart_restore_audit_timeout(), 20);
 }
 
 int main(int argc, char **argv) {

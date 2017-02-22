@@ -56,70 +56,110 @@ public:
     static const int kDefaultLocalPref = 100;
     static const int kDefaultMed = 200;
     static const int kDefaultSequence = 0;
+    static const int kDefaultSticky = false;
+    static const int kDefaultETreeLeaf = false;
+
+    struct MobilityInfo {
+        MobilityInfo() : seqno (kDefaultSequence), sticky(kDefaultSticky) {
+        }
+
+        MobilityInfo(uint32_t seq, bool sbit) : seqno (seq), sticky(sbit) {
+        }
+        uint32_t seqno;
+        bool sticky;
+    };
+
     RouteAttributes()
         : local_pref(kDefaultLocalPref),
           med(kDefaultMed),
-          sequence(kDefaultSequence),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           sgids(std::vector<int>()),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(uint32_t lpref, uint32_t seq, const std::vector<int> &sg)
         : local_pref(lpref),
           med(0),
-          sequence(seq),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(seq, kDefaultSticky),
           sgids(sg),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(uint32_t lpref, uint32_t seq)
         : local_pref(lpref),
           med(0),
-          sequence(seq),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(seq, kDefaultSticky),
           sgids(std::vector<int>()),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(uint32_t lpref, uint32_t med, uint32_t seq)
         : local_pref(lpref),
           med(med),
-          sequence(seq),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(seq, kDefaultSticky),
+          sgids(std::vector<int>()),
+          communities(std::vector<std::string>()) {
+    }
+    RouteAttributes(uint32_t lpref, uint32_t med, uint32_t seq, bool sticky)
+        : local_pref(lpref),
+          med(kDefaultMed),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(seq, sticky),
+          sgids(std::vector<int>()),
+          communities(std::vector<std::string>()) {
+    }
+    RouteAttributes(uint32_t lpref, uint32_t med, uint32_t seq, bool sticky, bool leaf)
+        : local_pref(lpref),
+          med(kDefaultMed),
+          etree_leaf(leaf),
+          mobility(seq, sticky),
           sgids(std::vector<int>()),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(uint32_t lpref)
         : local_pref(lpref),
           med(0),
-          sequence(kDefaultSequence),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           sgids(std::vector<int>()),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(uint32_t lpref, const std::vector<int> &sg)
         : local_pref(lpref),
           med(0),
-          sequence(kDefaultSequence),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           sgids(sg),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(const std::vector<int> &sg)
         : local_pref(kDefaultLocalPref),
           med(0),
-          sequence(kDefaultSequence),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           sgids(sg),
           communities(std::vector<std::string>()) {
     }
     RouteAttributes(const std::vector<std::string> &community)
         : local_pref(kDefaultLocalPref),
           med(0),
-          sequence(kDefaultSequence),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           sgids(std::vector<int>()),
           communities(community) {
     }
     RouteAttributes(const LoadBalance::LoadBalanceAttribute &lba)
-        : local_pref(kDefaultLocalPref), med(0), sequence(kDefaultSequence),
+        : local_pref(kDefaultLocalPref), med(0), etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           loadBalanceAttribute(lba) {
     }
+
     RouteAttributes(const RouteParams &params)
         : local_pref(kDefaultLocalPref),
           med(kDefaultMed),
-          sequence(kDefaultSequence),
+          etree_leaf(kDefaultETreeLeaf),
+          mobility(kDefaultSequence, kDefaultSticky),
           params(params) {
     }
     void SetSg(const std::vector<int> &sg) {
@@ -134,7 +174,8 @@ public:
 
     uint32_t local_pref;
     uint32_t med;
-    uint32_t sequence;
+    bool etree_leaf;
+    MobilityInfo mobility;
     std::vector<int> sgids;
     std::vector<std::string> communities;
     LoadBalance::LoadBalanceAttribute loadBalanceAttribute;
@@ -142,28 +183,34 @@ public:
 };
 
 struct NextHop {
-    NextHop() : label_(0) { }
+    NextHop() : no_label_(false), label_(0) { }
     NextHop(std::string address) :
-            address_(address), label_(0) {
+            address_(address), no_label_(false), label_(0) {
         tunnel_encapsulations_.push_back("gre");
     }
-    NextHop(std::string address, uint32_t label, std::string tun1 = "gre",
+    NextHop(bool no_label, std::string address) :
+            address_(address), no_label_(no_label), label_(0) {
+    }
+    NextHop(std::string address, uint32_t label, std::string tunnel,
             const std::string virtual_network = "") :
-                address_(address), label_(label),
+                address_(address), no_label_(false), label_(label),
                 virtual_network_(virtual_network) {
-        if (tun1 == "all") {
+        if (tunnel.empty()) {
+            tunnel_encapsulations_.push_back("gre");
+        } else if (tunnel == "all") {
             tunnel_encapsulations_.push_back("gre");
             tunnel_encapsulations_.push_back("udp");
-        } else if (tun1 == "all_ipv6") {
+        } else if (tunnel == "all_ipv6") {
             tunnel_encapsulations_.push_back("gre");
             tunnel_encapsulations_.push_back("udp");
         } else {
-            tunnel_encapsulations_.push_back(tun1);
+            tunnel_encapsulations_.push_back(tunnel);
         }
     }
 
     bool operator==(NextHop other) {
         if (address_ != other.address_) return false;
+        if (no_label_ != other.no_label_) return false;
         if (label_ != other.label_) return false;
         if (tunnel_encapsulations_.size() !=
                 other.tunnel_encapsulations_.size()) {
@@ -184,6 +231,7 @@ struct NextHop {
     }
 
     std::string address_;
+    bool no_label_;
     int label_;
     std::vector<std::string> tunnel_encapsulations_;
     std::string virtual_network_;
@@ -442,6 +490,8 @@ public:
                   int local_pref = 0, int med = 0);
     void AddRoute(const std::string &network, const std::string &prefix,
                   const NextHops &nexthops, int local_pref = 0);
+    void AddRoute(const std::string &network, const std::string &prefix,
+                  const NextHop &nexthop, const RouteAttributes &attributes);
     void AddRoute(const std::string &network, const std::string &prefix,
                   const NextHops &nexthops, const RouteAttributes &attributes);
     void AddRoute(const string &network_name, const string &prefix,

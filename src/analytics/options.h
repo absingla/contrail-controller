@@ -10,6 +10,7 @@
 #include "io/event_manager.h"
 #include <sandesh/sandesh_types.h>
 #include <sandesh/sandesh.h>
+#include "viz_types.h"
 
 #define ANALYTICS_DATA_TTL_DEFAULT 48 // g_viz_constants.AnalyticsTTL
 
@@ -83,8 +84,54 @@ public:
 // Process command line/configuration file options for collector.
 class Options {
 public:
+    struct Cassandra {
+        Cassandra() :
+            user_(),
+            password_(),
+            compaction_strategy_(),
+            flow_tables_compaction_strategy_(),
+            disable_all_db_writes_(false),
+            disable_db_stats_writes_(false),
+            disable_db_messages_writes_(false),
+            disable_db_messages_keyword_writes_(true)
+        {
+        }
+
+        std::string cluster_id_;
+        vector<string> cassandra_ips_;
+        vector<int> cassandra_ports_;
+        TtlMap ttlmap_;
+        std::string user_;
+        std::string password_;
+        std::string compaction_strategy_;
+        std::string flow_tables_compaction_strategy_;
+        bool disable_all_db_writes_;
+        bool disable_db_stats_writes_;
+        bool disable_db_messages_writes_;
+        bool disable_db_messages_keyword_writes_;
+    };
+
     Options();
     bool Parse(EventManager &evm, int argc, char **argv);
+
+    const Cassandra get_cassandra_options() const {
+        return cassandra_options_;
+    }
+
+    void add_cassandra_ip(std::string cassandra_ip) {
+        cassandra_options_.cassandra_ips_.push_back(cassandra_ip);
+    }
+    void add_cassandra_port(int cassandra_port) {
+        cassandra_options_.cassandra_ports_.push_back(cassandra_port);
+    }
+
+    void set_ttl_map(TtlMap &ttlmap) {
+        cassandra_options_.ttlmap_ = ttlmap;
+    }
+
+    const TtlMap get_ttl_map() const {
+        return cassandra_options_.ttlmap_;
+    }
 
     const std::vector<std::string> cassandra_server_list() const {
         return cassandra_server_list_;
@@ -104,6 +151,12 @@ public:
         }
         return collector_protobuf_port_configured_;
     }
+    bool collector_structured_syslog_port(uint16_t *collector_structured_syslog_port) const {
+        if (collector_structured_syslog_port_configured_) {
+            *collector_structured_syslog_port = collector_structured_syslog_port_;
+        }
+        return collector_structured_syslog_port_configured_;
+    }
     const std::vector<std::string> config_file() const {
         return config_file_;
     }
@@ -115,11 +168,6 @@ public:
     const std::string redis_server() const { return redis_server_; }
     const uint16_t redis_port() const { return redis_port_; }
     const std::string redis_password() const { return redis_password_; }
-    const std::string cassandra_user() const { return cassandra_user_; }
-    const std::string cassandra_password() const { return cassandra_password_; }
-    const std::string cassandra_compaction_strategy() const {
-        return cassandra_compaction_strategy_;
-    }
     const std::string hostname() const { return hostname_; }
     const std::string host_ip() const { return host_ip_; }
     const uint16_t http_server_port() const { return http_server_port_; }
@@ -145,18 +193,23 @@ public:
     const bool test_mode() const { return test_mode_; }
     const uint32_t sandesh_send_rate_limit() const { return sandesh_ratelimit_; }
     const bool disable_flow_collection() const { return disable_flow_collection_; }
-    const bool disable_all_db_writes() const { return disable_all_db_writes_; }
-    const bool disable_db_statistics_writes() const { return disable_db_stats_writes_; }
-    const bool disable_db_messages_writes() const { return disable_db_messages_writes_; }
+    const bool disable_all_db_writes() const { return cassandra_options_.disable_all_db_writes_; }
+    const bool disable_db_statistics_writes() const { return cassandra_options_.disable_db_stats_writes_; }
+    const bool disable_db_messages_writes() const { return cassandra_options_.disable_db_messages_writes_; }
     const bool enable_db_messages_keyword_writes() const {
         return enable_db_messages_keyword_writes_;
     }
+    void disable_db_messages_keyword_writes() {
+        cassandra_options_.disable_db_messages_keyword_writes_ = !enable_db_messages_keyword_writes_;
+    }
+    const std::string cluster_id() const { return cassandra_options_.cluster_id_; }
     const std::string auth_host() const { return ks_server_; }
     const uint16_t auth_port() const { return ks_port_; }
     const std::string auth_protocol() const { return ks_protocol_; }
     const std::string auth_user() const { return ks_user_; }
     const std::string auth_passwd() const { return ks_password_; }
     const std::string auth_tenant() const { return ks_tenant_; }
+    const SandeshConfig &sandesh_config() const { return sandesh_config_; }
 
 private:
     template <typename ValueType>
@@ -188,15 +241,15 @@ private:
     uint16_t collector_port_;
     uint16_t collector_protobuf_port_;
     bool collector_protobuf_port_configured_;
+    uint16_t collector_structured_syslog_port_;
+    bool collector_structured_syslog_port_configured_;
     std::vector<std::string> config_file_;
     std::string discovery_server_;
     uint16_t discovery_port_;
     std::string redis_server_;
     uint16_t redis_port_;
     std::string redis_password_;
-    std::string cassandra_user_;
-    std::string cassandra_password_;
-    std::string cassandra_compaction_strategy_;
+    Cassandra cassandra_options_;
     std::string hostname_;
     std::string host_ip_;
     uint16_t http_server_port_;
@@ -226,9 +279,6 @@ private:
     uint16_t partitions_;
     uint32_t sandesh_ratelimit_;
     bool disable_flow_collection_;
-    bool disable_all_db_writes_;
-    bool disable_db_stats_writes_;
-    bool disable_db_messages_writes_;
     bool enable_db_messages_keyword_writes_;
     std::string ks_server_;
     uint16_t    ks_port_;
@@ -242,6 +292,7 @@ private:
     std::string ks_cert_;
     std::string ks_key_;
     std::string ks_ca_;
+    SandeshConfig sandesh_config_;
 
     boost::program_options::options_description config_file_options_;
     DbWriteOptions db_write_options_;

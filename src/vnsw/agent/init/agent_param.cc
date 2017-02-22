@@ -359,6 +359,8 @@ void AgentParam::ParseDns() {
                                     "DNS.dns_client_port")) {
         dns_client_port_ = ContrailPorts::VrouterAgentDnsClientUdpPort();
     }
+    GetValueFromTree<uint32_t>(dns_timeout_, "DNS.dns_timeout");
+    GetValueFromTree<uint32_t>(dns_max_retries_, "DNS.dns_max_retries");
 }
 
 void AgentParam::ParseDiscovery() {
@@ -567,6 +569,8 @@ void AgentParam::ParseTaskSection() {
                                     "TASK.tbb_keepawake_timeout")) {
         tbb_keepawake_timeout_ = Agent::kDefaultTbbKeepawakeTimeout;
     }
+    GetValueFromTree<string>(ksync_thread_cpu_pin_policy_,
+                             "TASK.ksync_thread_cpu_pin_policy");
 }
 
 void AgentParam::ParseMetadataProxy() {
@@ -634,12 +638,6 @@ void AgentParam::ParseFlows() {
     GetValueFromTree<uint32_t>(flow_update_tokens_, "FLOWS.update_tokens");
 }
 
-void AgentParam::ParseHeadlessMode() {
-    if (!GetValueFromTree<bool>(headless_mode_, "DEFAULT.headless_mode")) {
-        headless_mode_ = false;
-    }
-}
-
 void AgentParam::ParseDhcpRelayMode() {
     if (!GetValueFromTree<bool>(dhcp_relay_mode_, "DEFAULT.dhcp_relay_mode")) {
         dhcp_relay_mode_ = false;
@@ -657,6 +655,39 @@ void AgentParam::ParseAgentInfo() {
     if (!GetValueFromTree<string>(agent_base_dir_,
                                   "DEFAULT.agent_base_directory")) {
         agent_base_dir_ = "/var/lib/contrail";
+    }
+}
+
+void AgentParam::ParseLlgr() {
+    if (!GetValueFromTree<uint16_t>(llgr_params_.stale_config_cleanup_time_,
+                                    "LLGR.stale_config_cleanup_time")) {
+        llgr_params_.stale_config_cleanup_time_ =
+            LlgrParams::kStaleConfigCleanupTime;
+    }
+    if (!GetValueFromTree<uint16_t>(llgr_params_.config_inactivity_time_,
+                                    "LLGR.config_inactivity_time")) {
+        llgr_params_.config_inactivity_time_ =
+            LlgrParams::kConfigInactivityTime;
+    }
+    if (!GetValueFromTree<uint16_t>(llgr_params_.config_fallback_time_,
+                                    "LLGR.config_fallback_time")) {
+        llgr_params_.config_fallback_time_ =
+            LlgrParams::kConfigFallbackTimeOut;
+    }
+    if (!GetValueFromTree<uint16_t>(llgr_params_.end_of_rib_tx_fallback_time_,
+                                    "LLGR.end_of_rib_tx_fallback_time")) {
+        llgr_params_.end_of_rib_tx_fallback_time_ =
+            LlgrParams::kEorTxFallbackTimeOut;
+    }
+    if (!GetValueFromTree<uint16_t>(llgr_params_.end_of_rib_tx_inactivity_time_,
+                                    "LLGR.end_of_rib_tx_inactivity_time")) {
+        llgr_params_.end_of_rib_tx_inactivity_time_ =
+            LlgrParams::kEorTxInactivityTime;
+    }
+    if (!GetValueFromTree<uint16_t>(llgr_params_.end_of_rib_rx_fallback_time_,
+                                    "LLGR.end_of_rib_rx_fallback_time")) {
+        llgr_params_.end_of_rib_rx_fallback_time_ =
+            LlgrParams::kEorRxFallbackTime;
     }
 }
 
@@ -720,6 +751,19 @@ void AgentParam::ParseServices() {
     GetValueFromTree<uint32_t>(services_queue_limit_, "SERVICES.queue_limit");
 }
 
+void AgentParam::ParseSandesh() {
+    GetValueFromTree<string>(sandesh_config_.keyfile,
+                             "SANDESH.sandesh_keyfile");
+    GetValueFromTree<string>(sandesh_config_.certfile,
+                             "SANDESH.sandesh_certfile");
+    GetValueFromTree<string>(sandesh_config_.ca_cert,
+                             "SANDESH.sandesh_ca_cert");
+    GetValueFromTree<bool>(sandesh_config_.sandesh_ssl_enable,
+                           "SANDESH.sandesh_ssl_enable");
+    GetValueFromTree<bool>(sandesh_config_.introspect_ssl_enable,
+                           "SANDESH.introspect_ssl_enable");
+}
+
 void AgentParam::ParseQueue() {
 
     const std::string qos_str = "QUEUE";
@@ -749,6 +793,7 @@ void AgentParam::ParseQueue() {
                     }
 
                     string range = *it;
+                    nic_queue_list_.insert(queue);
                     std::vector<uint16_t> range_value;
                     if (stringToIntegerList(range, "-", range_value)) {
                         if (range_value.size() == 1) {
@@ -774,6 +819,17 @@ void AgentParam::ParseQueue() {
             }
         }
     }
+}
+
+void AgentParam::ParseRestart() {
+    GetValueFromTree<bool>(restart_backup_enable_, "RESTART.backup_enable");
+    GetValueFromTree<uint64_t>(restart_backup_idle_timeout_,
+                               "RESTART.backup_idle_timeout");
+    GetValueFromTree<string>(restart_backup_dir_, "RESTART.backup_dir");
+    GetValueFromTree<uint16_t>(restart_backup_count_, "RESTART.backup_count");
+    GetValueFromTree<bool>(restart_restore_enable_, "RESTART.restore_enable");
+    GetValueFromTree<uint64_t>(restart_restore_audit_timeout_,
+                               "RESTART.restore_audit_timeout");
 }
 
 void AgentParam::ParseCollectorDSArguments
@@ -809,6 +865,8 @@ void AgentParam::ParseDnsArguments
     ParseServerListArguments(var_map_, &dns_server_1_, &dns_port_1_,
                              &dns_server_2_, &dns_port_2_, "DNS.server");
     GetOptValue<uint16_t>(var_map, dns_client_port_, "DNS.dns_client_port");
+    GetOptValue<uint32_t>(var_map, dns_timeout_, "DNS.dns_timeout");
+    GetOptValue<uint32_t>(var_map, dns_max_retries_, "DNS.dns_max_retries");
 }
 
 void AgentParam::ParseDiscoveryArguments
@@ -926,6 +984,8 @@ void AgentParam::ParseTaskSectionArguments
                           "TASK.log_schedule_threshold");
     GetOptValue<uint32_t>(var_map, tbb_keepawake_timeout_,
                           "TASK.tbb_keepawake_timeout");
+    GetOptValue<string>(var_map, ksync_thread_cpu_pin_policy_,
+                        "TASK.ksync_thread_cpu_pin_policy");
 }
 
 void AgentParam::ParseMetadataProxyArguments
@@ -972,11 +1032,6 @@ void AgentParam::ParseFlowArguments
                           "FLOWS.del_tokens");
     GetOptValue<uint32_t>(var_map, flow_update_tokens_,
                           "FLOWS.update_tokens");
-}
-
-void AgentParam::ParseHeadlessModeArguments
-    (const boost::program_options::variables_map &var_map) {
-    GetOptValue<bool>(var_map, headless_mode_, "DEFAULT.headless_mode");
 }
 
 void AgentParam::ParseDhcpRelayModeArguments
@@ -1051,6 +1106,49 @@ void AgentParam::ParseServicesArguments
     GetOptValue<uint32_t>(v, services_queue_limit_, "SERVICES.queue_limit");
 }
 
+void AgentParam::ParseSandeshArguments
+    (const boost::program_options::variables_map &v) {
+    GetOptValue<string>(v, sandesh_config_.keyfile,
+                        "SANDESH.sandesh_keyfile");
+    GetOptValue<string>(v, sandesh_config_.certfile,
+                        "SANDESH.sandesh_certfile");
+    GetOptValue<string>(v, sandesh_config_.ca_cert,
+                        "SANDESH.sandesh_ca_cert");
+    GetOptValue<bool>(v, sandesh_config_.sandesh_ssl_enable,
+                      "SANDESH.sandesh_ssl_enable");
+    GetOptValue<bool>(v, sandesh_config_.introspect_ssl_enable,
+                      "SANDESH.introspect_ssl_enable");
+}
+
+void AgentParam::ParseRestartArguments
+    (const boost::program_options::variables_map &v) {
+    GetOptValue<bool>(v, restart_backup_enable_, "RESTART.backup_enable");
+    GetOptValue<uint64_t>(v, restart_backup_idle_timeout_,
+                          "RESTART.backup_idle_timeout");
+    GetOptValue<string>(v, restart_backup_dir_, "RESTART.backup_dir");
+    GetOptValue<uint16_t>(v, restart_backup_count_, "RESTART.backup_count");
+
+    GetOptValue<bool>(v, restart_restore_enable_, "RESTART.restore_enable");
+    GetOptValue<uint64_t>(v, restart_restore_audit_timeout_,
+                          "RESTART.restore_audit_timeout");
+}
+
+void AgentParam::ParseLlgrArguments
+    (const boost::program_options::variables_map &var_map) {
+    GetOptValue<uint16_t>(var_map, llgr_params_.stale_config_cleanup_time_,
+                          "LLGR.stale_config_cleanup_time_");
+    GetOptValue<uint16_t>(var_map, llgr_params_.config_inactivity_time_,
+                          "LLGR.config_inactivity_time");
+    GetOptValue<uint16_t>(var_map, llgr_params_.config_fallback_time_,
+                          "LLGR.config_fallback_time");
+    GetOptValue<uint16_t>(var_map, llgr_params_.end_of_rib_rx_fallback_time_,
+                          "LLGR.end_of_rib_rx_fallback_time");
+    GetOptValue<uint16_t>(var_map, llgr_params_.end_of_rib_tx_fallback_time_,
+                          "LLGR.end_of_rib_tx_fallback_time");
+    GetOptValue<uint16_t>(var_map, llgr_params_.end_of_rib_tx_inactivity_time_,
+                          "LLGR.end_of_rib_tx_inactivity_time_");
+}
+
 // Initialize hypervisor mode based on system information
 // If "/proc/xen" exists it means we are running in Xen dom0
 void AgentParam::InitFromSystem() {
@@ -1096,7 +1194,6 @@ void AgentParam::InitFromConfig() {
     ParseTaskSection();
     ParseMetadataProxy();
     ParseFlows();
-    ParseHeadlessMode();
     ParseDhcpRelayMode();
     ParseSimulateEvpnTor();
     ParseServiceInstance();
@@ -1104,7 +1201,9 @@ void AgentParam::InitFromConfig() {
     ParseNexthopServer();
     ParsePlatform();
     ParseServices();
+    ParseSandesh();
     ParseQueue();
+    ParseRestart();
     cout << "Config file <" << config_file_ << "> parsing completed.\n";
     return;
 }
@@ -1122,13 +1221,14 @@ void AgentParam::InitFromArguments() {
     ParseTaskSectionArguments(var_map_);
     ParseFlowArguments(var_map_);
     ParseMetadataProxyArguments(var_map_);
-    ParseHeadlessModeArguments(var_map_);
     ParseDhcpRelayModeArguments(var_map_);
     ParseServiceInstanceArguments(var_map_);
     ParseAgentInfoArguments(var_map_);
     ParseNexthopServerArguments(var_map_);
     ParsePlatformArguments(var_map_);
     ParseServicesArguments(var_map_);
+    ParseSandeshArguments(var_map_);
+    ParseRestartArguments(var_map_);
     return;
 }
 
@@ -1392,6 +1492,8 @@ void AgentParam::LogConfig() const {
     LOG(DEBUG, "DNS Server-2                : " << dns_server_2_);
     LOG(DEBUG, "DNS Port-2                  : " << dns_port_2_);
     LOG(DEBUG, "DNS client port             : " << dns_client_port_);
+    LOG(DEBUG, "DNS timeout                 : " << dns_timeout_);
+    LOG(DEBUG, "DNS max retries             : " << dns_max_retries_);
     LOG(DEBUG, "Xmpp Dns Authentication     : " << xmpp_dns_auth_enable_);
     if (xmpp_dns_auth_enable_) {
         LOG(DEBUG, "Xmpp Server Certificate : " << xmpp_server_cert_);
@@ -1426,6 +1528,8 @@ void AgentParam::LogConfig() const {
     LOG(DEBUG, "Flow ksync-tokens           : " << flow_ksync_tokens_);
     LOG(DEBUG, "Flow del-tokens             : " << flow_del_tokens_);
     LOG(DEBUG, "Flow update-tokens          : " << flow_update_tokens_);
+    LOG(DEBUG, "Pin flow netlink task to CPU: "
+        << ksync_thread_cpu_pin_policy_);
 
     if (agent_mode_ == VROUTER_AGENT)
         LOG(DEBUG, "Agent Mode                  : Vrouter");
@@ -1441,7 +1545,6 @@ void AgentParam::LogConfig() const {
     else if (gateway_mode_ == NONE)
         LOG(DEBUG, "Gateway Mode                : None");
 
-    LOG(DEBUG, "Headless Mode               : " << headless_mode_);
     LOG(DEBUG, "DHCP Relay Mode             : " << dhcp_relay_mode_);
     if (simulate_evpn_tor_) {
         LOG(DEBUG, "Simulate EVPN TOR           : " << simulate_evpn_tor_);
@@ -1454,6 +1557,15 @@ void AgentParam::LogConfig() const {
     LOG(DEBUG, "Service instance lbaas auth : " << si_lbaas_auth_conf_);
     LOG(DEBUG, "Bgp as a service port range : " << bgp_as_a_service_port_range_);
     LOG(DEBUG, "Services queue limit        : " << services_queue_limit_);
+
+    LOG(DEBUG, "Sandesh Key file            : " << sandesh_config_.keyfile);
+    LOG(DEBUG, "Sandesh Cert file           : " << sandesh_config_.certfile);
+    LOG(DEBUG, "Sandesh CA Cert             : " << sandesh_config_.ca_cert);
+    LOG(DEBUG, "Sandesh SSL Enable          : "
+        << sandesh_config_.sandesh_ssl_enable);
+    LOG(DEBUG, "Introspect SSL Enable       : "
+        << sandesh_config_.introspect_ssl_enable);
+
     if (hypervisor_mode_ == MODE_KVM) {
     LOG(DEBUG, "Hypervisor mode             : kvm");
         return;
@@ -1526,7 +1638,8 @@ AgentParam::AgentParam(bool enable_flow_options,
         xmpp_instance_count_(),
         dns_port_1_(ContrailPorts::DnsServerPort()),
         dns_port_2_(ContrailPorts::DnsServerPort()),
-        dns_client_port_(0), mirror_client_port_(0),
+        dns_client_port_(0), dns_timeout_(3000),
+        dns_max_retries_(2), mirror_client_port_(0),
         dss_server_(), dss_port_(0), mgmt_ip_(), hypervisor_mode_(MODE_KVM), 
         xen_ll_(), tunnel_type_(), metadata_shared_secret_(),
         metadata_proxy_port_(0), metadata_use_ssl_(false),
@@ -1549,8 +1662,7 @@ AgentParam::AgentParam(bool enable_flow_options,
         vrouter_stats_interval_(kVrouterStatsInterval),
         vmware_physical_port_(""), test_mode_(false), tree_(),
         vgw_config_table_(new VirtualGatewayConfigTable() ),
-        headless_mode_(false), dhcp_relay_mode_(false),
-        xmpp_auth_enable_(false),
+        dhcp_relay_mode_(false), xmpp_auth_enable_(false),
         xmpp_server_cert_(""), xmpp_server_key_(""), xmpp_ca_cert_(""),
         xmpp_dns_auth_enable_(false),
         simulate_evpn_tor_(false), si_netns_command_(),
@@ -1570,11 +1682,20 @@ AgentParam::AgentParam(bool enable_flow_options,
         flow_latency_limit_(Agent::kDefaultFlowLatencyLimit),
         subnet_hosts_resolvable_(true),
         services_queue_limit_(1024),
+        sandesh_config_(),
+        restart_backup_enable_(true),
+        restart_backup_idle_timeout_(CFG_BACKUP_IDLE_TIMEOUT),
+        restart_backup_dir_(CFG_BACKUP_DIR),
+        restart_backup_count_(CFG_BACKUP_COUNT),
+        restart_restore_enable_(true),
+        restart_restore_audit_timeout_(CFG_RESTORE_AUDIT_TIMEOUT),
+        ksync_thread_cpu_pin_policy_(),
         tbb_thread_count_(Agent::kMaxTbbThreads),
         tbb_exec_delay_(0),
         tbb_schedule_delay_(0),
         tbb_keepawake_timeout_(Agent::kDefaultTbbKeepawakeTimeout),
-        default_nic_queue_(Agent::kInvalidQueueId) {
+        default_nic_queue_(Agent::kInvalidQueueId),
+        llgr_params_() {
     // Set common command line arguments supported
     boost::program_options::options_description generic("Generic options");
     generic.add_options()
@@ -1604,8 +1725,6 @@ AgentParam::AgentParam(bool enable_flow_options,
          "Stale Interface cleanup timeout")
         ("DEFAULT.hostname", opt::value<string>(),
          "Hostname of compute-node")
-        ("DEFAULT.headless_mode", opt::value<bool>(),
-         "Run compute-node in headless mode")
         ("DEFAULT.dhcp_relay_mode", opt::value<bool>(),
          "Enable / Disable DHCP relay of DHCP packets from virtual instance")
         ("DEFAULT.http_server_port",
@@ -1674,6 +1793,22 @@ AgentParam::AgentParam(bool enable_flow_options,
          "Number of tx-buffers for pkt0 interface")
         ;
     options_.add(generic);
+
+    opt::options_description restart("Restart options");
+    restart.add_options()
+        ("RESTART.backup_enable", opt::value<bool>(),
+         "Enable backup of config and resources into a file")
+        ("RESTART.backup_idle_timeout", opt::value<uint64_t>(),
+         "Generate backup if no change detected in configured time (in msec)")
+        ("RESTART.backup_dir", opt::value<string>(),
+         "Directory storing backup files for configuraion or resource")
+        ("RESTART.backup_count", opt::value<uint16_t>(),
+         "Number of backup files")
+        ("RESTART.restore_enable", opt::value<bool>(),
+         "Enable restore of config and resources from backup files")
+        ("RESTART.restore_audit_timeout", opt::value<uint64_t>(),
+         "Audit time for config/resource read from file (in milli-sec)");
+    options_.add(restart);
 
     opt::options_description log("Logging options");
     log.add_options()
@@ -1785,9 +1920,49 @@ AgentParam::AgentParam(bool enable_flow_options,
          "Log message if task takes more than threshold (msec) to schedule")
         ("TASK.tbb_keepawake_timeout", opt::value<uint32_t>(),
          "Timeout for the TBB keepawake timer")
+        ("TASK.ksync_thread_cpu_pin_policy", opt::value<string>(),
+         "Pin ksync io task to CPU")
         ;
     options_.add(tbb);
+
+    opt::options_description sandesh("Sandesh specific options");
+    sandesh.add_options()
+        ("SANDESH.sandesh_keyfile", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/private/server-privkey.pem"),
+            "Sandesh ssl private key")
+        ("SANDESH.sandesh_certfile", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/certs/server.pem"),
+            "Sandesh ssl certificate")
+        ("SANDESH.sandesh_ca_cert", opt::value<string>()->default_value(
+            "/etc/contrail/ssl/certs/ca-cert.pem"),
+            "Sandesh CA ssl certificate")
+        ("SANDESH.sandesh_ssl_enable",
+             opt::bool_switch(&sandesh_config_.sandesh_ssl_enable),
+             "Enable ssl for sandesh connection")
+        ("SANDESH.introspect_ssl_enable",
+             opt::bool_switch(&sandesh_config_.introspect_ssl_enable),
+             "Enable ssl for introspect connection")
+        ;
+    options_.add(sandesh);
+
+    opt::options_description llgr("LLGR");
+    llgr.add_options()
+        ("LLGR.disable", opt::value<bool>()->default_value(false),
+         "Disable LLGR")
+        ;
+    options_.add(llgr);
 }
 
 AgentParam::~AgentParam() {
+}
+
+LlgrParams::LlgrParams() {
+    stale_config_cleanup_time_ = kStaleConfigCleanupTime;
+    config_poll_time_ = kConfigPollTime;
+    config_inactivity_time_ = kConfigInactivityTime;
+    config_fallback_time_ = kConfigFallbackTimeOut;
+    end_of_rib_tx_poll_time_ = kEorTxPollTime;
+    end_of_rib_tx_fallback_time_ = kEorTxFallbackTimeOut;
+    end_of_rib_tx_inactivity_time_ = kEorTxInactivityTime;
+    end_of_rib_rx_fallback_time_ = kEorRxFallbackTime;
 }

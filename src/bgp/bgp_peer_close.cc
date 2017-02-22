@@ -71,15 +71,15 @@ void BgpPeerClose::ReceiveEndOfRIB(Address::Family family) {
 }
 
 const char *BgpPeerClose::GetTaskName() const {
-    return "bgp::StateMachine";
+    return "bgp::Config";
 }
 
 int BgpPeerClose::GetTaskInstance() const {
-    return peer_->GetTaskInstance();
+    return 0;
 }
 
 void BgpPeerClose::MembershipRequestCallbackComplete() {
-    CHECK_CONCURRENCY("bgp::StateMachine");
+    CHECK_CONCURRENCY(GetTaskName());
 }
 
 bool BgpPeerClose::IsGRHelperModeEnabled() const {
@@ -340,11 +340,15 @@ bool BgpPeerClose::IsCloseLongLivedGraceful() const {
     return true;
 }
 
+void BgpPeerClose::RestartStateMachine() {
+    peer_->state_machine()->Initialize();
+}
+
 // Close process for this peer is complete. Restart the state machine and
 // attempt to bring up session with the neighbor
 void BgpPeerClose::CloseComplete() {
     if (!peer_->IsDeleted() && !peer_->IsAdminDown())
-        peer_->state_machine()->Initialize();
+        RestartStateMachine();
 }
 
 void BgpPeerClose::GetGracefulRestartFamilies(Families *families) const {

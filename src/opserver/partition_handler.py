@@ -18,6 +18,7 @@ import discoveryclient.client as client
 from pysandesh.util import UTCTimestampUsec
 import select
 import redis
+import errno
 from collections import namedtuple
 
 PartInfo = namedtuple("PartInfo",["ip_address","instance_id","acq_time","port"])
@@ -45,7 +46,6 @@ class UveCacheProcessor(object):
     def get_cache_list(self, tables, filters, patterns, keysonly):
         if not tables:
             tables = self._uvedb.keys()
-
         filters = filters or {}
         tfilter = filters.get('cfilt')
         ackfilter = filters.get('ackfilt')
@@ -638,6 +638,10 @@ class PartitionHandler(gevent.Greenlet):
                 self.stop_partition()
 		self._failed = True
                 pause = True
+                if hasattr(ex,'errno'):
+                    # This is an unrecoverable error
+                    if ex.errno == errno.EMFILE:
+                       raise SystemExit(1)
 
         self._logger.error("Stopping %s pcount %d" % (self._topic, pcount))
         partdb = self.stop_partition()

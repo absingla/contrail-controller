@@ -12,3 +12,5 @@ sandesh
 sandesh-common
 vnc_cfg_api_server
 discoveryclient
+urllib3
+bitstring

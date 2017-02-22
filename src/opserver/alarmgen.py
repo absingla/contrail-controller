@@ -17,6 +17,9 @@ import time
 import copy
 import traceback
 import signal
+import random
+import hashlib
+import ConfigParser
 import logging
 logging.getLogger('kafka').addHandler(logging.StreamHandler())
 logging.getLogger('kafka').setLevel(logging.WARNING)
@@ -32,6 +35,7 @@ from pysandesh.connection_info import ConnectionState
 from pysandesh.sandesh_logger import SandeshLogger
 from pysandesh.gen_py.sandesh_alarm.ttypes import SandeshAlarmAckResponseCode
 import sandesh.viz.constants as viz_constants
+from sandesh.viz.constants import _OBJECT_TABLES
 from sandesh.alarmgen_ctrl.sandesh_alarm_base.ttypes import AlarmTrace, \
     UVEAlarms, UVEAlarmInfo, UVEAlarmConfig, AlarmOperand2, AlarmCondition, \
     AlarmMatch, AlarmConditionMatch, AlarmAndList, AlarmRules
@@ -55,13 +59,12 @@ from sandesh.alarmgen_ctrl.ttypes import PartitionOwnershipReq, \
     AlarmgenStatus, AlarmgenStats, AlarmgenPartitionTrace, \
     AlarmgenPartition, AlarmgenPartionInfo, AlarmgenUpdate, \
     UVETableInfoReq, UVETableInfoResp, UVEObjectInfo, UVEStructInfo, \
-    UVETablePerfReq, UVETablePerfResp, UVETableInfo, UVETableCount, \
+    UVETablePerfReq, UVETablePerfResp, UVETableInfo, \
     UVEAlarmStateMachineInfo, UVEAlarmState, UVEAlarmOperState,\
     AlarmStateChangeTrace, UVEQTrace, AlarmConfig, AlarmConfigRequest, \
-    AlarmConfigResponse
+    AlarmConfigResponse, AlarmgenUVEStats, AlarmgenAlarmStats
 
 from sandesh.discovery.ttypes import CollectorTrace
-from opserver_util import ServicePoller
 from opserver_util import AnalyticsDiscovery
 from stevedore import hook, extension
 from pysandesh.util import UTCTimestampUsec
@@ -842,7 +845,7 @@ class AlarmStateMachine:
                     [timeout_val]:
                 self._logger.error("Timer error for (%s,%s,%s)" % \
                     (tab, uv, nm))
-                raise SystemExit
+                raise SystemExit(1)
             AlarmStateMachine.tab_alarms_timer[timeout_val].add\
                         ((asm.tab, asm.uv, asm.nm))
 
@@ -870,13 +873,13 @@ class Controller(object):
         self.table = "ObjectCollectorInfo"
         self._hostname = socket.gethostname()
         self._instance_id = self._conf.worker_id()
+        self._disable_cb = False
 
         self.disc = None
         self._libpart_name = self._conf.host_ip() + ":" + self._instance_id
         self._libpart = None
         self._partset = set()
         if self._conf.discovery()['server']:
-            self._max_out_rows = 20
             self.disc = client.DiscoveryClient(
                 self._conf.discovery()['server'],
                 self._conf.discovery()['port'],
@@ -891,16 +894,22 @@ class Controller(object):
         if self._conf.sandesh_send_rate_limit() is not None:
             SandeshSystem.set_sandesh_send_rate_limit( \
                 self._conf.sandesh_send_rate_limit())
+        self._conf.random_collectors = self._conf.collectors()
+        if self._conf.collectors():
+            self._chksum = hashlib.md5("".join(self._conf.collectors())).hexdigest()
+            self._conf.random_collectors = random.sample(self._conf.collectors(), \
+                                                        len(self._conf.collectors()))
         self._sandesh.init_generator(self._moduleid, self._hostname,
                                       self._node_type_name, self._instance_id,
-                                      self._conf.collectors(),
+                                      self._conf.random_collectors,
                                       self._node_type_name,
                                       self._conf.http_port(),
                                       ['opserver.sandesh', 'sandesh'],
                                       host_ip=self._conf.host_ip(),
                                       discovery_client=self.disc,
                                       connect_to_collector = is_collector,
-                                      alarm_ack_callback=self.alarm_ack_callback)
+                                      alarm_ack_callback=self.alarm_ack_callback,
+                                      config=self._conf.sandesh_config())
         if test_logger is not None:
             self._logger = test_logger
         else:
@@ -954,24 +963,21 @@ class Controller(object):
             staticmethod(ConnectionState.get_process_state_cb),
             NodeStatusUVE, NodeStatus, self.table)
 
-        self._us = UVEServer(None, self._logger, self._conf.redis_password())
-
-        if not self.disc:
-            self._max_out_rows = 2
-            # If there is no discovery service, use fixed redis_uve list
-            redis_uve_list = []
-            try:
-                for redis_uve in self._conf.redis_uve_list():
-                    redis_ip_port = redis_uve.split(':')
-                    redis_elem = (redis_ip_port[0], int(redis_ip_port[1]),0)
-                    redis_uve_list.append(redis_elem)
-            except Exception as e:
-                print('Failed to parse redis_uve_list: %s' % e)
-            else:
-                self._us.update_redis_uve_list(redis_uve_list)
-
-            # If there is no discovery service, use fixed alarmgen list
-            self._libpart = self.start_libpart(self._conf.alarmgen_list())
+        is_local = True
+        us_freq = 5
+        ad_freq = 10
+        redis_uve_list = []
+        for redis_uve in self._conf.redis_uve_list():
+            redis_ip_port = redis_uve.split(':')
+            if redis_ip_port[0] != "127.0.0.1":
+                is_local = False
+            redis_elem = (redis_ip_port[0], int(redis_ip_port[1]))
+            redis_uve_list.append(redis_elem)
+        if is_local:
+            us_freq = 2
+            ad_freq = 2
+        self._us = UVEServer(redis_uve_list, self._logger,
+                self._conf.redis_password(), freq=us_freq)
 
         # Start AnalyticsDiscovery to monitor AlarmGen instances
         if self._conf.zk_list():
@@ -979,16 +985,19 @@ class Controller(object):
                 ','.join(self._conf.zk_list()),
                 ALARM_GENERATOR_SERVICE_NAME,
                 self._hostname + "-" + self._instance_id,
-                # TODO: Use this callback instead of  DiscoveryClient
-                {ALARM_GENERATOR_SERVICE_NAME:None},
-                self._conf.kafka_prefix())
-
-            self._ad.start()
+                {ALARM_GENERATOR_SERVICE_NAME:self.disc_cb_ag},
+                self._conf.kafka_prefix(),
+                ad_freq)
+            self._max_out_rows = 20
         else:
+            self._max_out_rows = 2
+            # If there is no discovery service, use fixed alarmgen list
+            self._libpart = self.start_libpart(self._conf.alarmgen_list())
             self._ad = None
 
         self._workers = {}
         self._uvestats = {}
+        self._alarmstats = {}
         self._uveq = {}
         self._uveqf = {}
         self._alarm_config_change_map = {}
@@ -1044,7 +1053,7 @@ class Controller(object):
             self._logger.error('Partition Del : %s' % str(oldset-newset))
             if not self.partition_change(oldset-newset, False):
                 self._logger.error('Partition Del : %s failed!' % str(oldset-newset))
-                raise SystemExit
+                raise SystemExit(1)
 
 	    self._logger.error('Partition Del done: %s' % str(oldset-newset))
 
@@ -1056,7 +1065,7 @@ class Controller(object):
             self._logger.error('Partition List failed %s %s' % \
                 (str(newset),str(oldset)))
         except SystemExit:
-            raise SystemExit
+            raise SystemExit(1)
 
         self._logger.error('Partition List done : new %s old %s' % \
             (str(newset),str(oldset)))
@@ -1207,7 +1216,7 @@ class Controller(object):
         """
         if not redish:
             self._logger.error("No redis handle")
-            raise SystemExit
+            raise SystemExit(1)
         old_acq_time = redish.hget("AGPARTS:%s" % inst, part)
         if old_acq_time is None:
             self._logger.error("Agg %s part %d new" % (inst, part))
@@ -1272,7 +1281,7 @@ class Controller(object):
 
         if retry:
             self._logger.error("Agg unexpected rows %s" % str(rows))
-            raise SystemExit
+            raise SystemExit(1)
         
     def send_alarm_update(self, tab, uk):
         ustruct = None
@@ -1350,25 +1359,6 @@ class Controller(object):
         lredis = None
         oldworkerset = None
         while True:
-            workerset = {}
-            for part in self._workers.keys():
-                if self._workers[part]._up:
-                    workerset[part] = self._workers[part].acq_time()
-            if workerset != oldworkerset:
-                data = {
-                    'ip-address': self._conf.host_ip(),
-                    'instance-id': self._instance_id,
-                    'redis-port': str(self._conf.redis_server_port()),
-                    'partitions': json.dumps(workerset)
-                }
-                if self.disc:
-                    self._logger.error("Disc Publish to %s : %s"
-                                  % (str(self._conf.discovery()), str(data)))
-                    self.disc.publish(ALARM_GENERATOR_SERVICE_NAME, data)
-                if self._ad:
-                    self._ad.publish(json.dumps(data))
-                oldworkerset = copy.deepcopy(workerset)
-             
             for part in self._uveqf.keys():
                 self._logger.error("Stop UVE processing for %d:%d" % \
                         (part, self._uveqf[part]))
@@ -1481,13 +1471,37 @@ class Controller(object):
             except Exception as ex:
                 template = "Exception {0} in uve proc. Arguments:\n{1!r}"
                 messag = template.format(type(ex).__name__, ex.args)
-                self._logger.error("%s : traceback %s" % \
+                if type(ex).__name__ == 'ConnectionError':
+                    self._logger.error(messag)
+                else:
+                    self._logger.error("%s : traceback %s" % \
                                   (messag, traceback.format_exc()))
+
                 lredis = None
                 ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
                       name = 'AggregateRedis', status = ConnectionStatus.DOWN)
-                gevent.sleep(1)
                         
+                if self._ad:
+                    self._ad.publish(None)
+                oldworkerset = None
+                gevent.sleep(1)
+
+            else:
+                workerset = {}
+                for part in self._workers.keys():
+                    if self._workers[part]._up:
+                        workerset[part] = self._workers[part].acq_time()
+                if workerset != oldworkerset:
+                    data = {
+                        'ip-address': self._conf.host_ip(),
+                        'instance-id': self._instance_id,
+                        'redis-port': str(self._conf.redis_server_port()),
+                        'partitions': json.dumps(workerset)
+                    }
+                    if self._ad:
+                        self._ad.publish(json.dumps(data))
+                    oldworkerset = copy.deepcopy(workerset)
+
             curr = time.time()
             try:
 		self.run_alarm_timers(int(curr))
@@ -1496,7 +1510,7 @@ class Controller(object):
                 messag = template.format(type(ex).__name__, ex.args)
                 self._logger.error("%s : traceback %s" % \
                                   (messag, traceback.format_exc()))
-                raise SystemExit
+                raise SystemExit(1)
             if (curr - prev) < 1:
                 gevent.sleep(1 - (curr - prev))
                 self._logger.info("UVE Done")
@@ -1504,8 +1518,12 @@ class Controller(object):
                 self._logger.info("UVE Process saturated")
                 gevent.sleep(0)
 
-    def examine_uve_for_alarms(self, uve_key, uve):
+    def examine_uve_for_alarms(self, part, uve_key, uve):
         table = uve_key.split(':', 1)[0]
+        if table in _OBJECT_TABLES:
+            table_str = _OBJECT_TABLES[table].log_query_name
+        else:
+            table_str = table
         alarm_cfg = self._config_handler.alarm_config_db()
         prevt = UTCTimestampUsec()
         aproc = AlarmProcessor(self._logger)
@@ -1533,6 +1551,10 @@ class Controller(object):
                     if asm.is_new_alarm_same(new_uve_alarms[nm]):
                         del new_uve_alarms[nm]
 
+        if not self._alarmstats.has_key(part):
+            self._alarmstats[part] = {}
+        if not self._alarmstats[part].has_key(table_str):
+            self._alarmstats[part][table_str] = {}
         if len(del_types) != 0  or len(new_uve_alarms) != 0:
             self._logger.debug("Alarm[%s] Deleted %s" % \
                     (table, str(del_types)))
@@ -1557,11 +1579,21 @@ class Controller(object):
                             aproc.FreqExceededCheck[uve_key][nm])
                 asm = self.tab_alarms[table][uve_key][nm]
                 asm.set_uai(uai)
-                # go through alarm set statemachine code
+                # go through alarm set state machine code
                 asm.set_alarms()
+                # increment alarm set count here.
+                if not self._alarmstats[part][table_str].has_key(nm):
+                    self._alarmstats[part][table_str][nm] = \
+                                            AlarmgenAlarmStats(0, 0)
+                self._alarmstats[part][table_str][nm].set_count += 1
             # These alarm types are now gone
             for dnm in del_types:
                 if dnm in self.tab_alarms[table][uve_key]:
+                    # increment alarm reset count here.
+                    if not self._alarmstats[part][table_str].has_key(dnm):
+                        self._alarmstats[part][table_str][dnm] = \
+                                                AlarmgenAlarmStats(0, 0)
+                    self._alarmstats[part][table_str][dnm].reset_count += 1
                     delete_alarm = \
                         self.tab_alarms[table][uve_key][dnm].clear_alarms()
                     if delete_alarm:
@@ -1590,7 +1622,7 @@ class Controller(object):
                 else:
                     for name, data in uves.iteritems():
                         self._logger.debug('process alarm for uve %s' % (name))
-                        self.examine_uve_for_alarms(uve_type_name[0]+':'+name,
+                        self.examine_uve_for_alarms(partition, uve_type_name[0]+':'+name,
                             data.values())
                     gevent.sleep(0)
         except Exception as e:
@@ -1639,10 +1671,37 @@ class Controller(object):
         for ak,av in self.tab_alarms[tab][uv].iteritems():
             av.delete_timers()
 
+    def increment_uve_notif_count(self, part, tab, uve_type, oper):
+        """
+        This function increments operation counter for the uve_type
+        - add
+        - change
+        - remove
+        """
+        if not part in self._uvestats:
+            return
+        if tab in _OBJECT_TABLES:
+            tab_str = _OBJECT_TABLES[tab].log_query_name
+        else:
+            tab_str = tab
+        if not tab_str in self._uvestats[part]:
+            self._uvestats[part][tab_str] = {}
+        if uve_type not in self._uvestats[part][tab_str]:
+            self._uvestats[part][tab_str][uve_type] = AlarmgenUVEStats(0, 0, 0)
+        if (oper == "add"):
+            self._uvestats[part][tab_str][uve_type].add_count += 1
+        elif (oper == "change"):
+            self._uvestats[part][tab_str][uve_type].change_count += 1
+        elif (oper == "remove"):
+            self._uvestats[part][tab_str][uve_type].remove_count += 1
+        else:
+            self._logger.error("Invalid operation(%s) for [%s][%s][%s]" %
+                               (part, tab_str, uve_type))
+
     def handle_uve_notif(self, part, uves):
         """
         Call this function when a UVE has changed. This can also
-        happed when taking ownership of a partition, or when a
+        happen when taking ownership of a partition, or when a
         generator is deleted.
         Args:
             part   : Partition Number
@@ -1670,14 +1729,6 @@ class Controller(object):
             if tab not in self.tab_perf:
                 self.tab_perf[tab] = AGTabStats()
 
-            if part in self._uvestats:
-                # Record stats on UVE Keys being processed
-                if not tab in self._uvestats[part]:
-                    self._uvestats[part][tab] = {}
-                if uv in self._uvestats[part][tab]:
-                    self._uvestats[part][tab][uv] += 1
-                else:
-                    self._uvestats[part][tab][uv] = 1
 
             uve_name = uv.split(':',1)[1]
             prevt = UTCTimestampUsec() 
@@ -1719,6 +1770,7 @@ class Controller(object):
 			    sandesh=self._sandesh)
                     for rems in self.ptab_info[part][tab][uve_name].removed():
                         output[uv][rems] = None
+                        self.increment_uve_notif_count(part, tab, rems, "remove")
                 if len(self.ptab_info[part][tab][uve_name].changed()):
                     touched = True
                     self._logger.debug("UVE %s changed structs %s" % (uv, \
@@ -1726,6 +1778,7 @@ class Controller(object):
                     for chgs in self.ptab_info[part][tab][uve_name].changed():
                         output[uv][chgs] = \
                                 self.ptab_info[part][tab][uve_name].values()[chgs]
+                        self.increment_uve_notif_count(part, tab, chgs, "change")
                 if len(self.ptab_info[part][tab][uve_name].added()):
                     touched = True
                     self._logger.debug("UVE %s added structs %s" % (uv, \
@@ -1733,6 +1786,7 @@ class Controller(object):
                     for adds in self.ptab_info[part][tab][uve_name].added():
                         output[uv][adds] = \
                                 self.ptab_info[part][tab][uve_name].values()[adds]
+                        self.increment_uve_notif_count(part, tab, adds, "add")
             else:
                 for typ in types:
                     val = None
@@ -1751,6 +1805,7 @@ class Controller(object):
 				sandesh=self._sandesh)
                         for rems in self.ptab_info[part][tab][uve_name].removed():
                             output[uv][rems] = None
+                            self.increment_uve_notif_count(part, tab, rems, "remove")
                     if len(self.ptab_info[part][tab][uve_name].changed()):
                         touched = True
                         self._logger.debug("UVE %s changed structs %s" % (uve_name, \
@@ -1758,6 +1813,7 @@ class Controller(object):
                         for chgs in self.ptab_info[part][tab][uve_name].changed():
                             output[uv][chgs] = \
                                     self.ptab_info[part][tab][uve_name].values()[chgs]
+                            self.increment_uve_notif_count(part, tab, chgs, "change")
                     if len(self.ptab_info[part][tab][uve_name].added()):
                         touched = True
                         self._logger.debug("UVE %s added structs %s" % (uve_name, \
@@ -1765,6 +1821,7 @@ class Controller(object):
                         for adds in self.ptab_info[part][tab][uve_name].added():
                             output[uv][adds] = \
                                     self.ptab_info[part][tab][uve_name].values()[adds]
+                            self.increment_uve_notif_count(part, tab, adds, "add")
             if not touched:
                 del output[uv]
             local_uve = self.ptab_info[part][tab][uve_name].values()
@@ -1807,7 +1864,7 @@ class Controller(object):
                         self.send_alarm_update(tab, uv)
                 continue
             # Examine UVE to check if alarm need to be raised/deleted
-            self.examine_uve_for_alarms(uv, local_uve)
+            self.examine_uve_for_alarms(part, uv, local_uve)
         if success:
 	    uveq_trace = UVEQTrace()
 	    uveq_trace.uves = output.keys()
@@ -1954,6 +2011,7 @@ class Controller(object):
                     ph.start()
                     self._workers[partno] = ph
                     self._uvestats[partno] = {}
+                    self._alarmstats[partno] = {}
 
                 tout = 1200
                 idx = 0
@@ -1990,6 +2048,7 @@ class Controller(object):
                     self._uveqf[partno] = self._workers[partno].acq_time()
                     del self._workers[partno]
                     del self._uvestats[partno]
+                    del self._alarmstats[partno]
 
                 tout = 1200
                 idx = 0
@@ -2013,12 +2072,13 @@ class Controller(object):
                     self._logger.error("Unable to stop partitions %s" % \
                             str(parts.intersection(set(self._uveq.keys()))))
             else:
-                self._logger.info("No partition %d" % partno)
+                self._logger.error("Partitions absent in %s" % str(parts))
 
         return status
     
     def handle_PartitionOwnershipReq(self, req):
         self._logger.info("Got PartitionOwnershipReq: %s" % str(req))
+        self._disable_cb = True
         status = self.partition_change(req.partition, req.ownership)
 
         resp = PartitionOwnershipResp()
@@ -2043,23 +2103,24 @@ class Controller(object):
             din = pc.stats()
             dout = copy.deepcopy(self._uvestats[pk])
             self._uvestats[pk] = {}
+            alarm_stats_pk = copy.deepcopy(self._alarmstats[pk])
+            self._alarmstats[pk] = {}
             for ktab,tab in dout.iteritems():
-                utct = UVETableCount()
-                utct.keys = 0
-                utct.count = 0
+                uve_stats = {}
                 for uk,uc in tab.iteritems():
-                    s_keys.add(uk)
-                    n_updates += uc
-                    utct.keys += 1
-                    utct.count += uc
+                    uve_stats[uk] = AlarmgenUVEStats(uc.add_count,
+                                                     uc.change_count,
+                                                     uc.remove_count)
+
                 au_obj = AlarmgenUpdate(name=self._sandesh._source + ':' + \
                         self._sandesh._node_type + ':' + \
                         self._sandesh._module + ':' + \
                         self._sandesh._instance_id,
                         partition = pk,
                         table = ktab,
-                        o = utct,
                         i = None,
+                        uve_stats = uve_stats,
+                        alarm_stats = None,
                         sandesh=self._sandesh)
                 self._logger.debug('send output stats: %s' % (au_obj.log()))
                 au_obj.send(sandesh=self._sandesh)
@@ -2081,10 +2142,29 @@ class Controller(object):
                         self._sandesh._instance_id,
                         partition = pk,
                         table = ktab,
-                        o = None,
                         i = au_notifs,
                         sandesh=self._sandesh)
                 self._logger.debug('send input stats: %s' % (au_obj.log()))
+                au_obj.send(sandesh=self._sandesh)
+
+            # alarm stats
+            for ktab,tab in alarm_stats_pk.iteritems():
+                alarm_stats = {}
+                for uk,uc in tab.iteritems():
+                    alarm_stats[uk] = AlarmgenAlarmStats(uc.set_count,
+                                                         uc.reset_count)
+
+                au_obj = AlarmgenUpdate(name=self._sandesh._source + ':' + \
+                        self._sandesh._node_type + ':' + \
+                        self._sandesh._module + ':' + \
+                        self._sandesh._instance_id,
+                        partition = pk,
+                        table = ktab,
+                        i = None,
+                        uve_stats = None,
+                        alarm_stats = alarm_stats,
+                        sandesh=self._sandesh)
+                self._logger.debug('send alarm stats: %s' % (au_obj.log()))
                 au_obj.send(sandesh=self._sandesh)
 
         au = AlarmgenStatus()
@@ -2202,44 +2282,40 @@ class Controller(object):
             return SandeshAlarmAckResponseCode.SUCCESS
     # end alarm_ack_callback
 
-    def disc_cb_coll(self, clist):
-        '''
-        Analytics node may be brought up/down any time. For UVE aggregation,
-        alarmgen needs to know the list of all Analytics nodes (redis-uves).
-        Periodically poll the Collector list [in lieu of 
-        redi-uve nodes] from the discovery. 
-        '''
-        self._logger.error("Discovery Collector callback : %s" % str(clist))
-        newlist = []
-        for elem in clist:
-            ipaddr = elem["ip-address"]
-            cpid = 0
-            if "pid" in elem:
-                cpid = int(elem["pid"])
-            newlist.append((ipaddr, self._conf.redis_server_port(), cpid))
-        self._us.update_redis_uve_list(newlist)
-
     def disc_cb_ag(self, alist):
         '''
         Analytics node may be brought up/down any time. For partitioning,
         alarmgen needs to know the list of all Analytics nodes (alarmgens).
-        Periodically poll the alarmgen list from the discovery service
+        AnalyticsDiscovery (using zookeeper) will report this.
         '''
+        if self._disable_cb:
+            self._logger.error("Discovery AG callback IGNORED: %s" % str(alist))
+            return
         self._logger.error("Discovery AG callback : %s" % str(alist))
         newlist = []
         for elem in alist:
             ipaddr = elem["ip-address"]
             inst = elem["instance-id"]
-            newlist.append(ipaddr + ":" + inst)
+            # If AlarmGenerator sends partitions as NULL, its
+            # unable to provide service
+            if elem["partitions"]:
+                newlist.append(ipaddr + ":" + inst)
 
-        # We should always include ourselves in the list of memebers
-        newset = set(newlist)
-        newset.add(self._libpart_name)
-        newlist = list(newset)
-        if not self._libpart:
-            self._libpart = self.start_libpart(newlist)
+        # Shut down libpartition if the current alarmgen is not up
+        if self._libpart_name not in newlist:
+            if self._libpart:
+                self._libpart.close()
+                self._libpart = None
+                if not self.partition_change(set(self._workers.keys()), False):
+                    self._logger.error('AlarmGen withdraw failed!')
+                    raise SystemExit(1)
+                self._partset = set()
+                self._logger.error('AlarmGen withdrawn!')
         else:
-            self._libpart.update_cluster_list(newlist)
+            if not self._libpart:
+                self._libpart = self.start_libpart(newlist)
+            else:
+                self._libpart.update_cluster_list(newlist)
 
     def run_process_stats(self):
         while True:
@@ -2255,22 +2331,10 @@ class Controller(object):
 
     def run(self):
         self.gevs = [ gevent.spawn(self.run_process_stats),
-                      gevent.spawn(self.run_uve_processing)]
-
-        if self.disc:
-            sp1 = ServicePoller(self._logger, CollectorTrace,
-                                self.disc,
-                                COLLECTOR_DISCOVERY_SERVICE_NAME,
-                                self.disc_cb_coll, self._sandesh)
-
-            sp1.start()
-            self.gevs.append(sp1)
-
-            sp2 = ServicePoller(self._logger, AlarmgenTrace,
-                                self.disc, ALARM_GENERATOR_SERVICE_NAME,
-                                self.disc_cb_ag, self._sandesh)
-            sp2.start()
-            self.gevs.append(sp2)
+                      gevent.spawn(self.run_uve_processing),
+                      gevent.spawn(self._us.run)]
+        if self._ad is not None:
+            self._ad.start()
 
         try:
             gevent.joinall(self.gevs)
@@ -2290,6 +2354,9 @@ class Controller(object):
         self._sandesh.uninit()
         if self._config_handler:
             self._config_handler.stop()
+        if self._ad is not None:
+            self._ad.kill()
+
         l = len(self.gevs)
         for idx in range(0,l):
             self._logger.error('AlarmGen killing %d of %d' % (idx+1, l))
@@ -2303,6 +2370,24 @@ class Controller(object):
         self.stop()
         exit()
 
+    def sighup_handler(self):
+        if self._conf._args.conf_file:
+            config = ConfigParser.SafeConfigParser()
+            config.read(self._conf._args.conf_file)
+            if 'DEFAULTS' in config.sections():
+                try:
+                    collectors = config.get('DEFAULTS', 'collectors')
+                    if type(collectors) is str:
+                        collectors = collectors.split()
+                        new_chksum = hashlib.md5("".join(collectors)).hexdigest()
+                        if new_chksum != self._chksum:
+                            self._chksum = new_chksum
+                            random_collectors = random.sample(collectors, len(collectors))
+                            self._sandesh.reconfig_collectors(random_collectors)
+                except ConfigParser.NoOptionError as e:
+                    pass
+      # end sighup_handler
+
 def setup_controller(argv):
     config = CfgParser(argv)
     config.parse()
@@ -2311,6 +2396,10 @@ def setup_controller(argv):
 def main(args=None):
     controller = setup_controller(args or ' '.join(sys.argv[1:]))
     gevent.hub.signal(signal.SIGTERM, controller.sigterm_handler)
+    """ @sighup
+    SIGHUP handler to indicate configuration changes
+    """
+    gevent.hub.signal(signal.SIGHUP, controller.sighup_handler)
     gv = gevent.getcurrent()
     gv._main_obj = controller
     controller.run()

@@ -36,7 +36,7 @@ const std::string PortIpcHandler::kPortsDir = "/var/lib/contrail/ports";
 /////////////////////////////////////////////////////////////////////////////
 // Utility methods
 /////////////////////////////////////////////////////////////////////////////
-static bool GetStringMember(const rapidjson::Value &d, const char *member,
+static bool GetStringMember(const contrail_rapidjson::Value &d, const char *member,
                             std::string *data, std::string *err) {
     if (!d.HasMember(member) || !d[member].IsString()) {
         if (err) {
@@ -49,7 +49,7 @@ static bool GetStringMember(const rapidjson::Value &d, const char *member,
     return true;
 }
 
-static bool GetUint32Member(const rapidjson::Value &d, const char *member,
+static bool GetUint32Member(const contrail_rapidjson::Value &d, const char *member,
                             uint32_t *data, std::string *err) {
     if (!d.HasMember(member) || !d[member].IsInt()) {
         if (err) {
@@ -62,7 +62,7 @@ static bool GetUint32Member(const rapidjson::Value &d, const char *member,
     return true;
 }
 
-static bool GetUuidMember(const rapidjson::Value &d, const char *member,
+static bool GetUuidMember(const contrail_rapidjson::Value &d, const char *member,
                           boost::uuids::uuid *u, std::string *err) {
     if (!d.HasMember(member) || !d[member].IsString()) {
         if (err) {
@@ -156,13 +156,13 @@ void PortIpcHandler::ProcessFile(const string &file, bool check_port,
         AddVmVnPort(json, check_port, err_msg, false);
 }
 
-bool PortIpcHandler::AddPortArrayFromJson(const rapidjson::Value &d,
+bool PortIpcHandler::AddPortArrayFromJson(const contrail_rapidjson::Value &d,
                                           const string &json,
                                           VmiSubscribeEntryPtrList &req_list,
                                           bool check_port,
                                           string &err_msg) {
     for (size_t i = 0; i < d.Size(); i++) {
-        const rapidjson::Value& elem = d[i];
+        const contrail_rapidjson::Value& elem = d[i];
         if (elem.IsObject() == false) {
             err_msg = "Json Array has invalid element ==> " + json;
             CONFIG_TRACE(PortInfo, err_msg.c_str());
@@ -183,7 +183,7 @@ bool PortIpcHandler::AddPortArrayFromJson(const rapidjson::Value &d,
 
 bool PortIpcHandler::AddPortFromJson(const string &json, bool check_port,
                                      string &err_msg, bool write_file) {
-    rapidjson::Document d;
+    contrail_rapidjson::Document d;
     if (d.Parse<0>(const_cast<char *>(json.c_str())).HasParseError()) {
         err_msg = "Invalid Json string ==> " + json;
         CONFIG_TRACE(PortInfo, err_msg.c_str());
@@ -222,7 +222,7 @@ bool PortIpcHandler::AddPortFromJson(const string &json, bool check_port,
 }
 
 VmiSubscribeEntry *PortIpcHandler::MakeAddVmiUuidRequest
-(const rapidjson::Value &d, const std::string &json, bool check_port,
+(const contrail_rapidjson::Value &d, const std::string &json, bool check_port,
  std::string &err_msg) const {
     boost::uuids::uuid vmi_uuid;
     if (GetUuidMember(d, "id", &vmi_uuid, &err_msg) == false) {
@@ -279,11 +279,6 @@ VmiSubscribeEntry *PortIpcHandler::MakeAddVmiUuidRequest
             err_msg = "Invalid VN uuid";
             return NULL;
         }
-
-        if (project_uuid == nil_uuid()) {
-            err_msg = "Invalid VM project uuid";
-            return NULL;
-        }
     }
 
     string ifname;
@@ -337,7 +332,7 @@ VmiSubscribeEntry *PortIpcHandler::MakeAddVmiUuidRequest
 }
 
 bool PortIpcHandler::AddVmiUuidEntry(PortSubscribeEntryPtr entry_ref,
-                                     const rapidjson::Value &d,
+                                     const contrail_rapidjson::Value &d,
                                      bool write_file, string &err_msg) const {
     VmiSubscribeEntry *entry =
         dynamic_cast<VmiSubscribeEntry *>(entry_ref.get());
@@ -360,7 +355,7 @@ bool PortIpcHandler::AddVmiUuidEntry(PortSubscribeEntryPtr entry_ref,
     return true;
 }
 
-bool PortIpcHandler::WriteJsonToFile(const rapidjson::Value &v,
+bool PortIpcHandler::WriteJsonToFile(const contrail_rapidjson::Value &v,
                                      VmiSubscribeEntry *entry) const {
     string filename = ports_dir_ + "/" + UuidToString(entry->vmi_uuid());
     fs::path file_path(filename);
@@ -439,38 +434,46 @@ bool PortIpcHandler::IsUUID(const string &uuid_str) const {
     return true;
 }
 
+void PortIpcHandler::AddMember(const char *key, const char *value,
+        contrail_rapidjson::Document *doc) const {
+    contrail_rapidjson::Document::AllocatorType &a = doc->GetAllocator();
+    contrail_rapidjson::Value v;
+    contrail_rapidjson::Value vk;
+    doc->AddMember(vk.SetString(key, a), v.SetString(value, a), a);
+}
+
 void PortIpcHandler::MakeVmiUuidJson(const VmiSubscribeEntry *entry,
                                      string &info, bool meta_info) const {
-    rapidjson::Document doc;
+    contrail_rapidjson::Document doc;
     doc.SetObject();
-    rapidjson::Document::AllocatorType &a = doc.GetAllocator();
+    contrail_rapidjson::Document::AllocatorType &a = doc.GetAllocator();
 
     string str1 = UuidToString(entry->vmi_uuid());
-    doc.AddMember("id", str1.c_str(), a);
+    AddMember("id", str1.c_str(), &doc);
     string str2 = UuidToString(entry->vm_uuid());
-    doc.AddMember("instance-id", str2.c_str(), a);
-    doc.AddMember("display-name", entry->vm_name().c_str(), a);
+    AddMember("instance-id", str2.c_str(), &doc);
+    AddMember("display-name", entry->vm_name().c_str(), &doc);
     string str3 = entry->ip4_addr().to_string();
-    doc.AddMember("ip-address", str3.c_str(), a);
+    AddMember("ip-address", str3.c_str(), &doc);
     string str4 = entry->ip6_addr().to_string();
-    doc.AddMember("ip6-address", str4.c_str(), a);
+    AddMember("ip6-address", str4.c_str(), &doc);
     string str5 = UuidToString(entry->vn_uuid());
-    doc.AddMember("vn-id", str5.c_str(), a);
+    AddMember("vn-id", str5.c_str(), &doc);
     string str6 = UuidToString(entry->project_uuid());
-    doc.AddMember("vm-project-id", str6.c_str(), a);
-    doc.AddMember("mac-address", entry->mac_addr().c_str(), a);
-    doc.AddMember("system-name", entry->ifname().c_str(), a);
+    AddMember("vm-project-id", str6.c_str(), &doc);
+    AddMember("mac-address", entry->mac_addr().c_str(), &doc);
+    AddMember("system-name", entry->ifname().c_str(), &doc);
     doc.AddMember("type", (int)entry->type(), a);
     doc.AddMember("rx-vlan-id", (int)entry->rx_vlan_id(), a);
     doc.AddMember("tx-vlan-id", (int)entry->tx_vlan_id(), a);
     if (meta_info) {
-        doc.AddMember("author", agent_->program_name().c_str(), a);
+        AddMember("author", agent_->program_name().c_str(), &doc);
         string now = duration_usecs_to_string(UTCTimestampUsec());
-        doc.AddMember("time", now.c_str(), a);
+        AddMember("time", now.c_str(), &doc);
     }
 
-    rapidjson::StringBuffer buffer;
-    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    contrail_rapidjson::StringBuffer buffer;
+    contrail_rapidjson::PrettyWriter<contrail_rapidjson::StringBuffer> writer(buffer);
     doc.Accept(writer);
     info = buffer.GetString();
     return;
@@ -509,7 +512,7 @@ void PortIpcHandler::Shutdown() {
 }
 
 bool PortIpcHandler::BuildGatewayArrayElement
-(const rapidjson::Value &d, VirtualGatewayConfig::Subnet *entry) const {
+(const contrail_rapidjson::Value &d, VirtualGatewayConfig::Subnet *entry) const {
     if (!d.HasMember("ip-address") || !d["ip-address"].IsString()) {
         return false;
     }
@@ -527,9 +530,9 @@ bool PortIpcHandler::BuildGatewayArrayElement
 }
 
 bool PortIpcHandler::ValidGatewayJsonString
-(const rapidjson::Value &d, VirtualGatewayConfig::SubnetList *list) const {
+(const contrail_rapidjson::Value &d, VirtualGatewayConfig::SubnetList *list) const {
     for (size_t i = 0; i < d.Size(); i++) {
-        const rapidjson::Value& elem = d[i];
+        const contrail_rapidjson::Value& elem = d[i];
         if (!elem.IsObject()) {
             return false;
         }
@@ -542,7 +545,7 @@ bool PortIpcHandler::ValidGatewayJsonString
     return true;
 }
 
-bool PortIpcHandler::HasAllGatewayFields(const rapidjson::Value &d,
+bool PortIpcHandler::HasAllGatewayFields(const contrail_rapidjson::Value &d,
                                          std::string &member_err,
                                          VirtualGatewayInfo *req) const {
     if (!d.HasMember("interface") || !d["interface"].IsString()) {
@@ -580,7 +583,7 @@ bool PortIpcHandler::HasAllGatewayFields(const rapidjson::Value &d,
     return true;
 }
 
-bool PortIpcHandler::BuildGateway(const rapidjson::Value &d,
+bool PortIpcHandler::BuildGateway(const contrail_rapidjson::Value &d,
                                   const string &json, string &err_msg,
                                   VirtualGatewayInfo *req) const {
     string member_err;
@@ -595,7 +598,7 @@ bool PortIpcHandler::BuildGateway(const rapidjson::Value &d,
 }
 
 bool PortIpcHandler::AddVgwFromJson(const string &json, string &err_msg) const {
-    rapidjson::Document d;
+    contrail_rapidjson::Document d;
     if (d.Parse<0>(const_cast<char *>(json.c_str())).HasParseError()) {
         err_msg = "Invalid Json string ==> " + json;
         CONFIG_TRACE(PortInfo, err_msg.c_str());
@@ -609,7 +612,7 @@ bool PortIpcHandler::AddVgwFromJson(const string &json, string &err_msg) const {
 
     std::vector<VirtualGatewayInfo> req_list;
     for (size_t i = 0; i < d.Size(); i++) {
-        const rapidjson::Value& elem = d[i];
+        const contrail_rapidjson::Value& elem = d[i];
         if (elem.IsObject()) {
             VirtualGatewayInfo req("");
             if (!BuildGateway(elem, json, err_msg, &req)) {
@@ -634,7 +637,7 @@ bool PortIpcHandler::AddVgwFromJson(const string &json, string &err_msg) const {
 }
 
 bool PortIpcHandler::DelVgwFromJson(const string &json, string &err_msg) const {
-    rapidjson::Document d;
+    contrail_rapidjson::Document d;
     if (d.Parse<0>(const_cast<char *>(json.c_str())).HasParseError()) {
         err_msg = "Invalid Json string ==> " + json;
         CONFIG_TRACE(PortInfo, err_msg.c_str());
@@ -648,7 +651,7 @@ bool PortIpcHandler::DelVgwFromJson(const string &json, string &err_msg) const {
 
     std::vector<VirtualGatewayInfo> req_list;
     for (size_t i = 0; i < d.Size(); i++) {
-        const rapidjson::Value& elem = d[i];
+        const contrail_rapidjson::Value& elem = d[i];
         if (elem.IsObject()) {
             if (!elem.HasMember("interface") || !elem["interface"].IsString()) {
                 err_msg = "Json string does not have or has invalid value for "
@@ -680,7 +683,7 @@ bool PortIpcHandler::DelVgwFromJson(const string &json, string &err_msg) const {
 /////////////////////////////////////////////////////////////////////////////
 bool PortIpcHandler::AddVmVnPort(const string &json, bool check_port,
                                  string &err_msg, bool write_file) {
-    rapidjson::Document d;
+    contrail_rapidjson::Document d;
     if (d.Parse<0>(const_cast<char *>(json.c_str())).HasParseError()) {
         err_msg = "Invalid Json string ==> " + json;
         CONFIG_TRACE(VmVnPortInfo, err_msg.c_str());
@@ -711,7 +714,7 @@ bool PortIpcHandler::AddVmVnPort(const string &json, bool check_port,
 }
 
 bool PortIpcHandler::AddVmVnPortEntry(PortSubscribeEntryPtr entry_ref,
-                                     const rapidjson::Value &d,
+                                     const contrail_rapidjson::Value &d,
                                      bool write_file, string &err_msg) const {
     VmVnPortSubscribeEntry *entry =
         dynamic_cast<VmVnPortSubscribeEntry *>(entry_ref.get());
@@ -732,7 +735,7 @@ bool PortIpcHandler::AddVmVnPortEntry(PortSubscribeEntryPtr entry_ref,
 }
 
 VmVnPortSubscribeEntry *PortIpcHandler::MakeAddVmVnPortRequest
-(const rapidjson::Value &d, const std::string &json, bool check_port,
+(const contrail_rapidjson::Value &d, const std::string &json, bool check_port,
  std::string &err_msg) const {
     PortSubscribeEntry::Type vmi_type = PortSubscribeEntry::VMPORT;
     boost::uuids::uuid vm_uuid;
@@ -777,32 +780,31 @@ VmVnPortSubscribeEntry *PortIpcHandler::MakeAddVmVnPortRequest
 
 void PortIpcHandler::MakeVmVnPortJson(const VmVnPortSubscribeEntry *entry,
                                       string &info, bool meta_info) const {
-    rapidjson::Document doc;
+    contrail_rapidjson::Document doc;
     doc.SetObject();
-    rapidjson::Document::AllocatorType &a = doc.GetAllocator();
 
     string str2 = UuidToString(entry->vm_uuid());
-    doc.AddMember("vm-uuid", str2.c_str(), a);
-    doc.AddMember("vm-id", entry->vm_identifier().c_str(), a);
-    doc.AddMember("vm-name", entry->vm_name().c_str(), a);
-    doc.AddMember("host-ifname", entry->ifname().c_str(), a);
-    doc.AddMember("vm-ifname", entry->vm_ifname().c_str(), a);
-    doc.AddMember("vm-namespace", entry->vm_namespace().c_str(), a);
+    AddMember("vm-uuid", str2.c_str(), &doc);
+    AddMember("vm-id", entry->vm_identifier().c_str(), &doc);
+    AddMember("vm-name", entry->vm_name().c_str(), &doc);
+    AddMember("host-ifname", entry->ifname().c_str(), &doc);
+    AddMember("vm-ifname", entry->vm_ifname().c_str(), &doc);
+    AddMember("vm-namespace", entry->vm_namespace().c_str(), &doc);
 
     if (meta_info) {
-        doc.AddMember("author", agent_->program_name().c_str(), a);
+        AddMember("author", agent_->program_name().c_str(), &doc);
         string now = duration_usecs_to_string(UTCTimestampUsec());
-        doc.AddMember("time", now.c_str(), a);
+        AddMember("time", now.c_str(), &doc);
     }
 
-    rapidjson::StringBuffer buffer;
-    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    contrail_rapidjson::StringBuffer buffer;
+    contrail_rapidjson::PrettyWriter<contrail_rapidjson::StringBuffer> writer(buffer);
     doc.Accept(writer);
     info = buffer.GetString();
     return;
 }
 
-bool PortIpcHandler::WriteJsonToFile(const rapidjson::Value &v,
+bool PortIpcHandler::WriteJsonToFile(const contrail_rapidjson::Value &v,
                                      VmVnPortSubscribeEntry *entry) const {
     string filename = vmvn_dir_ + "/" + UuidToString(entry->vm_uuid());
     fs::path file_path(filename);
@@ -859,6 +861,50 @@ bool PortIpcHandler::DeleteVmVnPort(const string &json, const string &vm,
     return true;
 }
 
+bool PortIpcHandler::GetVmVnCfgPort(const string &vm, string &info) const {
+    uuid vm_uuid = StringToUuid(vm);
+    if (vm_uuid == nil_uuid()) {
+        return false;
+    }
+
+    uuid vmi_uuid = port_subscribe_table_->VmVnToVmi(vm_uuid);
+    return MakeJsonFromVmiConfig(vmi_uuid, info);
+}
+
+bool PortIpcHandler::MakeJsonFromVmiConfig(const uuid &vmi_uuid,
+                                           string &resp) const {
+    const PortSubscribeTable::VmiEntry *vmi_entry =
+        port_subscribe_table_->VmiToEntry(vmi_uuid);
+
+    if (vmi_entry == NULL) {
+        resp += "Interface not found for request. Retry";
+        return false;
+    }
+
+    contrail_rapidjson::Document doc;
+    doc.SetObject();
+    contrail_rapidjson::Document::AllocatorType &a = doc.GetAllocator();
+
+    string str1 = UuidToString(vmi_uuid);
+    AddMember("id", str1.c_str(), &doc);
+
+    string str2 = UuidToString(vmi_entry->vm_uuid_);
+    AddMember("instance-id", str2.c_str(), &doc);
+
+    string str5 = UuidToString(vmi_entry->vn_uuid_);
+    AddMember("vn-id", str5.c_str(), &doc);
+
+    AddMember("mac-address", vmi_entry->mac_.c_str(), &doc);
+    doc.AddMember("sub-interface", (bool)vmi_entry->sub_interface_, a);
+    doc.AddMember("vlan-id", (int)vmi_entry->vlan_tag_, a);
+
+    contrail_rapidjson::StringBuffer buffer;
+    contrail_rapidjson::PrettyWriter<contrail_rapidjson::StringBuffer> writer(buffer);
+    doc.Accept(writer);
+    resp = buffer.GetString();
+    return true;
+}
+
 bool PortIpcHandler::GetVmVnPort(const string &vm, string &info) const {
     uuid vm_uuid = StringToUuid(vm);
     if (vm_uuid == nil_uuid()) {
@@ -895,45 +941,45 @@ bool PortIpcHandler::MakeJsonFromVmi(const uuid &vmi_uuid, string &resp) const {
         return false;
     }
 
-    rapidjson::Document doc;
+    contrail_rapidjson::Document doc;
     doc.SetObject();
-    rapidjson::Document::AllocatorType &a = doc.GetAllocator();
+    contrail_rapidjson::Document::AllocatorType &a = doc.GetAllocator();
 
     string str1 = UuidToString(vmi->GetUuid());
-    doc.AddMember("id", str1.c_str(), a);
+    AddMember("id", str1.c_str(), &doc);
 
     string str2 = UuidToString(vm->GetUuid());
-    doc.AddMember("instance-id", str2.c_str(), a);
+    AddMember("instance-id", str2.c_str(), &doc);
 
     string str3 = vmi->primary_ip_addr().to_string();
-    doc.AddMember("ip-address", str3.c_str(), a);
+    AddMember("ip-address", str3.c_str(), &doc);
     doc.AddMember("plen", ipam->plen, a);
 
     string str4 = vmi->primary_ip6_addr().to_string();
-    doc.AddMember("ip6-address", str4.c_str(), a);
+    AddMember("ip6-address", str4.c_str(), &doc);
 
     string str5 = UuidToString(vn->GetUuid());
-    doc.AddMember("vn-id", str5.c_str(), a);
+    AddMember("vn-id", str5.c_str(), &doc);
 
     string str6 = UuidToString(vmi->vm_project_uuid());
-    doc.AddMember("vm-project-id", str6.c_str(), a);
+    AddMember("vm-project-id", str6.c_str(), &doc);
 
     string str7 = vmi->vm_mac().ToString();
-    doc.AddMember("mac-address", str7.c_str(), a);
-    doc.AddMember("system-name", vmi->name().c_str(), a);
+    AddMember("mac-address", str7.c_str(), &doc);
+    AddMember("system-name", vmi->name().c_str(), &doc);
     doc.AddMember("rx-vlan-id", (int)vmi->rx_vlan_id(), a);
     doc.AddMember("tx-vlan-id", (int)vmi->tx_vlan_id(), a);
     string str8 = ipam->dns_server.to_v4().to_string();
-    doc.AddMember("dns-server", str8.c_str(), a);
+    AddMember("dns-server", str8.c_str(), &doc);
     string str9 = ipam->default_gw.to_v4().to_string();
-    doc.AddMember("gateway", str9.c_str(), a);
+    AddMember("gateway", str9.c_str(), &doc);
 
-    doc.AddMember("author", agent_->program_name().c_str(), a);
+    AddMember("author", agent_->program_name().c_str(), &doc);
     string now = duration_usecs_to_string(UTCTimestampUsec());
-    doc.AddMember("time", now.c_str(), a);
+    AddMember("time", now.c_str(), &doc);
 
-    rapidjson::StringBuffer buffer;
-    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    contrail_rapidjson::StringBuffer buffer;
+    contrail_rapidjson::PrettyWriter<contrail_rapidjson::StringBuffer> writer(buffer);
     doc.Accept(writer);
     resp = buffer.GetString();
     return true;

@@ -66,7 +66,7 @@ class Collector(object):
                  syslog_port = False, protobuf_port = True,
                  kafka = None, is_dup = False,
                  cassandra_user = None, cassandra_password = None,
-                 zookeeper = None):
+                 zookeeper = None, cluster_id='', sandesh_config=None):
         self.analytics_fixture = analytics_fixture
         if kafka is None:
             self.kafka_port = None
@@ -90,12 +90,17 @@ class Collector(object):
            self.redis_password = str(self._redis_uve.password)
         if self._is_dup is True:
             self.hostname = self.hostname+'dup'
-        self._generator_id = self.hostname+':'+NodeTypeNames[NodeType.ANALYTICS]+\
-                            ':'+ModuleNames[Module.COLLECTOR]+':0'
         self.cassandra_user = analytics_fixture.cassandra_user
         self.cassandra_password = analytics_fixture.cassandra_password
         self.zk_port = zookeeper.port
+        self._generator_id = None
+        self.cluster_id = cluster_id
+        self.sandesh_config = sandesh_config
     # end __init__
+
+    def set_sandesh_config(self, sandesh_config):
+        self.sandesh_config = sandesh_config
+    # end set_sandesh_config
 
     def get_addr(self):
         return '127.0.0.1:'+str(self.listen_port)
@@ -127,7 +132,8 @@ class Collector(object):
 
     def start(self):
         assert(self._instance == None)
-        self._log_file = '/tmp/vizd.messages.' + str(self._redis_uve.port)
+        self._log_file = '/tmp/vizd.messages.%s.%d' % \
+                (os.getenv('USER', 'None'), self._redis_uve.port)
         subprocess.call(['rm', '-rf', self._log_file])
         if (self.ipfix_port == 0):
             self.ipfix_port = AnalyticsFixture.get_free_udp_port()
@@ -173,11 +179,29 @@ class Collector(object):
             args.append(str(4))
         args.append('--DEFAULT.zookeeper_server_list')
         args.append('127.0.0.1:%d' % self.zk_port)
+        if self.cluster_id:
+            args.append('--DATABASE.cluster_id')
+            args.append(self.cluster_id)
+        if self.sandesh_config:
+            if 'sandesh_ssl_enable' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_ssl_enable')
+                args.append(self.sandesh_config['sandesh_ssl_enable'])
+            if 'sandesh_keyfile' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_keyfile')
+                args.append(self.sandesh_config['sandesh_keyfile'])
+            if 'sandesh_certfile' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_certfile')
+                args.append(self.sandesh_config['sandesh_certfile'])
+            if 'sandesh_ca_cert' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_ca_cert')
+                args.append(self.sandesh_config['sandesh_ca_cert'])
         self._logger.info('Setting up Vizd: %s' % (' '.join(args))) 
         ports, self._instance = \
                          self.analytics_fixture.start_with_ephemeral_ports(
                          "contrail-collector", ["http","collector"],
                          args, AnalyticsFixture.enable_core)
+        self._generator_id = self.hostname+':'+NodeTypeNames[NodeType.ANALYTICS]+\
+                            ':'+ModuleNames[Module.COLLECTOR]+':'+str(self._instance.pid)
         self.http_port = ports["http"]
         self.listen_port = ports["collector"]
         return self.verify_setup()
@@ -202,15 +226,16 @@ class Collector(object):
 # end class Collector
 
 class AlarmGen(object):
-    def __init__(self, primary_collector, secondary_collector, kafka_port,
-                 analytics_fixture, logger, partitions, is_dup=False):
-        self.primary_collector = primary_collector
-        self.secondary_collector = secondary_collector
+    def __init__(self, collectors, kafka_port,
+                 analytics_fixture, logger, zoo, is_dup=False,
+                 sandesh_config=None):
+        self.collectors = collectors
         self.analytics_fixture = analytics_fixture
         self.http_port = 0
         self.kafka_port = kafka_port
-        self.partitions = partitions
+        self._zoo = zoo
         self.hostname = socket.gethostname()
+        self.sandesh_config = sandesh_config
         self._instance = None
         self._logger = logger
         self._generator_id = self.hostname+':'+NodeTypeNames[NodeType.ANALYTICS]+\
@@ -220,19 +245,15 @@ class AlarmGen(object):
            self.redis_password = str(self.analytics_fixture.redis_uves[0].password)
     # end __init__
 
+    def set_sandesh_config(self, sandesh_config):
+        self.sandesh_config = sandesh_config
+    # end set_sandesh_config
+
     def get_introspect(self):
         if self.http_port != 0:
             return VerificationAlarmGen("127.0.0.1", self.http_port)
         else:
             return None
-
-    def set_primary_collector(self, collector):
-        self.primary_collector = collector
-    # end set_primary_collector
-
-    def set_secondary_collector(self, collector):
-        self.secondary_collector = collector
-    # end set_secondary_collector
 
     def get_generator_id(self):
         return self._generator_id
@@ -240,7 +261,8 @@ class AlarmGen(object):
 
     def start(self):
         assert(self._instance == None)
-        self._log_file = '/tmp/alarmgen.messages.' + str(os.getpid())
+        self._log_file = '/tmp/alarmgen.messages.%s.%d' % \
+                (os.getenv('USER', 'None'), os.getpid())
         subprocess.call(['rm', '-rf', self._log_file])
         args = ['contrail-alarm-gen',
                 '--http_server_port', str(self.http_port),
@@ -255,12 +277,31 @@ class AlarmGen(object):
         for redis_uve in self.analytics_fixture.redis_uves:
             args.append('127.0.0.1:'+str(redis_uve.port))
         args.append('--collectors')
-        args.append(self.primary_collector)
-        if self.secondary_collector is not None:
-            args.append(self.secondary_collector)
+        for collector in self.collectors:
+            args.append(collector)
         if self.redis_password is not None:
             args.append('--redis_password')
             args.append(self.redis_password)
+        part = "0"
+        if self._zoo is not None:
+            part = "4"
+            args.append('--zk_list')
+            args.append('127.0.0.1:'+str(self._zoo))
+        args.append('--partitions')
+        args.append(part)
+        if self.sandesh_config:
+            if 'sandesh_ssl_enable' in self.sandesh_config and \
+                self.sandesh_config['sandesh_ssl_enable']:
+                args.append('--sandesh_ssl_enable')
+            if 'sandesh_keyfile' in self.sandesh_config:
+                args.append('--sandesh_keyfile')
+                args.append(self.sandesh_config['sandesh_keyfile'])
+            if 'sandesh_certfile' in self.sandesh_config:
+                args.append('--sandesh_certfile')
+                args.append(self.sandesh_config['sandesh_certfile'])
+            if 'sandesh_ca_cert' in self.sandesh_config:
+                args.append('--sandesh_ca_cert')
+                args.append(self.sandesh_config['sandesh_ca_cert'])
 
         self._logger.info('Setting up AlarmGen: %s' % ' '.join(args))
         ports, self._instance = \
@@ -268,24 +309,21 @@ class AlarmGen(object):
                          "contrail-alarm-gen", ["http"],
                          args, None, False)
         self.http_port = ports["http"]
-        if self.http_port: 
-            for part in range(0,self.partitions):
-                self.analytics_fixture.set_alarmgen_partition(part,1)
         return self.verify_setup()
     # end start
 
     def verify_setup(self):
         if not self.http_port:
             return False
-        for part in range(0,self.partitions):
-           if not self.analytics_fixture.verify_alarmgen_partition(part,'true'):
-               return False
+        if self._zoo is not None:
+            for part in range(0,4):
+                if not self.analytics_fixture.verify_alarmgen_partition(\
+                        part,'true'):
+                    return False
         return True
 
     def stop(self):
         if self._instance is not None:
-            for part in range(0,self.partitions):
-                self.analytics_fixture.set_alarmgen_partition(part,0)
             rcode = self.analytics_fixture.process_stop(
                 "contrail-alarm-gen:%s" % str(self.http_port),
                 self._instance, self._log_file, is_py=False, del_log=False)
@@ -297,16 +335,14 @@ class AlarmGen(object):
 # end class AlarmGen
 
 class OpServer(object):
-    def __init__(self, primary_collector, secondary_collector, redis_port,
-                 analytics_fixture, logger, admin_user, admin_password,
-                 kafka=False, is_dup=False):
-        self.primary_collector = primary_collector
-        self.secondary_collector = secondary_collector
+    def __init__(self, collectors, analytics_fixture, logger,
+                 admin_user, admin_password, zoo=None, is_dup=False,
+                 sandesh_config=None):
+        self.collectors = collectors
         self.analytics_fixture = analytics_fixture
         self.http_port = 0
         self.hostname = socket.gethostname()
-        self._kafka = kafka
-        self._redis_port = redis_port
+        self._zoo = zoo
         self._instance = None
         self._logger = logger
         self._is_dup = is_dup
@@ -321,15 +357,12 @@ class OpServer(object):
         self.admin_port = AnalyticsFixture.get_free_port()
         self.admin_user = admin_user
         self.admin_password = admin_password
+        self.sandesh_config = sandesh_config
     # end __init__
 
-    def set_primary_collector(self, collector):
-        self.primary_collector = collector
-    # end set_primary_collector
-
-    def set_secondary_collector(self, collector):
-        self.secondary_collector = collector
-    # end set_secondary_collector
+    def set_sandesh_config(self, sandesh_config):
+        self.sandesh_config = sandesh_config
+    # end set_sandesh_config
 
     def get_generator_id(self):
         return self._generator_id
@@ -337,13 +370,10 @@ class OpServer(object):
 
     def start(self):
         assert(self._instance == None)
-        self._log_file = '/tmp/opserver.messages.' + str(self.admin_port)
-        part = "0"
-        if self._kafka:
-            part = "4"
+        self._log_file = '/tmp/opserver.messages.%s.%d' % \
+                (os.getenv('USER', 'None'), self.admin_port)
         subprocess.call(['rm', '-rf', self._log_file])
         args = ['contrail-analytics-api',
-                '--redis_server_port', str(self._redis_port),
                 '--redis_query_port',
                 str(self.analytics_fixture.redis_uves[0].port),
                 '--cassandra_server_list', '127.0.0.1:' +
@@ -351,11 +381,17 @@ class OpServer(object):
                 '--http_server_port', str(self.http_port),
                 '--log_file', self._log_file,
                 '--log_level', "SYS_INFO",
-                '--partitions', part,
                 '--rest_api_port', str(self.rest_api_port),
                 '--admin_port', str(self.admin_port),
                 '--admin_user', self.admin_user,
                 '--admin_password', self.admin_password]
+        part = "0"
+        if self._zoo is not None:
+            part = "4"
+            args.append('--zk_list')
+            args.append('127.0.0.1:'+str(self._zoo))
+        args.append('--partitions')
+        args.append(part)
         if self.analytics_fixture.redis_uves[0].password:
             args.append('--redis_password')
             args.append(self.analytics_fixture.redis_uves[0].password)
@@ -363,9 +399,8 @@ class OpServer(object):
         for redis_uve in self.analytics_fixture.redis_uves:
             args.append('127.0.0.1:'+str(redis_uve.port))
         args.append('--collectors')
-        args.append(self.primary_collector)
-        if self.secondary_collector is not None:
-            args.append(self.secondary_collector)
+        for collector in self.collectors:
+            args.append(collector)
         if self._is_dup:
             args.append('--dup')
 
@@ -375,6 +410,22 @@ class OpServer(object):
         if self.analytics_fixture.cassandra_password is not None:
             args.append('--cassandra_password')
             args.append(self.analytics_fixture.cassandra_password)
+        if self.analytics_fixture.cluster_id:
+            args.append('--cluster_id')
+            args.append(self.analytics_fixture.cluster_id)
+        if self.sandesh_config:
+            if 'sandesh_ssl_enable' in self.sandesh_config and \
+                self.sandesh_config['sandesh_ssl_enable']:
+                args.append('--sandesh_ssl_enable')
+            if 'sandesh_keyfile' in self.sandesh_config:
+                args.append('--sandesh_keyfile')
+                args.append(self.sandesh_config['sandesh_keyfile'])
+            if 'sandesh_certfile' in self.sandesh_config:
+                args.append('--sandesh_certfile')
+                args.append(self.sandesh_config['sandesh_certfile'])
+            if 'sandesh_ca_cert' in self.sandesh_config:
+                args.append('--sandesh_ca_cert')
+                args.append(self.sandesh_config['sandesh_ca_cert'])
         self._logger.info('Setting up OpServer: %s' % ' '.join(args))
         ports, self._instance = \
                          self.analytics_fixture.start_with_ephemeral_ports(
@@ -409,10 +460,9 @@ class OpServer(object):
 # end class OpServer
 
 class QueryEngine(object):
-    def __init__(self, primary_collector, secondary_collector, 
-                 analytics_fixture, logger):
-        self.primary_collector = primary_collector
-        self.secondary_collector = secondary_collector
+    def __init__(self, collectors, analytics_fixture, logger, cluster_id='',
+                 sandesh_config=None):
+        self.collectors = collectors
         self.analytics_fixture = analytics_fixture
         self.listen_port = AnalyticsFixture.get_free_port()
         self.http_port = 0
@@ -426,15 +476,13 @@ class QueryEngine(object):
            self.redis_password = str(self.analytics_fixture.redis_uves[0].password) 
         self._generator_id = self.hostname+':'+NodeTypeNames[NodeType.ANALYTICS]+\
                             ':'+ModuleNames[Module.QUERY_ENGINE]+':0'
+        self.cluster_id = cluster_id
+        self.sandesh_config = sandesh_config
     # end __init__
 
-    def set_primary_collector(self, collector):
-        self.primary_collector = collector
-    # end set_primary_collector
-
-    def set_secondary_collector(self, collector):
-        self.secondary_collector = collector
-    # end set_secondary_collector
+    def set_sandesh_config(self, sandesh_config):
+        self.sandesh_config = sandesh_config
+    # end set_sandesh_config
 
     def get_generator_id(self):
         return self._generator_id
@@ -442,7 +490,8 @@ class QueryEngine(object):
 
     def start(self, analytics_start_time=None):
         assert(self._instance == None)
-        self._log_file = '/tmp/qed.messages.' + str(self.listen_port)
+        self._log_file = '/tmp/qed.messages.%s.%d' % \
+                (os.getenv('USER', 'None'), self.listen_port)
         subprocess.call(['rm', '-rf', self._log_file])
         args = [self.analytics_fixture.builddir + '/query_engine/qedt',
                 '--REDIS.port', str(self.analytics_fixture.redis_uves[0].port),
@@ -450,25 +499,38 @@ class QueryEngine(object):
                 str(self.analytics_fixture.cassandra_port),
                 '--DEFAULT.http_server_port', str(self.listen_port),
                 '--DEFAULT.log_local', '--DEFAULT.log_level', 'SYS_DEBUG',
-                '--DEFAULT.log_file', self._log_file,
-                '--DEFAULT.collectors', self.primary_collector]
+                '--DEFAULT.log_file', self._log_file]
+        for collector in self.collectors:
+            args += ['--DEFAULT.collectors', collector]
         if self.redis_password:
             args.append('--REDIS.password')
             args.append(self.redis_password)
-        if self.secondary_collector is not None:
-            args.append('--DEFAULT.collectors')
-            args.append(self.secondary_collector)
         if analytics_start_time is not None:
             args += ['--DEFAULT.start_time', str(analytics_start_time)]
         if self.cassandra_user is not None:
             args += ['--CASSANDRA.cassandra_user', self.cassandra_user]
         if self.cassandra_password is not None:
             args += ['--CASSANDRA.cassandra_password', self.cassandra_password]
+        if self.cluster_id:
+            args += ['--DATABASE.cluster_id', self.cluster_id]
+        if self.sandesh_config:
+            if 'sandesh_ssl_enable' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_ssl_enable')
+                args.append(self.sandesh_config['sandesh_ssl_enable'])
+            if 'sandesh_keyfile' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_keyfile')
+                args.append(self.sandesh_config['sandesh_keyfile'])
+            if 'sandesh_certfile' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_certfile')
+                args.append(self.sandesh_config['sandesh_certfile'])
+            if 'sandesh_ca_cert' in self.sandesh_config:
+                args.append('--SANDESH.sandesh_ca_cert')
+                args.append(self.sandesh_config['sandesh_ca_cert'])
         self._logger.info('Setting up contrail-query-engine: %s' % ' '.join(args))
         ports, self._instance = \
                          self.analytics_fixture.start_with_ephemeral_ports(
                          "contrail-query-engine", ["http"],
-                         args, None)
+                         args, AnalyticsFixture.enable_core)
         self.http_port = ports["http"]
         return self.verify_setup()
     # end start
@@ -482,7 +544,7 @@ class QueryEngine(object):
         if self._instance is not None:
             rcode = self.analytics_fixture.process_stop(
                 "contrail-query-engine:%s" % str(self.listen_port),
-                self._instance, self._log_file)
+                self._instance, self._log_file, False)
             #assert(rcode == 0)
             self._instance = None
     # end stop
@@ -490,13 +552,9 @@ class QueryEngine(object):
 # end class QueryEngine
 
 class Redis(object):
-    def __init__(self, port, builddir, password=None):
+    def __init__(self, builddir, password=None):
         self.builddir = builddir
-        self.port = port
-        if self.port == -1:
-            self.use_global = False
-        else:
-            self.use_global = True
+        self.port = AnalyticsFixture.get_free_port()
         self.password = password
         self.running = False
     # end __init__
@@ -504,18 +562,11 @@ class Redis(object):
     def start(self):
         assert(self.running == False)
         self.running = True
-        if not self.use_global:
-            if self.port == -1:
-                self.port = AnalyticsFixture.get_free_port()
-            ret = mockredis.start_redis(self.port, self.password)
-            assert(ret)
-        else:
-            redish = redis.StrictRedis("127.0.0.1", self.port, password=self.password)
-            redish.flushall()
+        ret = mockredis.start_redis(self.port, self.password)
+        return(ret)
 
     # end start
     def stop(self):
-        assert(not self.use_global)
         if self.running:
             mockredis.stop_redis(self.port, self.password)
             self.running =  False
@@ -571,14 +622,14 @@ class AnalyticsFixture(fixtures.Fixture):
     ADMIN_USER = 'test'
     ADMIN_PASSWORD = 'password'
 
-    def __init__(self, logger, builddir, redis_port, cassandra_port,
+    def __init__(self, logger, builddir, cassandra_port,
                  ipfix_port = False, sflow_port = False, syslog_port = False,
                  protobuf_port = False, noqed=False, collector_ha_test=False,
                  redis_password=None, start_kafka=False,
-                 cassandra_user=None, cassandra_password=None):
+                 cassandra_user=None, cassandra_password=None, cluster_id="",
+                 sandesh_config=None):
 
         self.builddir = builddir
-        self.redis_port = redis_port
         self.cassandra_port = cassandra_port
         self.ipfix_port = ipfix_port
         self.sflow_port = sflow_port
@@ -598,19 +649,23 @@ class AnalyticsFixture(fixtures.Fixture):
         self.zookeeper = None
         self.admin_user = AnalyticsFixture.ADMIN_USER
         self.admin_password = AnalyticsFixture.ADMIN_PASSWORD
+        self.cluster_id = cluster_id
+        self.sandesh_config = sandesh_config
 
     def setUp(self):
         super(AnalyticsFixture, self).setUp()
 
-        self.redis_uves = [Redis(self.redis_port, self.builddir,
+        self.redis_uves = [Redis(self.builddir,
                                  self.redis_password)]
         self.redis_uves[0].start()
 
         self.zookeeper = Zookeeper()
         self.zookeeper.start()
 
+        zkport = None
         if self.start_kafka:
-            self.kafka = Kafka(self.zookeeper.port)
+            zkport = self.zookeeper.port
+            self.kafka = Kafka(zkport)
             self.kafka.start()
 
         self.collectors = [Collector(self, self.redis_uves[0], self.logger,
@@ -619,7 +674,9 @@ class AnalyticsFixture(fixtures.Fixture):
                            syslog_port = self.syslog_port,
                            protobuf_port = self.protobuf_port,
                            kafka = self.kafka,
-                           zookeeper = self.zookeeper)]
+                           zookeeper = self.zookeeper,
+                           cluster_id=self.cluster_id,
+                           sandesh_config=self.sandesh_config)]
         if not self.collectors[0].start():
             self.logger.error("Collector did NOT start")
             return 
@@ -628,42 +685,40 @@ class AnalyticsFixture(fixtures.Fixture):
             self.logger.error("Collector UVE not in Redis")
             return
 
-        primary_collector = self.collectors[0].get_addr()
-        secondary_collector = None
         if self.collector_ha_test:
-            self.redis_uves.append(Redis(-1, self.builddir,
+            self.redis_uves.append(Redis(self.builddir,
                                          self.redis_password))
             self.redis_uves[1].start()
             self.collectors.append(Collector(self, self.redis_uves[1],
                                              self.logger,
                                              kafka = self.kafka,
                                              is_dup = True,
-                                             zookeeper = self.zookeeper))
+                                             zookeeper = self.zookeeper,
+                                             cluster_id=self.cluster_id,
+                                             sandesh_config=self.sandesh_config))
             if not self.collectors[1].start():
-                self.logger.error("Secondary Collector did NOT start")
-            secondary_collector = self.collectors[1].get_addr()
+                self.logger.error("Second Collector did NOT start")
 
-        opkafka = False
-        if self.kafka:
-            opkafka = True
-        self.opserver = OpServer(primary_collector, secondary_collector, 
-                                 self.redis_uves[0].port, 
+        self.opserver = OpServer(self.get_collectors(),
                                  self, self.logger, self.admin_user,
-                                 self.admin_password, opkafka)
+                                 self.admin_password, zkport,
+                                 sandesh_config=self.sandesh_config)
         if not self.opserver.start():
             self.logger.error("OpServer did NOT start")
         self.opserver_port = self.get_opserver_port()
         
         if self.kafka is not None: 
-            self.alarmgen = AlarmGen(primary_collector, secondary_collector,
-                                     self.kafka.port, self, self.logger, 4)
+            self.alarmgen = AlarmGen(self.get_collectors(), self.kafka.port,
+                                     self, self.logger, zkport,
+                                     sandesh_config=self.sandesh_config)
             if not self.alarmgen.start():
                 self.logger.error("AlarmGen did NOT start")
 
         if not self.noqed:
-            self.query_engine = QueryEngine(primary_collector, 
-                                        secondary_collector, 
-                                        self, self.logger)
+            self.query_engine = QueryEngine(self.get_collectors(),
+                                            self, self.logger,
+                                            cluster_id=self.cluster_id,
+                                            sandesh_config=self.sandesh_config)
             if not self.query_engine.start():
                 self.logger.error("QE did NOT start")
     # end setUp
@@ -673,13 +728,32 @@ class AnalyticsFixture(fixtures.Fixture):
     # end get_collector
 
     def get_collectors(self):
-        return ['127.0.0.1:'+str(self.collectors[0].listen_port), 
-                '127.0.0.1:'+str(self.collectors[1].listen_port)]
-    # end get_collectors 
+        collector_ips = []
+        for collector in self.collectors:
+            collector_ips.append('127.0.0.1:'+str(collector.listen_port))
+        return collector_ips
+    # end get_collectors
 
     def get_opserver_port(self):
         return self.opserver.admin_port
     # end get_opserver_port
+
+    def get_generator_list(self, collector):
+        generator_list = []
+        vcl = VerificationCollector('127.0.0.1', collector.http_port)
+        try:
+           genlist = vcl.get_generators()['generators']
+           self.logger.info('Generator list from collector %s -> %s' %
+               (collector.hostname, str(genlist)))
+           for gen in genlist:
+               if gen['state'] != 'Established':
+                   continue
+               generator_list.append('%s:%s:%s:%s' % (gen['source'],
+                   gen['node_type'], gen['module_id'], gen['instance_id']))
+        except Exception as err:
+            self.logger.error('Failed to get generator list: %s' % err)
+        return generator_list
+    # end get_generator_list
 
     def verify_on_setup(self):
         result = True
@@ -829,28 +903,13 @@ class AnalyticsFixture(fixtures.Fixture):
             return True
 
     @retry(delay=1, tries=30)
-    def verify_generator_list(self, collector, exp_genlist):
-        vcl = VerificationCollector('127.0.0.1', collector.http_port)
-        try:
-            genlist = vcl.get_generators()['generators']
-            self.logger.info('generator list: ' + str(genlist))
-            self.logger.info('exp generator list: ' + str(exp_genlist))
-            if len(genlist) != len(exp_genlist):
-                return False
-            for mod in exp_genlist:
-                gen_found = False
-                for gen in genlist:
-                    if mod == gen['module_id']:
-                        gen_found = True
-                        if gen['state'] != 'Established':
-                            return False
-                        break
-                if gen_found is not True:
-                    return False
-        except Exception as err:
-            self.logger.error('Exception: %s' % err)
-            return False
-        return True
+    def verify_generator_list(self, collectors, exp_genlist):
+        actual_genlist = []
+        for collector in collectors:
+            actual_genlist.extend(self.get_generator_list(collector))
+        self.logger.info('generator list: ' + str(set(actual_genlist)))
+        self.logger.info('exp generator list: ' + str(set(exp_genlist)))
+        return set(actual_genlist) == set(exp_genlist)
 
     @retry(delay=1, tries=10)
     def verify_generator_uve_list(self, exp_gen_list):
@@ -993,8 +1052,7 @@ class AnalyticsFixture(fixtures.Fixture):
         vns = VerificationOpsSrv('127.0.0.1', self.opserver_port,
             self.admin_user, self.admin_password)
         prefix_key_value_map = {'Source': socket.gethostname()[:-1],
-            'ModuleId': 'contrail-', 'Messagetype': 'Collector',
-            'Category': 'Discovery'}
+            'ModuleId': 'contrail-', 'Messagetype': 'Collector'}
         for key, value in prefix_key_value_map.iteritems():
             self.logger.info('verify where_prefix: %s = %s*' % (key, value))
             res = vns.post_query('MessageTable', start_time='-10m',
@@ -2713,6 +2771,24 @@ class AnalyticsFixture(fixtures.Fixture):
         return actual_alarms == expected_alarms
     # end verify_alarm_data
 
+    def get_db_read_stats_from_qe(self, qe, table_name, is_stats_table=False, field_name='reads'):
+        qe_introspect = VerificationGenerator('127.0.0.1', qe.http_port)
+        try:
+            stats_info = qe_introspect.get_db_read_stats()
+            table_stat_info=''
+            if is_stats_table == False:
+                # parse through stats of physical tables
+                table_stat_info = stats_info['table_info']
+            else:
+                # parse through stats of logical tables
+                table_stat_info = stats_info['statistics_table_info']
+            for table in table_stat_info:
+                if (str(table['table_name']).strip() == str(table_name).strip()):
+                    return table[field_name]
+        except Exception as err:
+            self.logger.error('Exception: %s' % err)
+    # end get_db_read_stats_from_qe
+
     def cleanUp(self):
         self.logger.info('cleanUp started')
 
@@ -2729,8 +2805,7 @@ class AnalyticsFixture(fixtures.Fixture):
         for collector in self.collectors:
             collector.stop()
         for redis_uve in self.redis_uves:
-            if not redis_uve.use_global:
-                redis_uve.stop()
+            redis_uve.stop()
         if self.kafka is not None:
             self.kafka.stop()
         self.zookeeper.stop()

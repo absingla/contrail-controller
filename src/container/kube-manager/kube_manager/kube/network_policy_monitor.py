@@ -1,47 +1,43 @@
+#
+# Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
+#
 import json
 import gevent
 from kube_monitor import KubeMonitor
+from kube_manager.common.kube_config_db import NetworkPolicyKM
 
 class NetworkPolicyMonitor(KubeMonitor):
 
     def __init__(self, args=None, logger=None, q=None, network_policy_db=None):
-        super(NetworkPolicyMonitor, self).__init__(args, logger, q)
-        self.handle = self.register_monitor('networkpolicies', beta=True)
+        super(NetworkPolicyMonitor, self).__init__(args, logger, q,
+            NetworkPolicyKM, resource_name='networkpolicies', beta=True)
+        self.init_monitor()
         self.logger.info("NetworkPolicyMonitor init done.");
-        self._network_policy_db = network_policy_db
 
-    def _process_network_policy_event(self, event):
-        print("Put %s %s %s:%s" % (event['type'],
-            event['object'].get('kind'),
-            event['object']['metadata'].get('namespace'),
-            event['object']['metadata'].get('name')))
-
+    def process_event(self, event):
         np_data = event['object']
         event_type = event['type']
+        kind = event['object'].get('kind')
+        namespace = event['object']['metadata'].get('namespace')
+        name = event['object']['metadata'].get('name')
 
-        if self._network_policy_db:
-            np_uuid = self._network_policy_db.get_uuid(np_data)
+        if self.db:
+            np_uuid = self.db.get_uuid(np_data)
             if event_type != 'DELETED':
                 # Update Network Policy DB.
-                np = self._network_policy_db.locate(np_uuid)
+                np = self.db.locate(np_uuid)
                 np.update(np_data)
             else:
                 # Remove the entry from Network Policy DB.
-                self._network_policy_db.delete(np_uuid)
+                self.db.delete(np_uuid)
 
+        print("%s - Got %s %s %s:%s"
+              %(self.name, event_type, kind, namespace, name))
+        self.logger.debug("%s - Got %s %s %s:%s"
+              %(self.name, event_type, kind, namespace, name))
         self.q.put(event)
 
-    def process(self):
-        line = next(self.handle)
-        if not line:
-            return
-
-        try:
-            self._process_network_policy_event(json.loads(line))
-        except ValueError:
-            print("Invalid JSON data from response stream:%s" % line)
-
-    def network_policy_callback(self):
+    def event_callback(self):
         while True:
             self.process()
             gevent.sleep(0)

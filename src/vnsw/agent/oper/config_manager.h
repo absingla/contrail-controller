@@ -39,6 +39,23 @@
 
 class ConfigManagerNodeList;
 class ConfigManagerDeviceVnList;
+class IFMapAgentLinkTable;
+
+class ConfigHelper {
+public:
+    ConfigHelper(const ConfigManager *mgr, const Agent *agent);
+    virtual ~ConfigHelper() { }
+
+    IFMapNode *GetOtherAdjacentNode(IFMapLink *link,
+                                    IFMapNode *node);
+    IFMapNode *FindLink(const char *type, IFMapNode *node);
+
+private:
+    const ConfigManager *mgr_;
+    IFMapAgentLinkTable *link_table_;
+    const Agent *agent_;
+    DISALLOW_COPY_AND_ASSIGN(ConfigHelper);
+};
 
 class ConfigManager {
 public:
@@ -62,7 +79,6 @@ public:
     std::string ProfileInfo() const;
 
     void AddVmiNode(IFMapNode *node);
-    void DelVmiNode(IFMapNode *node);
     uint32_t VmiNodeCount() const;
 
     void AddLogicalInterfaceNode(IFMapNode *node);
@@ -74,6 +90,11 @@ public:
     void AddQosConfigNode(IFMapNode *node);
     void AddQosQueueNode(IFMapNode *node);
     void AddForwardingClassNode(IFMapNode *node);
+    void AddGlobalQosConfigNode(IFMapNode *node);
+    void AddNetworkIpamNode(IFMapNode *node);
+    void AddVirtualDnsNode(IFMapNode *node);
+    void AddGlobalVrouterNode(IFMapNode *node);
+    void AddVirtualRouterNode(IFMapNode *node);
     uint32_t LogicalInterfaceNodeCount() const;
 
     void AddPhysicalDeviceNode(IFMapNode *node);
@@ -82,6 +103,7 @@ public:
     void DelPhysicalDeviceVn(const boost::uuids::uuid &dev,
                              const boost::uuids::uuid &vn);
     void AddHealthCheckServiceNode(IFMapNode *node);
+    void AddBridgeDomainNode(IFMapNode *node);
     uint32_t PhysicalDeviceVnCount() const;
     bool CanUseNode(IFMapNode *node);
     bool CanUseNode(IFMapNode *node, IFMapAgentTable *table);
@@ -90,6 +112,8 @@ public:
     IFMapNode * FindAdjacentIFMapNode(IFMapNode *node,
             const char *type);
     void NodeResync(IFMapNode *node);
+    ConfigHelper *helper() const {return helper_.get();}
+
     Agent *agent() { return agent_; }
 
 private:
@@ -111,8 +135,17 @@ private:
     std::auto_ptr<ConfigManagerNodeList> qos_queue_list_;
     std::auto_ptr<ConfigManagerNodeList> forwarding_class_list_;
     std::auto_ptr<ConfigManagerDeviceVnList> device_vn_list_;
+    std::auto_ptr<ConfigManagerNodeList> bridge_domain_list_;
+
+    // Lists of IFMapNodes without corresponding oper db-tables
+    std::auto_ptr<ConfigManagerNodeList> global_vrouter_list_;
+    std::auto_ptr<ConfigManagerNodeList> virtual_router_list_;
+    std::auto_ptr<ConfigManagerNodeList> global_qos_config_list_;
+    std::auto_ptr<ConfigManagerNodeList> network_ipam_list_;
+    std::auto_ptr<ConfigManagerNodeList> virtual_dns_list_;
 
     uint64_t process_config_count_[kMaxTimeout + 1];
+    boost::scoped_ptr<ConfigHelper> helper_;
     DISALLOW_COPY_AND_ASSIGN(ConfigManager);
 };
 

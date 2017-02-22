@@ -68,11 +68,6 @@ bool CollectorSummaryLogger(Collector *collector, const string & hostname,
         vector<string> ip_list;
         ip_list.push_back(Collector::GetSelfIp());
         state.set_self_ip_list(ip_list);
-        vector<string> list;
-        MiscUtils::GetCoreFileList(Collector::GetProgramName(), list);
-        if (list.size()) {
-            state.set_core_files_list(list);
-        }
         first = false;
     }
     if (!build_info_set) {
@@ -221,8 +216,6 @@ int main(int argc, char *argv[])
                         Sandesh::StringToLevel(options.log_level())));
     }
     vector<string> cassandra_servers(options.cassandra_server_list());
-    vector<string> cassandra_ips;
-    vector<int> cassandra_ports;
     for (vector<string>::const_iterator it = cassandra_servers.begin();
          it != cassandra_servers.end(); it++) {
         string cassandra_server(*it);
@@ -231,13 +224,20 @@ int main(int argc, char *argv[])
         tokenizer tokens(cassandra_server, sep);
         tokenizer::iterator tit = tokens.begin();
         string cassandra_ip(*tit);
-        cassandra_ips.push_back(cassandra_ip);
+        options.add_cassandra_ip(cassandra_ip);
         ++tit;
         string port(*tit);
         int cassandra_port;
         stringToInteger(port, cassandra_port);
-        cassandra_ports.push_back(cassandra_port);
+        options.add_cassandra_port(cassandra_port);
     }
+
+    /*
+     * the option is enable_db_messages_keyword_writes, but the variable
+     * passed along is options.disable_db_messages_keyword_writes
+     * so we need to update it in the options.cassandra_options_
+     */
+    options.disable_db_messages_keyword_writes();
 
     LOG(INFO, "COLLECTOR LISTEN PORT: " << options.collector_port());
     LOG(INFO, "COLLECTOR REDIS UVE PORT: " << options.redis_port());
@@ -255,6 +255,12 @@ int main(int argc, char *argv[])
         options.collector_protobuf_port(&protobuf_port);
     if (protobuf_server_enabled) {
         LOG(INFO, "COLLECTOR PROTOBUF LISTEN PORT: " << protobuf_port);
+    }
+    uint16_t structured_syslog_port(0);
+    bool structured_syslog_server_enabled =
+        options.collector_structured_syslog_port(&structured_syslog_port);
+    if (structured_syslog_server_enabled) {
+        LOG(INFO, "COLLECTOR STRUCTURED SYSLOG LISTEN PORT: " << structured_syslog_port);
     }
     string kstr("");
     vector<string> kbl = options.kafka_broker_list();
@@ -282,7 +288,22 @@ int main(int argc, char *argv[])
     // 6. Kafka Pub
     // 7. Database protobuf if enabled
 
-    std::vector<ConnectionTypeName> expected_connections = boost::assign::list_of
+    std::vector<ConnectionTypeName> expected_connections; 
+    if (options.discovery_server().empty()) {
+        expected_connections = boost::assign::list_of
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::COLLECTOR)->second, ""))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::REDIS_UVE)->second, "To"))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::REDIS_UVE)->second, "From"))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::DATABASE)->second,
+                             hostname+":Global"))
+         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
+                             ConnectionType::KAFKA_PUB)->second, kstr));
+    } else {
+        expected_connections = boost::assign::list_of
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
                              ConnectionType::COLLECTOR)->second, ""))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
@@ -300,6 +321,8 @@ int main(int argc, char *argv[])
                              hostname+":Global"))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
                              ConnectionType::KAFKA_PUB)->second, kstr));
+    }
+
     ConnectionStateManager::
         GetInstance()->Init(*a_evm->io_service(),
             hostname, module_id, instance_id,
@@ -321,6 +344,7 @@ int main(int argc, char *argv[])
                 options.analytics_config_audit_ttl()));
     ttl_map.insert(std::make_pair(TtlType::GLOBAL_TTL,
                 options.analytics_data_ttl()));
+    options.set_ttl_map(ttl_map);
 
     std::string zookeeper_server_list(options.zookeeper_server_list());
     bool use_zookeeper = !zookeeper_server_list.empty();
@@ -328,8 +352,8 @@ int main(int argc, char *argv[])
             options.collector_port(),
             protobuf_server_enabled,
             protobuf_port,
-            cassandra_ips,
-            cassandra_ports,
+            structured_syslog_server_enabled,
+            structured_syslog_port,
             string("127.0.0.1"),
             options.redis_port(),
             options.redis_password(),
@@ -340,15 +364,11 @@ int main(int argc, char *argv[])
             options.partitions(),
             options.dup(),
             options.kafka_prefix(),
-            ttl_map, options.cassandra_user(),
-            options.cassandra_password(),
-            options.cassandra_compaction_strategy(),
+            options.get_cassandra_options(),
             zookeeper_server_list,
-            use_zookeeper, options.disable_all_db_writes(),
-            options.disable_db_statistics_writes(),
-            options.disable_db_messages_writes(),
-            !options.enable_db_messages_keyword_writes(),
-            options.get_db_write_options());
+            use_zookeeper,
+            options.get_db_write_options(),
+            options.sandesh_config());
 #if 0
     // initialize python/c++ API
     Py_InitializeEx(0);
@@ -372,7 +392,7 @@ int main(int argc, char *argv[])
             g_vns_constants.NodeTypeNames.find(node_type)->second,
             instance_id,
             a_evm, "127.0.0.1", coll_port,
-            options.http_server_port(), &vsc));
+            options.http_server_port(), &vsc, options.sandesh_config()));
     if (!success) {
         LOG(ERROR, "SANDESH: Initialization FAILED ... exiting");
         ShutdownServers(&analytics, NULL);
@@ -402,7 +422,7 @@ int main(int argc, char *argv[])
             g_vns_constants.ModuleNames.find(Module::COLLECTOR)->second;
         ds_client = new DiscoveryServiceClient(a_evm, dss_ep, client_name);
         ds_client->Init();
-        analytics.UpdateUdc(&options, ds_client);
+        analytics.UpdateConfigDBConnection(&options, ds_client);
     } else {
         LOG (ERROR, "Invalid Discovery Server hostname or ip " <<
                      options.discovery_server());

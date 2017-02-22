@@ -886,10 +886,10 @@ class VncApi(object):
         obj_class = utils.obj_type_to_vnc_class(res_type, __name__)
 
         key_name = obj_class.prop_map_field_key_names[obj_field]
-        if isinstance(value, GeneratedsSuper):
-            return getattr(value, key_name)
+        if isinstance(elem, GeneratedsSuper):
+            return getattr(elem, key_name)
 
-        return value[key_name]
+        return elem[key_name]
     # end _prop_map_get_elem_key
 
     @check_homepage
@@ -1171,8 +1171,17 @@ class VncApi(object):
         query_params['shared'] = shared
 
         if filters:
-            query_params['filters'] = ','.join(
-                '%s==%s' %(k,json.dumps(v)) for k,v in filters.items())
+            query_params['filters'] = ''
+            for key, value in filters.items():
+                if isinstance(value, list):
+                    query_params['filters'] += ','.join(
+                        '%s==%s' % (key, json.dumps(val)) for val in value)
+                else:
+                    query_params['filters'] += ('%s==%s' %
+                                                (key, json.dumps(value)))
+                query_params['filters'] += ','
+            # Remove last trailing comma
+            query_params['filters'] = query_params['filters'][:-1]
 
         if self._exclude_hrefs is not None:
             query_params['exclude_hrefs'] = True
@@ -1296,5 +1305,10 @@ class VncApi(object):
         data = {'aaa-mode': mode}
         content =  self._request_server(rest.OP_PUT, url, json.dumps(data))
         return json.loads(content)
+
+    def get_aaa_mode(self):
+        url = self._action_uri['aaa-mode']
+        rv =  self._request_server(rest.OP_GET, url)
+        return rv
 
 #end class VncApi

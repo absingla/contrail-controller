@@ -45,7 +45,8 @@ RouteKSyncEntry::RouteKSyncEntry(RouteKSyncObject* obj,
     tunnel_type_(entry->tunnel_type_),
     wait_for_traffic_(entry->wait_for_traffic_),
     local_vm_peer_route_(entry->local_vm_peer_route_),
-    flood_(entry->flood_), ethernet_tag_(entry->ethernet_tag_) {
+    flood_(entry->flood_), ethernet_tag_(entry->ethernet_tag_),
+    layer2_control_word_(entry->layer2_control_word_) {
 }
 
 RouteKSyncEntry::RouteKSyncEntry(RouteKSyncObject* obj, const AgentRoute *rt) :
@@ -53,7 +54,7 @@ RouteKSyncEntry::RouteKSyncEntry(RouteKSyncObject* obj, const AgentRoute *rt) :
     vrf_id_(rt->vrf_id()), mac_(), nh_(NULL), label_(0), proxy_arp_(false),
     flood_dhcp_(false), tunnel_type_(TunnelType::DefaultType()),
     wait_for_traffic_(false), local_vm_peer_route_(false),
-    flood_(false), ethernet_tag_(0) {
+    flood_(false), ethernet_tag_(0), layer2_control_word_(false) {
     boost::system::error_code ec;
     rt_type_ = rt->GetTableType();
     switch (rt_type_) {
@@ -433,13 +434,29 @@ bool RouteKSyncEntry::Sync(DBEntry *e) {
         ret = true;
     }
 
+    if (route->GetActivePath()) {
+        if (layer2_control_word_ != route->GetActivePath()->layer2_control_word()) {
+            layer2_control_word_ = route->GetActivePath()->layer2_control_word();
+            ret = true;
+        }
+    }
+
     if (rt_type_ == Agent::INET4_UNICAST || rt_type_ == Agent::INET6_UNICAST) {
         VrfKSyncObject *obj = ksync_obj_->ksync()->vrf_ksync_obj();
         const InetUnicastRouteEntry *uc_rt =
             static_cast<const InetUnicastRouteEntry *>(e);
         MacAddress mac = MacAddress::ZeroMac();
+        bool wait_for_traffic = false;
+
         if (obj->RouteNeedsMacBinding(uc_rt)) {
             mac = obj->GetIpMacBinding(uc_rt->vrf(), addr_);
+            wait_for_traffic = obj->GetIpMacWaitForTraffic(uc_rt->vrf(), addr_);
+        }
+
+        if (wait_for_traffic_ == false &&
+            wait_for_traffic_ != wait_for_traffic) {
+            wait_for_traffic_ = wait_for_traffic;
+            ret = true;
         }
 
         if (mac != mac_) {
@@ -566,6 +583,10 @@ int RouteKSyncEntry::Encode(sandesh_op::type op, uint8_t replace_plen,
         if (flood_) {
             flags |= VR_RT_ARP_FLOOD_FLAG;
         }
+    }
+
+    if (layer2_control_word_) {
+        flags |= VR_BE_L2_CONTROL_DATA_FLAG;
     }
 
     encoder.set_rtr_label_flags(flags);
@@ -840,7 +861,8 @@ void VrfKSyncObject::EvpnRouteTableNotify(DBTablePartBase *partition,
     } else {
         AddIpMacBinding(evpn_rt->vrf(), evpn_rt->ip_addr(),
                         evpn_rt->mac(),
-                        evpn_rt->GetActivePath()->path_preference().preference());
+                        evpn_rt->GetActivePath()->path_preference().preference(),
+                        evpn_rt->WaitForTraffic());
     }
     return;
 }
@@ -961,7 +983,8 @@ void VrfKSyncObject::NotifyUcRoute(VrfEntry *vrf, VrfState *state,
 
 void VrfKSyncObject::AddIpMacBinding(VrfEntry *vrf, const IpAddress &ip,
                                      const MacAddress &mac,
-                                     const PathPreference::Preference &pref) {
+                                     const PathPreference::Preference &pref,
+                                     bool wait_for_traffic) {
     VrfState *state = static_cast<VrfState *>
         (vrf->GetState(vrf->get_table(), vrf_listener_id_));
     if (state == NULL)
@@ -969,12 +992,13 @@ void VrfKSyncObject::AddIpMacBinding(VrfEntry *vrf, const IpAddress &ip,
 
     IpToMacBinding::iterator it = state->ip_mac_binding_.find(ip);
 
+    PathPreference path_pref(0, pref, wait_for_traffic, false);
     if (it == state->ip_mac_binding_.end()) {
-        MacBinding mac_binding(mac, pref);
+        MacBinding mac_binding(mac, path_pref);
         state->ip_mac_binding_.insert(
                 std::pair<IpAddress, MacBinding>(ip, mac_binding));
     } else {
-        it->second.set_mac(pref, mac);
+        it->second.set_mac(path_pref, mac);
     }
 
     NotifyUcRoute(vrf, state, ip);
@@ -995,6 +1019,22 @@ void VrfKSyncObject::DelIpMacBinding(VrfEntry *vrf, const IpAddress &ip,
         }
     }
     NotifyUcRoute(vrf, state, ip);
+}
+
+bool VrfKSyncObject::GetIpMacWaitForTraffic(VrfEntry *vrf,
+                                            const IpAddress &ip) const {
+    VrfState *state = static_cast<VrfState *>
+        (vrf->GetState(vrf->get_table(), vrf_listener_id_));
+    if (state == NULL) {
+        return false;
+    }
+
+    IpToMacBinding::const_iterator it = state->ip_mac_binding_.find(ip);
+    if (it == state->ip_mac_binding_.end()) {
+        return false;
+    }
+
+    return  it->second.WaitForTraffic();
 }
 
 MacAddress VrfKSyncObject::GetIpMacBinding(VrfEntry *vrf,

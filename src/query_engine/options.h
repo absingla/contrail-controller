@@ -4,6 +4,7 @@
 
 #include <boost/program_options.hpp>
 #include "io/event_manager.h"
+#include "sandesh/sandesh.h"
 
 #define ANALYTICS_DATA_TTL_DEFAULT 48 // g_viz_constants.AnalyticsTTL
 
@@ -21,6 +22,9 @@ public:
     }
     const std::vector<std::string> default_collector_server_list() const {
         return default_collector_server_list_;
+    }
+    std::vector<std::string> randomized_collector_server_list() const {
+        return randomized_collector_server_list_;
     }
     const bool collectors_configured() const {
         return collector_server_list_.size() > 0;
@@ -51,9 +55,13 @@ public:
     const std::string syslog_facility() const { return syslog_facility_; }
     const int analytics_data_ttl() const { return analytics_data_ttl_; }
     const bool test_mode() const { return test_mode_; }
+    const std::string cluster_id() const { return cluster_id_; }
     const std::string cassandra_user() const { return cassandra_user_; }
     const std::string cassandra_password() const { return cassandra_password_; }
     const uint32_t sandesh_send_rate_limit() const { return send_ratelimit_; }
+    const SandeshConfig &sandesh_config() const { return sandesh_config_; }
+
+    void ParseReConfig();
 
 private:
 
@@ -72,6 +80,7 @@ private:
             boost::program_options::options_description &cmdline_options);
     void Initialize(EventManager &evm,
                     boost::program_options::options_description &options);
+    uint32_t GenerateHash(std::vector<std::string> &);
 
     std::vector<std::string> config_file_;
     std::string discovery_server_;
@@ -100,9 +109,13 @@ private:
     uint32_t send_ratelimit_;
     std::vector<std::string> cassandra_server_list_;
     std::vector<std::string> collector_server_list_;
+    std::vector<std::string> randomized_collector_server_list_;
+    uint32_t collector_chksum_;
     std::vector<std::string> default_collector_server_list_;
+    SandeshConfig sandesh_config_;
 
     boost::program_options::options_description config_file_options_;
+    std::string cluster_id_;
     std::string cassandra_user_;
     std::string cassandra_password_;
 };

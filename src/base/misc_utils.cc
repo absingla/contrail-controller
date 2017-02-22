@@ -4,14 +4,12 @@
 
 #include <fstream>
 #include <sstream>
-#include <stdlib.h> 
+#include <stdlib.h>
 #include <base/misc_utils.h>
 #include <base/logging.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "boost/filesystem/operations.hpp"
-#include "boost/filesystem/path.hpp"
 #include "base/sandesh/version_types.h"
 #include "base/logging.h"
 #include "rapidjson/document.h"
@@ -19,11 +17,8 @@
 #include "rapidjson/stringbuffer.h"
 
 using namespace std;
-namespace fs = boost::filesystem;
 const std::string MiscUtils::ContrailVersionCmd = "/usr/bin/contrail-version";
-const std::string MiscUtils::CoreFileDir = "/var/crashes/";
-const int MiscUtils::MaxCoreFiles = 5;
-const map<MiscUtils::BuildModule, string> MiscUtils::BuildModuleNames = 
+const map<MiscUtils::BuildModule, string> MiscUtils::BuildModuleNames =
     MiscUtils::MapInit();
 
 SandeshTraceBufferPtr VersionTraceBuf(SandeshTraceBufferCreate(
@@ -41,36 +36,6 @@ void MiscUtils::LogVersionInfo(const string build_info, Category::type categ) {
     VERSION_TRACE(VersionInfoTrace, build_info);
     if (!LoggingDisabled()) {
         VERSION_LOG(VersionInfoLog, categ, build_info);
-    }
-}
-
-void MiscUtils::GetCoreFileList(string prog, vector<string> &list) {
-    if (!fs::exists(CoreFileDir) || !fs::is_directory(CoreFileDir)) {
-        return;
-    }
-    FileMMap files_map;
-    
-    string filename = "core." + BaseName(prog) + ".";
-
-    fs::path dir_path(CoreFileDir.c_str());
-    fs::directory_iterator end_itr;
-    for (fs::directory_iterator itr(dir_path); itr != end_itr; itr++) {
-        if (fs::is_regular_file(itr->status())) {
-            const string file = itr->path().filename().generic_string();
-            size_t pos = file.find(filename);
-            if (pos != 0) {
-                continue;
-            }
-            files_map.insert(FileMMap::value_type(fs::last_write_time
-                                                    (itr->path()), file));
-        }
-    }
-    FileMMap::reverse_iterator rit;
-    int count = 0;
-    for (rit = files_map.rbegin(); rit != files_map.rend() && 
-        count < MaxCoreFiles; ++rit) {
-        count++;
-        list.push_back(rit->second);
     }
 }
 
@@ -107,7 +72,7 @@ bool MiscUtils::GetVersionInfoInternal(const string &cmd, string &rpm_version,
     return true;
 }
 
-bool MiscUtils::GetContrailVersionInfo(BuildModule id, string &rpm_version, 
+bool MiscUtils::GetContrailVersionInfo(BuildModule id, string &rpm_version,
                                        string &build_num) {
     bool ret;
     stringstream cmd;
@@ -127,29 +92,31 @@ bool MiscUtils::GetContrailVersionInfo(BuildModule id, string &rpm_version,
     return ret;
 }
 
-bool MiscUtils::GetBuildInfo(BuildModule id, const string &build_info, 
+bool MiscUtils::GetBuildInfo(BuildModule id, const string &build_info,
                              string &result) {
     string rpm_version;
     string build_num;
 
     bool ret = GetContrailVersionInfo(id, rpm_version, build_num);
-    rapidjson::Document d;
+    contrail_rapidjson::Document d;
     if (d.Parse<0>(const_cast<char *>(build_info.c_str())).HasParseError()) {
         result = build_info;
         return false;
     }
-    rapidjson::Value& fields = d["build-info"];
+    contrail_rapidjson::Value& fields = d["build-info"];
     if (!fields.IsArray()) {
         result = build_info;
         return false;
     }
-    fields[0u].AddMember("build-id", const_cast<char *>(rpm_version.c_str()), 
-                         d.GetAllocator());
-    fields[0u].AddMember("build-number", const_cast<char *>(build_num.c_str()), 
-                         d.GetAllocator());
 
-    rapidjson::StringBuffer strbuf;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(strbuf);
+    contrail_rapidjson::Value v;
+    fields[0u].AddMember("build-id",
+        v.SetString(rpm_version.c_str(), d.GetAllocator()), d.GetAllocator());
+    fields[0u].AddMember("build-number",
+        v.SetString(build_num.c_str(), d.GetAllocator()), d.GetAllocator());
+
+    contrail_rapidjson::StringBuffer strbuf;
+    contrail_rapidjson::Writer<contrail_rapidjson::StringBuffer> writer(strbuf);
     d.Accept(writer);
     result = strbuf.GetString();
     return ret;

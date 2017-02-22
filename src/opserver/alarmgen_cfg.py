@@ -60,15 +60,20 @@ class CfgParser(object):
             'rabbitmq_password' : 'guest',
             'rabbitmq_vhost'    : None,
             'rabbitmq_ha_mode'  : False,
-            'redis_uve_list'    : ['127.0.0.1:6379'],
+            'rabbitmq_use_ssl'  : False,
+            'kombu_ssl_version': '',
+            'kombu_ssl_keyfile': '',
+            'kombu_ssl_certfile': '',
+            'kombu_ssl_ca_certs': '',
             'alarmgen_list'     : ['127.0.0.1:0'],
             'sandesh_send_rate_limit' : SandeshSystem.get_sandesh_send_rate_limit(),
-            'kafka_prefix'     :'',
+            'cluster_id'     :'',
         }
 
         redis_opts = {
             'redis_server_port'  : 6379,
             'redis_password'     : None,
+            'redis_uve_list'    : ['127.0.0.1:6379'],
         }
 
         disc_opts = {
@@ -85,6 +90,14 @@ class CfgParser(object):
             'admin_tenant_name': 'default-domain'
         }
 
+        sandesh_opts = {
+            'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+            'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+            'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+            'sandesh_ssl_enable': False,
+            'introspect_ssl_enable': False
+        }
+
         config = None
         if args.conf_file:
             config = ConfigParser.SafeConfigParser()
@@ -98,6 +111,8 @@ class CfgParser(object):
                 disc_opts.update(dict(config.items('DISCOVERY')))
             if 'KEYSTONE' in config.sections():
                 keystone_opts.update(dict(config.items('KEYSTONE')))
+            if 'SANDESH' in config.sections():
+                sandesh_opts.update(dict(config.items('SANDESH')))
         # Override with CLI options
         # Don't surpress add_help here so it will handle -h
         parser = argparse.ArgumentParser(
@@ -112,6 +127,7 @@ class CfgParser(object):
         defaults.update(redis_opts)
         defaults.update(disc_opts)
         defaults.update(keystone_opts)
+        defaults.update(sandesh_opts)
         parser.set_defaults(**defaults)
         parser.add_argument("--host_ip",
             help="Host IP address")
@@ -177,8 +193,8 @@ class CfgParser(object):
             nargs="+")
         parser.add_argument("--sandesh_send_rate_limit", type=int,
             help="Sandesh send rate limit in messages/sec")
-        parser.add_argument("--kafka_prefix",
-            help="System Prefix for Kafka")
+        parser.add_argument("--cluster_id",
+            help="Analytics Cluster Id")
         parser.add_argument("--auth_host",
             help="ip of keystone server")
         parser.add_argument("--auth_protocol",
@@ -191,6 +207,16 @@ class CfgParser(object):
             help="Password of keystone admin user")
         parser.add_argument("--admin_tenant_name",
             help="Tenant name for keystone admin user")
+        parser.add_argument("--sandesh_keyfile",
+            help="Sandesh ssl private key")
+        parser.add_argument("--sandesh_certfile",
+            help="Sandesh ssl certificate")
+        parser.add_argument("--sandesh_ca_cert",
+            help="Sandesh CA ssl certificate")
+        parser.add_argument("--sandesh_ssl_enable", action="store_true",
+            help="Enable ssl for sandesh connection")
+        parser.add_argument("--introspect_ssl_enable", action="store_true",
+            help="Enable ssl for introspect connection")
         self._args = parser.parse_args(remaining_argv)
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
@@ -200,8 +226,9 @@ class CfgParser(object):
             self._args.zk_list= self._args.zk_list.split()
         if type(self._args.redis_uve_list) is str:
             self._args.redis_uve_list = self._args.redis_uve_list.split()
-        if type(self._args.redis_uve_list) is str:
+        if type(self._args.alarmgen_list) is str:
             self._args.alarmgen_list = self._args.alarmgen_list.split()
+        self._args.conf_file = args.conf_file
 
     def _pat(self):
         if self.__pat is None:
@@ -270,7 +297,7 @@ class CfgParser(object):
         return self._args.sandesh_send_rate_limit
 
     def kafka_prefix(self):
-        return self._args.kafka_prefix
+        return self._args.cluster_id
 
     def rabbitmq_params(self):
         return {'servers': self._args.rabbitmq_server_list,
@@ -278,7 +305,12 @@ class CfgParser(object):
                 'user': self._args.rabbitmq_user,
                 'password': self._args.rabbitmq_password,
                 'vhost': self._args.rabbitmq_vhost,
-                'ha_mode': self._args.rabbitmq_ha_mode}
+                'ha_mode': self._args.rabbitmq_ha_mode,
+                'use_ssl': self._args.rabbitmq_use_ssl,
+                'ssl_version': self._args.kombu_ssl_version,
+                'ssl_keyfile': self._args.kombu_ssl_keyfile,
+                'ssl_certfile': self._args.kombu_ssl_certfile,
+                'ssl_ca_certs': self._args.kombu_ssl_ca_certs}
 
     def keystone_params(self):
         return {'auth_host': self._args.auth_host,
@@ -287,3 +319,10 @@ class CfgParser(object):
                 'admin_user': self._args.admin_user,
                 'admin_password': self._args.admin_password,
                 'admin_tenant_name': self._args.admin_tenant_name}
+
+    def sandesh_config(self):
+        return SandeshConfig(self._args.sandesh_keyfile,
+                             self._args.sandesh_certfile,
+                             self._args.sandesh_ca_cert,
+                             self._args.sandesh_ssl_enable,
+                             self._args.introspect_ssl_enable)

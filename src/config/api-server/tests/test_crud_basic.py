@@ -2,6 +2,8 @@
 # Copyright (c) 2013 Juniper Networks, Inc. All rights reserved.
 #
 import gevent
+import gevent.monkey
+gevent.monkey.patch_all()
 import os
 import sys
 import socket
@@ -39,6 +41,7 @@ import cfgm_common
 from cfgm_common import vnc_plugin_base
 from cfgm_common import imid
 from cfgm_common import vnc_cgitb
+from cfgm_common import db_json_exim
 vnc_cgitb.enable(format='text')
 
 sys.path.append('../common/tests')
@@ -50,6 +53,20 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 class TestFixtures(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestFixtures, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestFixtures, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_fixture_ref(self):
         proj_fixt = self.useFixture(
             ProjectTestFixtureGen(self._vnc_lib, project_name='admin'))
@@ -150,6 +167,20 @@ class TestFixtures(test_case.ApiServerTestCase):
 # end class TestFixtures
 
 class TestListUpdate(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestListUpdate, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestListUpdate, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_policy_create_w_rules(self):
         proj_fixt = self.useFixture(ProjectTestFixtureGen(self._vnc_lib))
 
@@ -233,6 +264,20 @@ class TestListUpdate(test_case.ApiServerTestCase):
 # end class TestListUpdate
 
 class TestCrud(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestCrud, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestCrud, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_create_using_lib_api(self):
         vn_obj = VirtualNetwork('vn-%s' %(self.id()))
         self._vnc_lib.virtual_network_create(vn_obj)
@@ -359,9 +404,137 @@ class TestCrud(test_case.ApiServerTestCase):
         with ExpectedException(BadRequest) as e:
             port_id = self._vnc_lib.virtual_machine_interface_create(port_obj)
        #end test_service_interface_type_value
+
+    def test_physical_router_credentials(self):
+        user_cred_create = UserCredentials(username="test_user", password="test_pswd")
+        phy_rout = PhysicalRouter(physical_router_user_credentials=user_cred_create)
+        self._vnc_lib.physical_router_create(phy_rout)
+
+        phy_rout_obj = self._vnc_lib.physical_router_read(id=phy_rout.uuid)
+        user_cred_read = phy_rout_obj.get_physical_router_user_credentials()
+        if user_cred_read.password != '**Password Hidden**':
+            raise Exception("ERROR: physical-router: password should be hidden")
+       #end test_physical_router_credentials
+
+    def test_bridge_domain_with_multiple_bd_in_vn(self):
+        vn1_name = self.id() + '-vn-1'
+        vn1 = VirtualNetwork(vn1_name)
+        logger.info('Creating VN %s', vn1_name)
+        self._vnc_lib.virtual_network_create(vn1)
+
+        vmi_name = self.id() + '-port'
+        logger.info('Creating port %s', vmi_name)
+        vmi = VirtualMachineInterface(vmi_name, parent_obj=Project())
+        vmi.add_virtual_network(vn1)
+        self._vnc_lib.virtual_machine_interface_create(vmi)
+
+        bd1_name = self.id() + '-bd-1'
+        bd1 = BridgeDomain(bd1_name, parent_obj=vn1)
+        bd1.set_isid(200200)
+        logger.info('Creating Bridge Domain %s', bd1_name)
+        self._vnc_lib.bridge_domain_create(bd1)
+
+        bd2_name = self.id() + '-bd-2'
+        bd2 = BridgeDomain(bd2_name, parent_obj=vn1)
+        bd2.set_isid(300300)
+        logger.info('Creating Bridge Domain %s', bd2_name)
+        with ExpectedException(BadRequest) as e:
+            self._vnc_lib.bridge_domain_create(bd2)
+        # end test_bridge_domain_with_multiple_bd_in_vn
+
+    def test_bridge_domain_link_vmi_and_bd_in_different_vn(self):
+        vn1_name = self.id() + '-vn-1'
+        vn1 = VirtualNetwork(vn1_name)
+        logger.info('Creating VN %s', vn1_name)
+        self._vnc_lib.virtual_network_create(vn1)
+
+        vn2_name = self.id() + '-vn-2'
+        vn2 = VirtualNetwork(vn2_name)
+        logger.info('Creating VN %s', vn2_name)
+        self._vnc_lib.virtual_network_create(vn2)
+
+        vmi1_name = self.id() + '-port-1'
+        logger.info('Creating port %s', vmi1_name)
+        vmi1 = VirtualMachineInterface(vmi1_name, parent_obj=Project())
+        vmi1.add_virtual_network(vn1)
+        self._vnc_lib.virtual_machine_interface_create(vmi1)
+
+        vmi2_name = self.id() + '-port-2'
+        logger.info('Creating port %s', vmi2_name)
+        vmi2 = VirtualMachineInterface(vmi2_name, parent_obj=Project())
+        vmi2.add_virtual_network(vn2)
+        self._vnc_lib.virtual_machine_interface_create(vmi2)
+
+        bd1_name = self.id() + '-bd-1'
+        bd1 = BridgeDomain(bd1_name, parent_obj=vn1)
+        bd1.set_isid(200200)
+        logger.info('Creating Bridge Domain %s', bd1_name)
+        self._vnc_lib.bridge_domain_create(bd1)
+
+        bd_ref_data1 = BridgeDomainMembershipType(vlan_tag=0)
+        vmi2.add_bridge_domain(bd1, bd_ref_data1)
+        with ExpectedException(BadRequest) as e:
+            self._vnc_lib.virtual_machine_interface_update(vmi2)
+
+        bd_ref_data2 = BridgeDomainMembershipType(vlan_tag=0)
+        vmi1.add_bridge_domain(bd1, bd_ref_data2)
+        self._vnc_lib.virtual_machine_interface_update(vmi1)
+        # end test_bridge_domain_link_vmi_and_bd_in_different_vn
+
+    def test_bridge_domain_delete_vn_ref_with_bd_link(self):
+        vn1_name = self.id() + '-vn-1'
+        vn1 = VirtualNetwork(vn1_name)
+        logger.info('Creating VN %s', vn1_name)
+        self._vnc_lib.virtual_network_create(vn1)
+
+        vmi_name = self.id() + '-port'
+        logger.info('Creating port %s', vmi_name)
+        vmi = VirtualMachineInterface(vmi_name, parent_obj=Project())
+        vmi.add_virtual_network(vn1)
+        self._vnc_lib.virtual_machine_interface_create(vmi)
+
+        bd1_name = self.id() + '-bd-1'
+        bd1 = BridgeDomain(bd1_name, parent_obj=vn1)
+        bd1.set_isid(200200)
+        logger.info('Creating Bridge Domain %s', bd1_name)
+        self._vnc_lib.bridge_domain_create(bd1)
+
+        bd_ref_data = BridgeDomainMembershipType(vlan_tag=0)
+        vmi.add_bridge_domain(bd1, bd_ref_data)
+        self._vnc_lib.virtual_machine_interface_update(vmi)
+
+        # Try to delete the VN link with BD ref
+        vmi_temp = vmi
+        vmi_temp.del_virtual_network(vn1)
+        with ExpectedException(BadRequest) as e:
+            self._vnc_lib.virtual_machine_interface_update(vmi_temp)
+
+        # Delete the BD ref
+        vmi.del_bridge_domain(bd1)
+        self._vnc_lib.virtual_machine_interface_update(vmi)
+
+        vmi.del_virtual_network(vn1)
+        self._vnc_lib.virtual_machine_interface_update(vmi)
+        # end test_bridge_domain_with_multiple_bd_in_vn
+
+
 # end class TestCrud
 
 class TestVncCfgApiServer(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestVncCfgApiServer, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestVncCfgApiServer, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_fq_name_to_id_http_post(self):
         test_obj = self._create_test_object()
         test_uuid = self._vnc_lib.fq_name_to_id('virtual-network', test_obj.get_fq_name())
@@ -754,7 +927,8 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         self.assertThat(rb_obj.display_name, Equals('foobar'))
 
     def test_floatingip_as_instanceip(self):
-        ipam_fixt = self.useFixture(NetworkIpamTestFixtureGen(self._vnc_lib))
+        ipam_fixt = self.useFixture(NetworkIpamTestFixtureGen(
+            self._vnc_lib, network_ipam_name='ipam-%s' % self.id()))
 
         project_fixt = self.useFixture(ProjectTestFixtureGen(self._vnc_lib, 'default-project'))
 
@@ -781,7 +955,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ip_allocated = fip_fixt.getObj().floating_ip_address
 
         logger.info("Creating auto-alloc instance-ip, expecting an error")
-        with ExpectedException(BadRequest) as e:
+        with ExpectedException(RefsExistError) as e:
             iip_fixt = self.useFixture(
                 InstanceIpTestFixtureGen(
                     self._vnc_lib, 'iip1', auto_prop_val=False,
@@ -790,7 +964,8 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
     # end test_floatingip_as_instanceip
 
     def test_aliasip_as_instanceip(self):
-        ipam_fixt = self.useFixture(NetworkIpamTestFixtureGen(self._vnc_lib))
+        ipam_fixt = self.useFixture(NetworkIpamTestFixtureGen(
+            self._vnc_lib, network_ipam_name='ipam-%s' % self.id()))
 
         project_fixt = self.useFixture(ProjectTestFixtureGen(self._vnc_lib, 'default-project'))
 
@@ -817,7 +992,7 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         ip_allocated = aip_fixt.getObj().alias_ip_address
 
         logger.info("Creating auto-alloc instance-ip, expecting an error")
-        with ExpectedException(BadRequest) as e:
+        with ExpectedException(RefsExistError) as e:
             iip_fixt = self.useFixture(
                 InstanceIpTestFixtureGen(
                     self._vnc_lib, 'iip1', auto_prop_val=False,
@@ -920,6 +1095,18 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
             self.assertThat(read_display_names,
                             Contains(obj.display_name))
 
+        # unanchored detailed list with filter with multiple values
+        filtered_display_names = [
+            '%s-%d' %(self.id(), num_objs - 1),
+            '%s-%d' %(self.id(), num_objs - 2),
+        ]
+        read_vn_objs = self._vnc_lib.virtual_networks_list(
+            detail=True,
+            filters={'display_name': filtered_display_names})
+        self.assertEqual(len(read_vn_objs), len(filtered_display_names))
+        read_display_names = [o.display_name for o in read_vn_objs]
+        self.assertEqual(set(read_display_names), set(filtered_display_names))
+
         # parent anchored summary list without filters, with extra fields
         read_vn_dicts = self._vnc_lib.virtual_networks_list(
             parent_id=proj_obj.uuid,
@@ -949,6 +1136,12 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
                             Equals(set(obj_dict[0].keys())))
             self.assertThat(obj_dict[0]['fq_name'][:-1],
                 Equals(proj_obj.fq_name))
+
+        # unanchored list with unknown filter
+        read_vn_objs = self._vnc_lib.virtual_networks_list(
+            parent_id=proj_obj.uuid,
+            filters={'foo': 'bar'})['virtual-networks']
+        self.assertEqual(len(read_vn_objs), num_objs)
 
         # parent anchored detailed list without filters
         read_vn_objs = self._vnc_lib.virtual_networks_list(
@@ -1844,6 +2037,197 @@ class TestVncCfgApiServer(test_case.ApiServerTestCase):
         finally:
             os.removedirs(bundle_dir)
     # end test_cert_bundle_refresh
+
+    def test_name_attribute_in_detail_list_resource(self):
+        vn_obj = vnc_api.VirtualNetwork('%s-vn' % self.id())
+        self._vnc_lib.virtual_network_create(vn_obj)
+        query_params = {
+            'obj_uuids': vn_obj.uuid,
+            'detail': True,
+        }
+        results = self._vnc_lib._request_server(
+            rest.OP_GET,
+            '/virtual-networks',
+            data=query_params)['virtual-networks']
+        self.assertEqual(len(results), 1)
+        vn_dict = results[0]['virtual-network']
+        self.assertIn('name', vn_dict)
+        self.assertEqual(vn_dict['name'], vn_obj.fq_name[-1])
+
+    def test_bgpvpn_type_assoc_with_network_l2_l3_forwarding_mode(self):
+        # Create virtual network with forwarding mode set to 'l2' and 'l3'
+        vn_l2_l3 = self.create_virtual_network('vn-l2-l3-%s' % self.id())
+        # Create l2 bgpvpn
+        bgpvpn_l2 = Bgpvpn('bgpvpn-l2-%s' % self.id(), bgpvpn_type='l2')
+        self._vnc_lib.bgpvpn_create(bgpvpn_l2)
+        # Create l3 bgpvpn
+        bgpvpn_l3 = Bgpvpn('bgpvpn-l3-%s' % self.id())
+        self._vnc_lib.bgpvpn_create(bgpvpn_l3)
+
+        # Trying to associate a 'l2' bgpvpn on the virtual network
+        vn_l2_l3.add_bgpvpn(bgpvpn_l2)
+        self._vnc_lib.virtual_network_update(vn_l2_l3)
+        vn_l2_l3 = self._vnc_lib.virtual_network_read(id=vn_l2_l3.uuid)
+
+        # Trying to associate a 'l3' bgpvpn on the virtual network
+        vn_l2_l3.add_bgpvpn(bgpvpn_l3)
+        self._vnc_lib.virtual_network_update(vn_l2_l3)
+        vn_l2_l3 = self._vnc_lib.virtual_network_read(id=vn_l2_l3.uuid)
+
+        # Try to change the virtual network forwarding mode to 'l2' only
+        with ExpectedException(BadRequest):
+            vn_l2_l3.set_virtual_network_properties(
+                VirtualNetworkType(forwarding_mode='l2'))
+            self._vnc_lib.virtual_network_update(vn_l2_l3)
+        vn_l2_l3 = self._vnc_lib.virtual_network_read(id=vn_l2_l3.uuid)
+
+        # Try to change the virtual network forwarding mode to 'l3' only
+        with ExpectedException(BadRequest):
+            vn_l2_l3.set_virtual_network_properties(
+                VirtualNetworkType(forwarding_mode='l3'))
+            self._vnc_lib.virtual_network_update(vn_l2_l3)
+
+    def test_bgpvpn_type_assoc_with_network_l2_forwarding_mode(self):
+        # Create virtual network with forwarding mode set to 'l2' only
+        vn_l2 = self.create_virtual_network('vn-l2-%s' % self.id())
+        vn_l2.set_virtual_network_properties(
+            VirtualNetworkType(forwarding_mode='l2'))
+        self._vnc_lib.virtual_network_update(vn_l2)
+        vn_l2 = self._vnc_lib.virtual_network_read(id=vn_l2.uuid)
+        # Create l2 bgpvpn
+        bgpvpn_l2 = Bgpvpn('bgpvpn-l2-%s' % self.id(), bgpvpn_type='l2')
+        self._vnc_lib.bgpvpn_create(bgpvpn_l2)
+        # Create l3 bgpvpn
+        bgpvpn_l3 = Bgpvpn('bgpvpn-l3-%s' % self.id())
+        self._vnc_lib.bgpvpn_create(bgpvpn_l3)
+
+        # Trying to associate a 'l2' bgpvpn on the virtual network
+        vn_l2.add_bgpvpn(bgpvpn_l2)
+        self._vnc_lib.virtual_network_update(vn_l2)
+        vn_l2 = self._vnc_lib.virtual_network_read(id=vn_l2.uuid)
+
+        # Trying to associate a 'l3' bgpvpn on the virtual network
+        with ExpectedException(BadRequest):
+            vn_l2.add_bgpvpn(bgpvpn_l3)
+            self._vnc_lib.virtual_network_update(vn_l2)
+        vn_l2 = self._vnc_lib.virtual_network_read(id=vn_l2.uuid)
+
+        # Try to change the virtual network forwarding mode to 'l3' only
+        with ExpectedException(BadRequest):
+            vn_l2.set_virtual_network_properties(
+                VirtualNetworkType(forwarding_mode='l3'))
+            self._vnc_lib.virtual_network_update(vn_l2)
+        vn_l2 = self._vnc_lib.virtual_network_read(id=vn_l2.uuid)
+
+        # Try to change the virtual network forwarding mode to 'l2' and l3'
+        vn_l2.set_virtual_network_properties(
+            VirtualNetworkType(forwarding_mode='l2_l3'))
+        self._vnc_lib.virtual_network_update(vn_l2)
+
+    def test_bgpvpn_type_assoc_with_network_l3_forwarding_mode(self):
+        # Create virtual network with forwarding mode set to 'l3' only
+        vn_l3 = self.create_virtual_network('vn-l3-%s' % self.id())
+        vn_l3.set_virtual_network_properties(
+            VirtualNetworkType(forwarding_mode='l3'))
+        self._vnc_lib.virtual_network_update(vn_l3)
+        vn_l3 = self._vnc_lib.virtual_network_read(id=vn_l3.uuid)
+        # Create l2 bgpvpn
+        bgpvpn_l2 = Bgpvpn('bgpvpn-l2-%s' % self.id(), bgpvpn_type='l2')
+        self._vnc_lib.bgpvpn_create(bgpvpn_l2)
+        # Create l3 bgpvpn
+        bgpvpn_l3 = Bgpvpn('bgpvpn-l3-%s' % self.id())
+        self._vnc_lib.bgpvpn_create(bgpvpn_l3)
+
+        # Trying to associate a 'l3' bgpvpn on the virtual network
+        vn_l3.add_bgpvpn(bgpvpn_l3)
+        self._vnc_lib.virtual_network_update(vn_l3)
+        vn_l3 = self._vnc_lib.virtual_network_read(id=vn_l3.uuid)
+
+        # Trying to associate a 'l2' bgpvpn on the virtual network
+        with ExpectedException(BadRequest):
+            vn_l3.add_bgpvpn(bgpvpn_l2)
+            self._vnc_lib.virtual_network_update(vn_l3)
+        vn_l3 = self._vnc_lib.virtual_network_read(id=vn_l3.uuid)
+
+        # Try to change the virtual network forwarding mode to 'l2' only
+        with ExpectedException(BadRequest):
+            vn_l3.set_virtual_network_properties(
+                VirtualNetworkType(forwarding_mode='l2'))
+            self._vnc_lib.virtual_network_update(vn_l3)
+        vn_l3 = self._vnc_lib.virtual_network_read(id=vn_l3.uuid)
+
+        # Try to change the virtual network forwarding mode to 'l2' and l3'
+        vn_l3.set_virtual_network_properties(
+            VirtualNetworkType(forwarding_mode='l2_l3'))
+        self._vnc_lib.virtual_network_update(vn_l3)
+
+    def test_bgpvpn_type_limited_to_l3_for_router_assoc(self):
+        # Create logical router
+        lr, _, _, _ = self.create_logical_router(
+            'lr-%s' % self.id(), nb_of_attached_networks=0)
+        # Create l2 bgpvpn
+        bgpvpn_l2 = Bgpvpn('bgpvpn-l2-%s' % self.id(), bgpvpn_type='l2')
+        self._vnc_lib.bgpvpn_create(bgpvpn_l2)
+
+        # Trying to associate a 'l2' bgpvpn on the logical router
+        with ExpectedException(BadRequest):
+            lr.add_bgpvpn(bgpvpn_l2)
+            self._vnc_lib.logical_router_update(lr)
+
+    def test_bgpvpn_fail_assoc_network_with_gw_router_assoc_to_bgpvpn(self):
+        # Create one bgpvpn
+        bgpvpn = Bgpvpn('bgpvpn-%s' % self.id())
+        self._vnc_lib.bgpvpn_create(bgpvpn)
+        # Create one virtual network with one logical router as gateway
+        lr, vns, _, _ = self.create_logical_router('lr-%s' % self.id())
+        # We attached only one virtual network to the logical router
+        vn = vns[0]
+
+        # Associate the bgppvpn to the logical router
+        lr.add_bgpvpn(bgpvpn)
+        self._vnc_lib.logical_router_update(lr)
+        lr = self._vnc_lib.logical_router_read(id=lr.uuid)
+
+        # The try to set that same bgpvpn to the virtual network
+        with ExpectedException(BadRequest):
+            vn.add_bgpvpn(bgpvpn)
+            self._vnc_lib.virtual_network_update(vn)
+
+    def test_bgpvpn_fail_assoc_router_with_network_assoc_to_bgpvpn(self):
+        # Create one bgpvpn
+        bgpvpn = Bgpvpn('bgpvpn-%s' % self.id())
+        self._vnc_lib.bgpvpn_create(bgpvpn)
+        # Create one virtual network with one logical router as gateway
+        lr, vns, vmis, _ = self.create_logical_router('lr-%s' % self.id())
+        # We attached only one virtual network to the logical router
+        vn = vns[0]
+        vmi = vmis[0]
+
+        # Associate the bgpvpn to the virtual network
+        vn.add_bgpvpn(bgpvpn)
+        self._vnc_lib.virtual_network_update(vn)
+        lr = self._vnc_lib.logical_router_read(id=lr.uuid)
+
+        # The try to set that same bgpvpn to the logical router
+        with ExpectedException(BadRequest):
+            lr.add_bgpvpn(bgpvpn)
+            self._vnc_lib.logical_router_update(lr)
+        lr = self._vnc_lib.logical_router_read(id=lr.uuid)
+
+        # Detatch the logical router from the virtual network
+        lr.del_virtual_machine_interface(vmi)
+        self._vnc_lib.logical_router_update(lr)
+        lr = self._vnc_lib.logical_router_read(id=lr.uuid)
+
+        # Associate the bgpvpn to the logical router
+        lr.add_bgpvpn(bgpvpn)
+        self._vnc_lib.logical_router_update(lr)
+        lr = self._vnc_lib.logical_router_read(id=lr.uuid)
+
+        # Try to reattach the virtual network to the logical router
+        with ExpectedException(BadRequest):
+            lr.add_virtual_machine_interface(vmi)
+            self._vnc_lib.logical_router_update(lr)
 # end class TestVncCfgApiServer
 
 
@@ -1851,10 +2235,19 @@ class TestStaleLockRemoval(test_case.ApiServerTestCase):
     STALE_LOCK_SECS = '0.2'
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         super(TestStaleLockRemoval, cls).setUpClass(
             extra_config_knobs=[('DEFAULTS', 'stale_lock_seconds',
             cls.STALE_LOCK_SECS)])
     # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestStaleLockRemoval, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
 
     def test_stale_fq_name_lock_removed_on_partial_create(self):
         # 1. partially create an object i.e zk done, cass
@@ -1949,8 +2342,18 @@ class TestVncCfgApiServerRequests(test_case.ApiServerTestCase):
     """ Tests to verify the max_requests config parameter of api-server."""
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         super(TestVncCfgApiServerRequests, cls).setUpClass(
             extra_config_knobs=[('DEFAULTS', 'max_requests', 10)])
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestVncCfgApiServerRequests, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
 
     def api_requests(self, orig_vn_read, count, vn_name):
         api_server = self._server_info['api_server']
@@ -2034,8 +2437,12 @@ class TestVncCfgApiServerRequests(test_case.ApiServerTestCase):
 
 class TestLocalAuth(test_case.ApiServerTestCase):
     _rbac_role = 'admin'
+
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         from keystonemiddleware import auth_token
         class FakeAuthProtocol(object):
             _test_case = cls
@@ -2064,6 +2471,12 @@ class TestLocalAuth(test_case.ApiServerTestCase):
                 (auth_token, 'AuthProtocol', FakeAuthProtocol),
                 ])
     # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestLocalAuth, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
 
     def test_local_auth_on_8095(self):
         from requests.auth import HTTPBasicAuth
@@ -2232,6 +2645,9 @@ class TestExtensionApi(test_case.ApiServerTestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         test_common.setup_extra_flexmock(
             [(stevedore.extension.ExtensionManager, '__new__',
               FakeExtensionManager)])
@@ -2248,6 +2664,7 @@ class TestExtensionApi(test_case.ApiServerTestCase):
         FakeExtensionManager._entry_pt_to_classes['vnc_cfg_api.resourceApi'] = \
             None
         FakeExtensionManager._ext_objs = []
+        logger.removeHandler(cls.console_handler)
         super(TestExtensionApi, cls).tearDownClass()
     # end tearDownClass
 
@@ -2336,6 +2753,20 @@ class TestExtensionApi(test_case.ApiServerTestCase):
 
 
 class TestPropertyWithList(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestPropertyWithList, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestPropertyWithList, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def assert_kvpos(self, rd_ff_proto, idx, k, v, pos):
         self.assertEqual(rd_ff_proto[idx][0]['protocol'], k)
         self.assertEqual(rd_ff_proto[idx][0]['port'], v)
@@ -2759,7 +3190,7 @@ class TestPropertyWithList(test_case.ApiServerTestCase):
         self.assertNotIn(fname, vmis['virtual-machine-interfaces'][0])
 
         vmi_obj = self._vnc_lib.virtual_machine_interface_read(id=vmi_obj.uuid)
-        proto_type = ProtocolType(protocol='proto', port='port')
+        proto_type = ProtocolType(protocol='proto', port=1)
         vmi_obj.add_virtual_machine_interface_fat_flow_protocols(proto_type,
                                                                  'pos')
         self._vnc_lib.virtual_machine_interface_update(vmi_obj)
@@ -2780,6 +3211,20 @@ class TestPropertyWithMap(test_case.ApiServerTestCase):
         self.assertEqual(rd_bindings[idx][0]['key'], k)
         self.assertEqual(rd_bindings[idx][0]['value'], v)
         self.assertEqual(rd_bindings[idx][1], pos)
+
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestPropertyWithMap, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestPropertyWithMap, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
 
     def test_set_in_object(self):
         vmi_obj = VirtualMachineInterface('vmi-%s' %(self.id()),
@@ -2895,6 +3340,20 @@ class TestPropertyWithMap(test_case.ApiServerTestCase):
 
 
 class TestDBAudit(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestDBAudit, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestDBAudit, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def setUp(self):
         super(TestDBAudit, self).setUp()
         self._args = '--ifmap-servers %s:%s' % (self._api_server_ip,
@@ -3238,6 +3697,20 @@ class TestDBAudit(test_case.ApiServerTestCase):
 # end class TestDBAudit
 
 class TestBulk(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestBulk, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestBulk, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_list_bulk_collection(self):
         obj_count = self._vnc_lib.POST_FOR_LIST_THRESHOLD + 1
         vn_uuids = []
@@ -3337,6 +3810,7 @@ class TestBulk(test_case.ApiServerTestCase):
         vn_uuid = vn_objs[0].uuid
         vn_uuids = [vn_uuid] +\
                    ['bad-uuid'] * self._vnc_lib.POST_FOR_LIST_THRESHOLD
+
         try:
             results = self._vnc_lib.resource_list('virtual-network',
                                                   obj_uuids=vn_uuids)
@@ -3369,6 +3843,20 @@ class TestBulk(test_case.ApiServerTestCase):
 
 
 class TestCacheWithMetadata(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestCacheWithMetadata, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestCacheWithMetadata, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def setUp(self):
         self.uuid_cf = test_common.CassandraCFs.get_cf(
             'config_db_uuid', 'obj_uuid_table')
@@ -3553,10 +4041,19 @@ class TestCacheWithMetadata(test_case.ApiServerTestCase):
 class TestCacheWithMetadataEviction(test_case.ApiServerTestCase):
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         return super(TestCacheWithMetadataEviction, cls).setUpClass(
             extra_config_knobs=[('DEFAULTS', 'object_cache_entries',
             '2')])
     # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestCacheWithMetadataEviction, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
 
     def test_evict_on_full(self):
         vn1_obj = vnc_api.VirtualNetwork('vn-1-%s' %(self.id()))
@@ -3595,10 +4092,19 @@ class TestCacheWithMetadataEviction(test_case.ApiServerTestCase):
 class TestCacheWithMetadataExcludeTypes(test_case.ApiServerTestCase):
     @classmethod
     def setUpClass(cls):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
         return super(TestCacheWithMetadataExcludeTypes, cls).setUpClass(
             extra_config_knobs=[('DEFAULTS', 'object_cache_exclude_types',
             'project, network-ipam')])
     # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestCacheWithMetadataExcludeTypes, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
 
     def test_exclude_types_not_cached(self):
         # verify not cached for configured types
@@ -3624,6 +4130,20 @@ class TestCacheWithMetadataExcludeTypes(test_case.ApiServerTestCase):
 # end class TestCacheWithMetadataExcludeTypes
 
 class TestRefValidation(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestRefValidation, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestRefValidation, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_refs_validation_with_expected_error(self):
         obj = VirtualNetwork('validate-create-error')
         body_dict = {'virtual-network':
@@ -3694,6 +4214,20 @@ class TestVncApiStats(test_case.ApiServerTestCase):
         self.assertEqual(stats.response_code, 409)
         self.assertEqual(stats.obj_type, 'abc')
 
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestVncApiStats, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestVncApiStats, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
     def test_response_code_on_exception(self):
         from cfgm_common.vnc_api_stats import VncApiStatistics
         try:
@@ -3706,6 +4240,92 @@ class TestVncApiStats(test_case.ApiServerTestCase):
     # end test_response_code_on_exception
 # end TestVncApiStats
 
+class TestDbJsonExim(test_case.ApiServerTestCase):
+    @classmethod
+    def setUpClass(cls, *args, **kwargs):
+        cls.console_handler = logging.StreamHandler()
+        cls.console_handler.setLevel(logging.DEBUG)
+        logger.addHandler(cls.console_handler)
+        super(TestDbJsonExim, cls).setUpClass(*args, **kwargs)
+    # end setUpClass
+
+    @classmethod
+    def tearDownClass(cls, *args, **kwargs):
+        logger.removeHandler(cls.console_handler)
+        super(TestDbJsonExim, cls).tearDownClass(*args, **kwargs)
+    # end tearDownClass
+
+    def test_db_exim_args(self):
+        with ExpectedException(db_json_exim.InvalidArguments,
+            'Both --import-from and --export-to cannot be specified'):
+            db_json_exim.DatabaseExim("--import-from foo --export-to bar")
+    # end test_db_exim_args
+
+    def test_db_export(self):
+        with tempfile.NamedTemporaryFile() as export_dump:
+            patch_ks = test_common.FakeSystemManager.patch_keyspace
+            with patch_ks('to_bgp_keyspace', {}), \
+                 patch_ks('svc_monitor_keyspace', {}), \
+                 patch_ks('DISCOVERY_SERVER', {}):
+                vn_obj = self._create_test_object()
+                db_json_exim.DatabaseExim('--export-to %s' %(
+                    export_dump.name)).db_export()
+                dump = json.loads(export_dump.readlines()[0])
+                dump_cassandra = dump['cassandra']
+                dump_zk = json.loads(dump['zookeeper'])
+                uuid_table = dump_cassandra['config_db_uuid']['obj_uuid_table']
+                self.assertEqual(uuid_table[vn_obj.uuid]['fq_name'][0],
+                    json.dumps(vn_obj.get_fq_name()))
+                zk_node = [node for node in dump_zk
+                    if node[0] == '/fq-name-to-uuid/virtual_network:%s/' %(
+                        vn_obj.get_fq_name_str())]
+                self.assertEqual(len(zk_node), 1)
+                self.assertEqual(zk_node[0][1][0], vn_obj.uuid)
+    # end test_db_export
+
+    def test_db_export_and_import(self):
+        with tempfile.NamedTemporaryFile() as dump_f:
+            patch_ks = test_common.FakeSystemManager.patch_keyspace
+            with patch_ks('to_bgp_keyspace', {}), \
+                 patch_ks('svc_monitor_keyspace', {}), \
+                 patch_ks('DISCOVERY_SERVER', {}):
+                vn_obj = self._create_test_object()
+                db_json_exim.DatabaseExim('--export-to %s' %(
+                    dump_f.name)).db_export()
+                with ExpectedException(db_json_exim.CassandraNotEmptyError,
+                    'obj_uuid_table has entries'):
+                    db_json_exim.DatabaseExim('--import-from %s' %(
+                        dump_f.name)).db_import()
+
+                uuid_cf = test_common.CassandraCFs.get_cf(
+                    'config_db_uuid', 'obj_uuid_table')
+                fq_name_cf = test_common.CassandraCFs.get_cf(
+                    'config_db_uuid', 'obj_fq_name_table')
+                with uuid_cf.patch_cf({}), fq_name_cf.patch_cf({}):
+                    with ExpectedException(
+                         db_json_exim.ZookeeperNotEmptyError):
+                        db_json_exim.DatabaseExim('--import-from %s' %(
+                            dump_f.name)).db_import()
+
+                exim_obj = db_json_exim.DatabaseExim('--import-from %s' %(
+                               dump_f.name))
+                with uuid_cf.patch_cf({}), fq_name_cf.patch_cf({}), \
+                    exim_obj._zookeeper.patch_path(
+                        '/', recursive=True):
+                    exim_obj.db_import()
+                    dump = json.loads(dump_f.readlines()[0])
+                    dump_cassandra = dump['cassandra']
+                    dump_zk = json.loads(dump['zookeeper'])
+                    uuid_table = dump_cassandra['config_db_uuid']['obj_uuid_table']
+                    self.assertEqual(uuid_table[vn_obj.uuid]['fq_name'][0],
+                        json.dumps(vn_obj.get_fq_name()))
+                    zk_node = [node for node in dump_zk
+                        if node[0] == '/fq-name-to-uuid/virtual_network:%s/' %(
+                            vn_obj.get_fq_name_str())]
+                    self.assertEqual(len(zk_node), 1)
+                self.assertEqual(zk_node[0][1][0], vn_obj.uuid)
+    # end test_db_export_and_import
+# end class TestDbJsonExim
 
 if __name__ == '__main__':
     ch = logging.StreamHandler()

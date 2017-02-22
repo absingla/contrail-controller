@@ -84,6 +84,18 @@ struct ServiceVlanSandeshList {
 }
 
 /**
+ * Port mapping definition
+ */
+struct SandeshPortMapping {
+   /** IP protocol */
+   1: u16 protocol;
+   /** Port number of packet */
+   2: u16 port;
+   /** Translated port number */
+   3: u16 nat_port;
+}
+
+/**
  * Structure definition for floating ip entry in oper db
  */
 struct FloatingIpSandeshList {
@@ -95,6 +107,12 @@ struct FloatingIpSandeshList {
    3: string installed;
    /** Fixed ip address associated to floating ip */
    4: string fixed_ip;
+   /** floating-ip direction */
+   5: string direction;
+   /** port-map enabled */
+   6: bool port_map_enabled;
+   /** port-mapping array */
+   7: list<SandeshPortMapping> port_map;
 }
 
 /**
@@ -132,6 +150,14 @@ struct StaticRouteSandesh {
 struct VmIntfSgUuid {
     /** Uuid of security group associated to vm interface */
     1: string sg_uuid (link="SgListReq");
+}
+
+/**
+ * Structure definition for bridge domain list on interface
+ */
+struct VmIntfBridgeDomainUuid {
+    /** Uuid of Bridge Domain associated to vm interface */
+    1: string bridge_domain_uuid (link="BridgeDomainSandeshReq");
 }
 
 /**
@@ -266,6 +292,8 @@ struct ItfSandeshData {
    57: list<AliasIpSandeshList> alias_ip_list;
    /** Boolean value which indicates to drop new flows for interface */
    58: bool drop_new_flows;
+   /** List of bridge domain entries configured on this interface */
+   59: list<VmIntfBridgeDomainUuid> bridge_domain_list;
 }
 
 /**
@@ -346,6 +374,10 @@ struct VnSandeshData {
      * is enabled on virtual network
      */
     17: bool flood_unknown_unicast;
+    /** Etree mode enabled or disabled for PBB Backbone VN */
+    18: bool pbb_etree_enabled;
+    /** Layer-2 control word enabled */
+    19: bool layer2_control_word;
 }
 
 /**
@@ -544,6 +576,14 @@ struct NhSandeshData {
    24: optional bool vxlan_flag;
    /** Boolean value which indicates to flood unknown unicast packets for nh */
    25: optional bool flood_unknown_unicast;
+   /** I-SID identifier for bridge domain */
+   26: i32 isid;
+   /** Is learning enabled on this nexthop */
+   27: bool learning_enabled;
+   /** Is the nexthop root or leaf for etree mode */
+   28: bool etree_leaf;
+   /** Layer 2 control word */
+   29: bool layer2_control_word;
 }
 
 /**
@@ -606,8 +646,8 @@ struct PathSandeshData {
    11: string supported_tunnel_type;
    /** Active tunnel encap associated with path */
    12: string active_tunnel_type;
-   /** Boolean value which indicates if path is stale */
-   13: bool stale;
+   /** stale path */    
+   13: optional bool stale;
    /** Path preference information for path */
    14: optional PathPreferenceSandeshData path_preference_data;
    /** Parent information for path */
@@ -624,6 +664,12 @@ struct PathSandeshData {
    20: optional string ecmp_hashing_fields;
    /** Communities associated with path */
    21: optional list<string> communities;
+   /** path sequence number */
+   22: optional u64 peer_sequence_number;
+   /** PBB etree leaf configuration */
+   23: bool etree_leaf;
+   /** Layer 2 control word */
+   24: bool layer2_control_word;
 }
 
 /**
@@ -712,6 +758,10 @@ struct VrfSandeshData {
    11: i32 brindex  (link="BridgeRouteReq");
    /** Route distinguisher associated with vrf */
    12: string RD;
+   /** MAC aging timeout */
+   13: i32 mac_aging_time;
+   /** Layer 2 control word */
+   14: bool layer2_control_word;
 }
 
 /**
@@ -1562,6 +1612,10 @@ request sandesh MirrorCreateReq {
     21: optional string vtep_dst_ip;
     /** Mpls label for mirroring */
     22: optional i32 vni;
+    /** nic assisted mirroring */
+    23: optional bool nic_assisted_mirroring;
+    /** nic assisted mirror vlan */
+    24: optional u16 nic_assisted_mirroring_vlan;
 }
 
 /**
@@ -1796,6 +1850,10 @@ request sandesh IntfMirrorCreateReq {
    11: optional string vtep_dst_ip;
    /** Mpls label for mirroring */
    12: optional i32 vni;
+   /** nic assisted mirroring */
+   13: optional bool nic_assisted_mirroring;
+   /** nic assisted mirror vlan */
+   14: optional u16 nic_assisted_mirroring_vlan;
 }
 
 /**
@@ -2433,6 +2491,19 @@ trace sandesh OperSg {
 }
 
 /**
+ * @description: Trace message for BridgeDomain
+ * @type: Trace
+ * @severity: DEBUG
+ */
+trace sandesh OperBridgeDomain {
+    /** Message for bridge-domain db entry */
+    1: string message;
+    /** Uuid of bridge-domain db entry */
+    2: string uuid;
+    /** ISID of bridge-domain db entry */
+    3: i32 isid;
+}
+/**
  * Structure definition for PhysicalDevice
  */
 struct SandeshDevice {
@@ -2913,6 +2984,35 @@ request sandesh AgentQosConfigSandeshReq {
 response sandesh AgentQosConfigSandeshResp {
     /** List of qos config instance information */
     1: list<AgentQosConfigSandeshData> qc_list;
+}
+
+struct BridgeDomainSandeshData {
+    /** UUID of bridge domain instance */
+    1: string uuid;
+    /** Name of the bridge domain instance */
+    2: string name;
+    /** ISID configured on bridge domain */
+    3: i32 isid;
+    /** VN bridge domain belong to */
+    4: string vn (link="VnListReq");
+    /** VRF correspoding to this bridge domain */
+    5: string vrf (link="VrfListReq");
+    /** Learning enabled on this bridge */
+    6: string learning_enabled;
+    /** PBB etree mode enabled */
+    7: string pbb_etree_enabled;
+}
+
+request sandesh BridgeDomainSandeshReq {
+    /** UUID of bridge domain to query for */
+    1: string uuid;
+    /** Name for bridge domain to query for */
+    2: string name;
+}
+
+response sandesh BridgeDomainSandeshResp {
+    /** List of bridge domain */
+    1: list<BridgeDomainSandeshData> bd_list;
 }
 
 /**

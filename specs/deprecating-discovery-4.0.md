@@ -48,6 +48,29 @@ Details of Implementation of Distributed Resource Allocation
 * Each daemon will randomize the service list independently and re-allocate the
   resources.
 
+In addition, there are additional use-cases in ContrailAnalytics that were
+utilizing discovery
+
+* All collectors publish themselves. contrail-alarm-gens and contrail-analytics-apis 
+  use this to dectect when collectors go up and down, and resync and re-aggregate UVEs.
+    * contrail-collector keeps updating the NGENERATORS set in redis to indicate 
+      the list of generator-ids connected to it. Now, it will use a TTL, so the key
+      expires if the collector crashes or hangs. It will also write its PID in its
+      own generator-id instead of instance id. (which is always 0 for collector)
+    * contrail-alarm-gens and contrail-analytics-api instances will accept static
+      list of redis instances. They will use the NGENERATORS key in each of these
+      redis instances to detect if the collector has failed or restarted
+
+* All alarm-gens publish the list of partitions they own. contrail-analytics-apis use
+  this to track which partition is owned by which alarm-gen instance so that they
+  can build up the per-partition UVE local cache. contrail-alarm-gens also use
+  this information to learn who thier peers are and run a consistent hashing
+  algorithm to divide up the partitions amongst themselves
+    * contrail-alarm-gen will use zookeeper to create ephermeral nodes and store
+      their partition ownership information
+    * both contrail-alarm-gens and contrail-analytics-api will monitor there
+      ephemeral nodes in zookeeper
+ 
 ##3.1      Alternatives Considered
 None
 
@@ -60,18 +83,19 @@ None
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION
 
-[CONTROL-NODE].servers     Provision list of control-node service providers
-                           in ip-address:port format
+[CONTROL-NODE].servers     Provision list of control-node[role=control] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:5269 10.1.1.12:5269
+                           
 
-[DNS].servers              Provision list of DNS service providers in
-                           ip-address:port format
-                           Eg: 0.1.1.1:53 10.1.1.2:53
+[DNS].servers              Provision list of DNS [role=control] service 
+                           providers in ip-address:port ip-address2:port format
+                           Eg: 10.1.1.1:53 10.1.1.2:53
 
-[DEFAULT].collectors       Provision list of Collector service providers in
-                           ip-address:port format
+[DEFAULT].collectors       Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 
 ```
@@ -80,240 +104,327 @@ None
 
 ```
 ================================================================================
+ CONFIG PARAMETER              CHANGES
+================================================================================
+[DISCOVERY]                    DEPRECATE DISCOVERY SECTION 
+
+[DEFAULT].collectors           Provision list of Collector [role=collector] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:8086 10.1.1.2:8086
+
+[IFMAP].rabbitmq_server_list   Provision list of config-node [role=cfgm] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:5672 10.1.1.2:5672                
+
+[IFMAP].rabbitmq_user          guest (Default string)
+ 
+[IFMAP].rabbitmq_password      guest (Default string)
+[IFMAP].config_db_server_list  Provision list of Config DB [role=database] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:9042 10.1.1.2:9042
+                               NOTE: Dockers use 9041 as port
+
+
+[IFMAP].certs_store                     DEPRECATE
+[IFMAP].password                        DEPRECATE            
+[IFMAP].server_url                      DEPRECATE
+[IFMAP].user                            DEPRECATE
+[IFMAP].stale_entries_cleanup_timeout   DEPRECATE
+[IFMAP].end_of_rib_timeout              DEPRECATE
+[IFMAP].peer_response_wait_time         DEPRECATE
+
+```
+
+###3.2.3   Provisioning Changes for contrail-dns (contrail-dns.conf)
+
+```
+================================================================================
+ CONFIG PARAMETER              CHANGES
+================================================================================
+[DISCOVERY]                    DEPRECATE DISCOVERY SECTION 
+
+[DEFAULT].collectors           Provision list of Collector [role=collector] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:8086 10.1.1.2:8086
+
+[IFMAP].rabbitmq_server_list   Provision list of config-node [role=cfgm] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:5672 10.1.1.2:5672                
+
+[IFMAP].rabbitmq_user          guest (Default string)
+ 
+[IFMAP].rabbitmq_password      guest (Default string)
+[IFMAP].config_db_server_list  Provision list of Config DB [role=database] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:9042 10.1.1.2:9042
+                               NOTE: Dockers use 9041 as port
+
+[IFMAP].certs_store                     DEPRECATE
+[IFMAP].password                        DEPRECATE            
+[IFMAP].server_url                      DEPRECATE
+[IFMAP].user                            DEPRECATE
+[IFMAP].stale_entries_cleanup_timeout   DEPRECATE
+[IFMAP].end_of_rib_timeout              DEPRECATE
+[IFMAP].peer_response_wait_time         DEPRECATE
+```
+
+###3.2.4   Provisioning Changes for contrail-collector (contrail-collector.conf)
+
+```
+================================================================================
+ CONFIG PARAMETER              CHANGES
+================================================================================
+[DISCOVERY]                    DEPRECATE DISCOVERY SECTION
+
+[API_SERVER].api_server_list   Provision list of api-servers [role=config] in
+                               ip-address:port format
+                               Eg: 10.1.1.1:8082 10.1.1.2:8082
+
+```
+
+###3.2.5   Provisioning Changes for contrail-alarm-gen (contrail-alarm-gen.conf)
+
+```
+================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
+[DISCOVERY]                   DEPRECATE DISCOVERY SECTION
 
-[DEFAULT].collectors       Provision list of Collector service providers in
-                           ip-address:port format
+
+[DEFAULTS].collectors         Provision list of Collector [role=collector] service
+                              providers in ip-address:port ip-address2:port format
+                              Eg: 10.1.1.1:8086 10.1.1.2:8086
+
+[API_SERVER].api_server_list  Provision list of api-servers [role=config] in
+                              ip-address:port format
+                              Eg: 10.1.1.1:8082 10.1.1.2:8082
+
+[REDIS].redis_uve_list        Provision list of redis instances [role=collector]
+                              Eg: 192.168.0.29:6379 192.168.0.30:6379
+
+```
+
+###3.2.6 Provisioning Changes for contrail-analytics-api(contrail-analytics-api.conf)
+
+```
+================================================================================
+ CONFIG PARAMETER          CHANGES
+================================================================================
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
+
+
+[DEFAULTS].collectors      Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 
-[IFMAP].servers            Provision list of IFMap service providers in
-                           ip-address:port format
-                           Eg: 10.1.1.1:8443 10.1.1.2:8443
-```
-
-###3.2.3   Provisioning Changes for contrail-dns (contrail-control.conf)
+[REDIS].redis_uve_list     Provision list of redis instances [role=collector]
+                           Eg: 192.168.0.29:6379 192.168.0.30:6379
 
 ```
-================================================================================
- CONFIG PARAMETER          CHANGES
-================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
 
-[DEFAULT].collectors       Provision list of Collector service providers in
-                           ip-address:port format
-                           Eg: 10.1.1.1:8086 10.1.1.2:8086
-
-[IFMAP].servers            Provision list of IFMap service providers in
-                           ip-address:port format
-                           Eg: 10.1.1.1:8443 10.1.1.2:8443
-```
-
-###3.2.4   Provisioning Changes for contrail-alarm-gen (contrail-alarm-gen.conf)
+###3.2.7  Provisioning Changes for contrail-api (contrail-api.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
 
-[DEFAULT].collectors       Provision list of Collector service providers in
-                           ip-address:port format
+[DEFAULTS].collectors      Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 ```
 
-###3.2.5 Provisioning Changes for contrail-analytics-api(contrail-analytics-api.conf)
-
-```
-================================================================================
- CONFIG PARAMETER               CHANGES
-================================================================================
-[DISCOVERY].disc_server_ip      Deprecate Discovery Server Parameter
-[DISCOVERY].disc_server_port
-
-[DEFAULT].collectors            Provision list of Collector service providers in
-                                ip-address:port format
-                                Eg: 10.1.1.1:8086 10.1.1.2:8086
-
-```
-
-###3.2.6  Provisioning Changes for contrail-api (contrail-api.conf)
-
-```
-================================================================================
- CONFIG PARAMETER               CHANGES
-================================================================================
-[DISCOVERY].disc_server_ip      Deprecate Discovery Server Parameter
-[DISCOVERY].disc_server_port
-
-[DEFAULTS].collectors           Provision list of Collector service providers in
-                                ip-address:port format
-                                Eg: 10.1.1.1:8086 10.1.1.2:8086
-```
-
-###3.2.7 Provisioning Changes for contrail-api (contrail-schema.conf)
-
-```
-================================================================================
- CONFIG PARAMETER               CHANGES
-================================================================================
-[DISCOVERY].disc_server_ip      Deprecate Discovery Server Parameter
-[DISCOVERY].disc_server_port
-
-[DEFAULTS].collectors           Provision list of Collector service providers in
-                                ip-address:port format
-                                Eg: 10.1.1.1:8086 10.1.1.2:8086
-```
-
-###3.2.8 Provisioning Changes for contrail-svc-monitor(contrail-svc-monitor.conf)
-
-```
-================================================================================
- CONFIG PARAMETER               CHANGES
-================================================================================
-[DISCOVERY].disc_server_ip      Deprecate Discovery Server Parameter
-[DISCOVERY].disc_server_port
-
-[DEFAULTS].collectors           Provision list of Collector service providers in
-                                ip-address:port format
-                                Eg: 10.1.1.1:8086 10.1.1.2:8086
-
-```
-
-###3.2.9 Provisioning Changes for contrail-analytics-nodemgr(contrail-analytics-nodemgr.conf)
+###3.2.8 Provisioning Changes for contrail-schema (contrail-schema.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
-[DISCOVERY].port
 
-[COLLECTOR].server_list    Provision list of Collector service providers in
-                           ip-address:port format
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
+
+[DEFAULTS].collectors      Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
+                           Eg: 10.1.1.1:8086 10.1.1.2:8086
+```
+
+###3.2.9 Provisioning Changes for contrail-svc-monitor(contrail-svc-monitor.conf)
+
+```
+================================================================================
+ CONFIG PARAMETER          CHANGES
+================================================================================
+
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
+
+[DEFAULTS].collectors      Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
+                           Eg: 10.1.1.1:8086 10.1.1.2:8086
+```
+
+###3.2.10 Provisioning Changes for contrail-device-manager(contrail-device-manager.conf)
+
+```
+================================================================================
+ CONFIG PARAMETER          CHANGES
+================================================================================
+
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
+
+[DEFAULTS].collectors      Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
+                           Eg: 10.1.1.1:8086 10.1.1.2:8086
+```
+
+
+###3.2.11 Provisioning Changes for contrail-analytics-nodemgr(contrail-analytics-nodemgr.conf)
+
+```
+================================================================================
+ CONFIG PARAMETER          CHANGES
+================================================================================
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
+
+[COLLECTOR].server_list    Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 ````
 
 
-###3.2.10  Provisioning Changes for contrail-config-nodemgr(contrail-config-nodemgr.conf)
+###3.2.12  Provisioning Changes for contrail-config-nodemgr(contrail-config-nodemgr.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
-[DISCOVERY].port
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
 
-[COLLECTOR].server_list    Provision list of Collector service providers in
-                           ip-address:port format
+[COLLECTOR].server_list    Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 ```
 
-###3.2.11 Provisioning Changes for contrail-control-nodemgr(contrail-control-nodemgr.conf)
+###3.2.13 Provisioning Changes for contrail-control-nodemgr(contrail-control-nodemgr.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
-[DISCOVERY].port
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
 
-[COLLECTOR].server_list    Provision list of Collector service providers in
-                           ip-address:port format
+[COLLECTOR].server_list    Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 ```
 
-###3.2.12  Provisioning Changes for contrail-database-nodemgr(contrail-database-nodemgr.conf)
+###3.2.14  Provisioning Changes for contrail-database-nodemgr(contrail-database-nodemgr.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
-[DISCOVERY].port
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
 
-[COLLECTOR].server_list    Provision list of Collector service providers in
-                           ip-address:port format
+[COLLECTOR].server_list    Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 ```
 
-###3.2.13 Provisioning Changes for contrail-vrouter-nodemgr(contrail-vrouter-nodemgr.conf)
+###3.2.15 Provisioning Changes for contrail-vrouter-nodemgr(contrail-vrouter-nodemgr.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
-[DISCOVERY].port
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
 
-[COLLECTOR].server_list    Provision list of Collector service providers in
-                           ip-address:port format
+[COLLECTOR].server_list    Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 ```
 
-###3.2.14 Provisioning Changes for contrail-query-engine(contrail-query-engine.conf)
+
+
+###3.2.16 Provisioning Changes for contrail-query-engine(contrail-query-engine.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER          CHANGES
 ================================================================================
-[DISCOVERY].server         Deprecate Discovery Server Parameter
-[DISCOVERY].port
+[DISCOVERY]                DEPRECATE DISCOVERY SECTION  
 
-[DEFAULT].collectors       Provision list of Collector service providers in
-                           ip-address:port format
+[DEFAULT].collectors       Provision list of Collector [role=collector] service
+                           providers in ip-address:port ip-address2:port format
                            Eg: 10.1.1.1:8086 10.1.1.2:8086
 
 ```
 
-###3.2.15 Provisioning Changes for contrail-snmp-collector(contrail-snmp-collector.conf)
+###3.2.17 Provisioning Changes for contrail-snmp-collector(contrail-snmp-collector.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER               CHANGES
 ================================================================================
-[DISCOVERY].disc_server_ip      Deprecate Discovery Server Parameter
-[DISCOVERY].disc_server_port
+[DISCOVERY]                    DEPRECATE DISCOVERY SECTION
 
-[DEFAULT].collectors            Provision list of Collector service providers in
-                                ip-address:port format
-                                Eg: 10.1.1.1:8086 10.1.1.2:8086
+[DEFAULTS].collectors          Provision list of Collector [role=collector] service
+                               providers in ip-address:port ip-address2:port format
+                               Eg: 10.1.1.1:8086 10.1.1.2:8086
+
+[API_SERVER].api_server_list   Provision list of api-servers [role=config] in
+                               ip-address:port format
+                               Eg: 10.1.1.1:8082 10.1.1.2:8082
+
 ```
 
-###3.2.16  Provisioning Changes for contrail-topology (contrail-topology.conf)
+###3.2.18  Provisioning Changes for contrail-topology (contrail-topology.conf)
 
 ```
 ================================================================================
  CONFIG PARAMETER               CHANGES
 ================================================================================
-[DISCOVERY].disc_server_ip      Deprecate Discovery Server Parameter
-[DISCOVERY].disc_server_port
+[DISCOVERY]                   DEPRECATE DISCOVERY SECTION
 
-[DEFAULT].collectors            Provision list of Collector service providers in
-                                ip-address:port format
-                                Eg: 10.1.1.1:8086 10.1.1.2:8086
+[DEFAULTS].collectors         Provision list of Collector [role=collector] service
+                              providers in ip-address:port ip-address2:port format
+                              Eg: 10.1.1.1:8086 10.1.1.2:8086
+
+[API_SERVER].api_server_list  Provision list of api-servers [role=config] in
+                              ip-address:port format
+                              Eg: 10.1.1.1:8082 10.1.1.2:8082
 
 ```
 
-###3.2.17  Provisioning Changes for ContrailWebUI
+###3.2.19  Provisioning Changes for ContrailWebUI (config.global.js)
 
 ```
 ================================================================================
  CONFIG PARAMETER                 CHANGES
 ================================================================================
-[CONFIG].discovery.server         Deprecate Discovery Server Parameter
-[CONFIG].discovery.port
+config.discovery.server           DEPRECATE DISCOVERY SUBSECTION
+config.discovery.port
 
-[CONFIG].analytics.servers        Provision list of Analytics service providers
-                                  in ip-address:port format
-                                  Eg: 10.1.1.1:8089 10.1.1.2:8089
+config.cnfg.server_ip             Provision list of Config [role=cfgm]
+                                  service providers as list of ip-address
+                                  Eg: ['10.1.1.1 10.1.1.2']
+config.cnfg.server_port           Server port as a string
+                                  Eg: '8082'
 
-[CONFIG].apiserver.servers        Provision list of ApiServer service providers in
-                                  ip-address:port format
 
-[CONFIG].dns.servers              Provision list of DnsServer service providers in
-                                  ip-address:port format
+config.analytics.server_ip        Provision list of Collector [role=collector]
+                                  service providers as a list of ip-address
+                                  Eg: ['10.1.1.1 10.1.1.2']
+config.analytics.server_port      Server port as a string
+                                  Eg: '8081'
+
+
+config.dns.server_ip              Provision list of Controller [role=control]
+                                  service providers as a list of ip-address
+                                  Eg: ['10.1.1.1 10.1.1.2'] 
+config.dns.server_port            Server port as a string 
+                                  Eg: '8092'
+  
 ```
 
 ##3.3      User workflow impact
@@ -333,8 +444,7 @@ handler to  handle addition/deletion of publishers.
 
 ##4.1     Assignee(s)
 
-* Nipa Kumar – All C++ Discovery Server Clients
-* Santosh G –  All python Discovery Server Clients
+* Nipa Kumar – All C++/python Discovery Server Clients
 
 #5 Performance and Scaling Impact
 None

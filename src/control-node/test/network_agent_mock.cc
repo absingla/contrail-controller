@@ -381,7 +381,8 @@ pugi::xml_document *XmppDocumentMock::RouteAddDeleteXmlDoc(
     if (add) {
         rt_entry.entry.local_preference = attributes.local_pref;
         rt_entry.entry.med = attributes.med;
-        rt_entry.entry.sequence_number = attributes.sequence;
+        rt_entry.entry.mobility.seqno = attributes.mobility.seqno;
+        rt_entry.entry.mobility.sticky = attributes.mobility.sticky;
         if (attributes.sgids.size()) {
             rt_entry.entry.security_group_list.security_group =
                 attributes.sgids;
@@ -411,8 +412,10 @@ pugi::xml_document *XmppDocumentMock::RouteAddDeleteXmlDoc(
                 item_nexthop.af = BgpAf::IPv4;
                 assert(!nexthop.address_.empty());
                 item_nexthop.address = nexthop.address_;
-                item_nexthop.label =
-                    nexthop.label_ ? nexthop.label_ : label_alloc_++;
+                if (!nexthop.no_label_) {
+                    item_nexthop.label =
+                        nexthop.label_ ? nexthop.label_ : label_alloc_++;
+                }
                 item_nexthop.tunnel_encapsulation_list.tunnel_encapsulation =
                     nexthop.tunnel_encapsulations_;
                 rt_entry.entry.next_hops.next_hop.push_back(item_nexthop);
@@ -449,7 +452,8 @@ pugi::xml_document *XmppDocumentMock::Inet6RouteAddDeleteXmlDoc(
 
     if (oper == ADD || oper == CHANGE) {
         rt_entry.entry.local_preference = attributes.local_pref;
-        rt_entry.entry.sequence_number = attributes.sequence;
+        rt_entry.entry.mobility.seqno = attributes.mobility.seqno;
+        rt_entry.entry.mobility.sticky = attributes.mobility.sticky;
         if (attributes.sgids.size()) {
             rt_entry.entry.security_group_list.security_group =
                 attributes.sgids;
@@ -617,7 +621,9 @@ pugi::xml_document *XmppDocumentMock::RouteEnetAddDeleteXmlDoc(
 
     if (add) {
         rt_entry.entry.local_preference = attributes.local_pref;
-        rt_entry.entry.sequence_number = attributes.sequence;
+        rt_entry.entry.etree_leaf = attributes.etree_leaf;
+        rt_entry.entry.mobility.seqno = attributes.mobility.seqno;
+        rt_entry.entry.mobility.sticky = attributes.mobility.sticky;
         if (attributes.sgids.size()) {
             rt_entry.entry.security_group_list.security_group =
                 attributes.sgids;
@@ -1017,11 +1023,24 @@ void NetworkAgentMock::AddRoute(const string &network_name,
                                 int local_pref, int med) {
     NextHops nexthops;
     if (!nexthop.empty()) {
-        nexthops.push_back(NextHop(nexthop, 0));
+        nexthops.push_back(NextHop(nexthop));
     }
     RouteAttributes attributes(
         local_pref, med, RouteAttributes::GetDefaultSequence());
 
+    AgentPeer *peer = GetAgent();
+    xml_document *xdoc =
+        impl_->RouteAddXmlDoc(network_name, prefix, nexthops, attributes);
+    peer->SendDocument(xdoc);
+    route_mgr_->AddOriginated(network_name, prefix);
+}
+
+void NetworkAgentMock::AddRoute(const string &network_name,
+                                const string &prefix,
+                                const NextHop &nexthop,
+                                const RouteAttributes &attributes) {
+    NextHops nexthops;
+    nexthops.push_back(nexthop);
     AgentPeer *peer = GetAgent();
     xml_document *xdoc =
         impl_->RouteAddXmlDoc(network_name, prefix, nexthops, attributes);
@@ -1047,7 +1066,7 @@ void NetworkAgentMock::AddRoute(const string &network_name,
                                 const RouteAttributes &attributes) {
     NextHops nexthops;
     if (!nexthop.empty())
-        nexthops.push_back(NextHop(nexthop, 0));
+        nexthops.push_back(NextHop(nexthop));
     AddRoute(network_name, prefix, nexthops, attributes);
 }
 
@@ -1075,7 +1094,7 @@ void NetworkAgentMock::AddInet6Route(const string &network,
         const RouteAttributes &attributes) {
     NextHops nexthops;
     if (!nexthop.empty())
-        nexthops.push_back(NextHop(nexthop, 0));
+        nexthops.push_back(NextHop(nexthop));
     AddInet6Route(network, prefix, nexthops, attributes);
 }
 
@@ -1094,7 +1113,7 @@ void NetworkAgentMock::AddInet6Route(const string &network,
         int med) {
     NextHops nexthops;
     if (!nexthop_str.empty()) {
-        nexthops.push_back(NextHop(nexthop_str, 0));
+        nexthops.push_back(NextHop(nexthop_str));
     }
     RouteAttributes attributes(
         local_pref, med, RouteAttributes::GetDefaultSequence());
@@ -1121,7 +1140,7 @@ void NetworkAgentMock::DeleteInet6Route(const string &network,
 void NetworkAgentMock::AddBogusInet6Route(const string &network,
         const string &prefix, const string &nexthop, TestErrorType error_type) {
     NextHops nexthops;
-    nexthops.push_back(NextHop(nexthop, 0));
+    nexthops.push_back(NextHop(nexthop));
 
     AgentPeer *peer = GetAgent();
     xml_document *xdoc = impl_->Inet6RouteAddBogusXmlDoc(network, prefix,
@@ -1135,7 +1154,7 @@ void NetworkAgentMock::AddEnetRoute(const string &network_name,
     NextHops nexthops;
 
     if (!nexthop.empty()) {
-        nexthops.push_back(NextHop(nexthop, 0));
+        nexthops.push_back(NextHop(nexthop));
     }
     AddEnetRoute(network_name, prefix, nexthops, params);
 }
@@ -1167,7 +1186,7 @@ void NetworkAgentMock::AddEnetRoute(const string &network_name,
     NextHops nexthops;
 
     if (!nexthop.empty())
-        nexthops.push_back(NextHop(nexthop, 0));
+        nexthops.push_back(NextHop(nexthop));
     AddEnetRoute(network_name, prefix, nexthops, attributes);
 }
 

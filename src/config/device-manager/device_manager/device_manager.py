@@ -16,6 +16,9 @@ import requests
 import ConfigParser
 import socket
 import time
+import hashlib
+import signal
+import random
 from pprint import pformat
 
 from pysandesh.sandesh_base import *
@@ -150,7 +153,15 @@ class DeviceManager(object):
         PushConfigState.set_push_delay_per_kb(float(self._args.push_delay_per_kb))
         PushConfigState.set_push_delay_max(int(self._args.push_delay_max))
         PushConfigState.set_push_delay_enable(bool(self._args.push_delay_enable))
-
+  
+        # randomize collector list
+        self._args.random_collectors = self._args.collectors
+        self._chksum = "";
+        if self._args.collectors:
+            self._chksum = hashlib.md5(''.join(self._args.collectors)).hexdigest()
+            self._args.random_collectors = random.sample(self._args.collectors, \
+                                                      len(self._args.collectors))
+    
         # Initialize logger
         module = Module.DEVICE_MANAGER
         module_pkg = "device_manager"
@@ -174,6 +185,11 @@ class DeviceManager(object):
                 time.sleep(3)
             except ResourceExhaustionError:  # haproxy throws 503
                 time.sleep(3)
+
+        """ @sighup
+        Handle of SIGHUP for collector list config change
+        """
+        gevent.signal(signal.SIGHUP, self.sighup_handler)
 
         # Initialize amqp
         self._vnc_amqp = DMAmqpHandle(self.logger,
@@ -253,6 +269,25 @@ class DeviceManager(object):
             server_addrs=['%s:%s' % (self._args.api_server_ip,
                                      self._args.api_server_port)])
     # end connection_state_update
+
+    # sighup handler for applying new configs
+    def sighup_handler(self):
+        if self._args.conf_file:
+            config = ConfigParser.SafeConfigParser()
+            config.read(self._args.conf_file)
+            if 'DEFAULTS' in config.sections():
+               try:
+                   collectors = config.get('DEFAULTS', 'collectors')
+                   if type(collectors) is str:
+                       collectors = collectors.split()
+                       new_chksum = hashlib.md5("".join(collectors)).hexdigest()
+                       if new_chksum != self._chksum:
+                           self._chksum = new_chksum
+                           config.random_collectors = random.sample(collectors, len(collectors))
+                           self.logger.sandesh_reconfig_collectors(config)
+               except ConfigParser.NoOptionError as e:
+                   pass
+    # end sighup_handler
 
 def parse_args(args_str):
     '''
@@ -346,7 +381,15 @@ def parse_args(args_str):
         'cassandra_user': None,
         'cassandra_password': None
     }
+    sandeshopts = {
+        'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+        'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+        'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+        'sandesh_ssl_enable': False,
+        'introspect_ssl_enable': False
+    }
 
+    saved_conf_file = args.conf_file
     if args.conf_file:
         config = ConfigParser.SafeConfigParser()
         config.read(args.conf_file)
@@ -359,6 +402,8 @@ def parse_args(args_str):
             ksopts.update(dict(config.items("KEYSTONE")))
         if 'CASSANDRA' in config.sections():
             cassandraopts.update(dict(config.items('CASSANDRA')))
+        if 'SANDESH' in config.sections():
+            sandeshopts.update(dict(config.items('SANDESH')))
 
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
@@ -373,6 +418,7 @@ def parse_args(args_str):
     defaults.update(secopts)
     defaults.update(ksopts)
     defaults.update(cassandraopts)
+    defaults.update(sandeshopts)
     parser.set_defaults(**defaults)
 
     parser.add_argument(
@@ -448,7 +494,11 @@ def parse_args(args_str):
         args.cassandra_server_list = args.cassandra_server_list.split()
     if type(args.collectors) is str:
         args.collectors = args.collectors.split()
+    args.sandesh_config = SandeshConfig(args.sandesh_keyfile,
+        args.sandesh_certfile, args.sandesh_ca_cert,
+        args.sandesh_ssl_enable, args.introspect_ssl_enable)
 
+    args.conf_file = saved_conf_file
     return args
 # end parse_args
 

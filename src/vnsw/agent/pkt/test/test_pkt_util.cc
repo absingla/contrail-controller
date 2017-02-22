@@ -156,6 +156,32 @@ void TxIpMplsPacket(int ifindex, const char *out_sip,
     delete pkt;
 }
 
+void TxIpPBBPacket(int ifindex, const char *out_sip, const char *out_dip,
+                   uint32_t label, uint32_t vrf, const MacAddress &b_smac,
+                   const MacAddress &b_dmac, uint32_t isid,
+                   const MacAddress &c_smac, MacAddress &c_dmac,
+                   const char *sip, const char *dip, int hash_id) {
+    PktGen *pkt = new PktGen();
+
+    pkt->AddEthHdr("00:00:00:00:00:01", "00:00:00:00:00:02", 0x800);
+    pkt->AddAgentHdr(ifindex, AgentHdr::TRAP_MAC_LEARN, hash_id, vrf,
+                     label);
+    pkt->AddEthHdr("00:00:5E:00:01:00", "00:00:00:00:00:01", 0x800);
+    pkt->AddIpHdr(out_sip, out_dip, IPPROTO_GRE);
+    pkt->AddGreHdr();
+    pkt->AddMplsHdr(label, true);
+    pkt->AddEthHdr(b_dmac.ToString(), b_smac.ToString(), ETHERTYPE_PBB);
+    pkt->AddPBBHdr(isid);
+    pkt->AddEthHdr(c_dmac.ToString(), c_smac.ToString(), 0x800);
+    pkt->AddIpHdr(sip, dip, 1);
+
+    uint8_t *ptr(new uint8_t[pkt->GetBuffLen()]);
+    memcpy(ptr, pkt->GetBuff(), pkt->GetBuffLen());
+    client->agent_init()->pkt0()->ProcessFlowPacket(ptr, pkt->GetBuffLen(),
+            pkt->GetBuffLen());
+    delete pkt;
+}
+
 void MakeUdpMplsPacket(PktGen *pkt, int ifindex, const char *out_sip,
                                const char *out_dip, uint32_t label,
                                const char *sip, const char *dip, uint16_t sport,
@@ -379,6 +405,28 @@ void TxTcp6MplsPacket(int ifindex, const char *out_sip,
     MakeTcp6MplsPacket(pkt, ifindex, out_sip, out_dip, label, sip, dip, sport,
                        dport, ack, hash_id);
 
+    uint8_t *ptr(new uint8_t[pkt->GetBuffLen()]);
+    memcpy(ptr, pkt->GetBuff(), pkt->GetBuffLen());
+    client->agent_init()->pkt0()->ProcessFlowPacket(ptr, pkt->GetBuffLen(),
+                                                    pkt->GetBuffLen());
+    delete pkt;
+}
+
+void TxL2Ip6Packet(int ifindex, const char *smac, const char *dmac,
+                const char *sip, const char *dip,
+		        int proto, int hash_id, int vrf,
+                uint16_t sport, uint16_t dport) {
+    PktGen *pkt = new PktGen();
+
+    pkt->AddEthHdr("00:00:00:00:00:01", "00:00:00:00:00:02", 0x800);
+    pkt->AddAgentHdr(ifindex, AgentHdr::TRAP_FLOW_MISS, hash_id, vrf) ;
+    pkt->AddEthHdr(dmac, smac, ETHERTYPE_IPV6);
+    pkt->AddIp6Hdr(sip, dip, proto);
+    if (proto == IPPROTO_ICMPV6) {
+        pkt->AddIcmp6Hdr();
+    } else {
+        pkt->AddUdpHdr(sport, dport, 64);
+    }
     uint8_t *ptr(new uint8_t[pkt->GetBuffLen()]);
     memcpy(ptr, pkt->GetBuff(), pkt->GetBuffLen());
     client->agent_init()->pkt0()->ProcessFlowPacket(ptr, pkt->GetBuffLen(),

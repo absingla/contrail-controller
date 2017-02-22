@@ -119,6 +119,14 @@ class ResourceDbMixin(object):
         pass
     #end dbe_delete_notification
 
+    @classmethod
+    def pre_dbe_read(cls, id, db_conn):
+        return True, ''
+
+    @classmethod
+    def post_dbe_read(cls, obj_dict, db_conn):
+        return True, ''
+
 # end class ResourceDbMixin
 
 class Resource(ResourceDbMixin):
@@ -212,6 +220,33 @@ class GlobalSystemConfigServer(Resource, GlobalSystemConfig):
 
 class FloatingIpServer(Resource, FloatingIp):
     @classmethod
+    def _get_fip_pool_subnets(cls, fip_obj_dict, db_conn):
+        fip_subnets = None
+
+        # Get floating-ip-pool object.
+        fip_pool_fq_name = fip_obj_dict['fq_name'][:-1]
+        fip_pool_uuid = db_conn.fq_name_to_uuid('floating_ip_pool',
+            fip_pool_fq_name)
+        ok, res = cls.dbe_read(db_conn, 'floating_ip_pool',
+            fip_pool_uuid)
+        if ok:
+            # Successful read returns fip pool.
+            fip_pool_dict = res
+        else:
+            return ok, res
+
+        # Get any subnets configured on the floating-ip-pool.
+        try:
+            fip_subnets =\
+                fip_pool_dict['floating_ip_pool_subnets']
+        except KeyError, TypeError:
+            # It is acceptable that the prefixes and subnet_list may be absent
+            # or may be None.
+            pass
+
+        return True, fip_subnets
+
+    @classmethod
     def pre_dbe_create(cls, tenant_name, obj_dict, db_conn):
         if obj_dict['parent_type'] == 'instance-ip':
             return True, ""
@@ -219,11 +254,53 @@ class FloatingIpServer(Resource, FloatingIp):
         vn_fq_name = obj_dict['fq_name'][:-2]
         req_ip = obj_dict.get("floating_ip_address")
         if req_ip and cls.addr_mgmt.is_ip_allocated(req_ip, vn_fq_name):
-            return (False, (400, 'Ip address already in use'))
+            return (False, (409, 'Ip address already in use'))
         try:
-            fip_addr = cls.addr_mgmt.ip_alloc_req(vn_fq_name,
+            #
+            # Parse through floating-ip-pool config to see if there are any
+            # guidelines laid for allocation of this floating-ip.
+            #
+            fip_subnets = None
+            ok, ret_val = cls._get_fip_pool_subnets(obj_dict, db_conn)
+            # On a successful fip-pool subnet get, the subnet list is returned.
+            # Otherwise, returned value has appropriate reason string.
+            if ok:
+                fip_subnets = ret_val
+            else:
+                return (ok, (400, "Floating-ip-pool lookup failed with error:"\
+                    + ret_val))
+
+            if not fip_subnets:
+                # Subnet specification was not found on the floating-ip-pool.
+                # Proceed to allocated floating-ip from any of the subnets
+                # on the virtual-network.
+                fip_addr = cls.addr_mgmt.ip_alloc_req(vn_fq_name,
                                                   asked_ip_addr=req_ip,
                                                   alloc_id=obj_dict['uuid'])
+            else:
+                subnets_tried = []
+                # Iterate through configured subnets on floating-ip-pool.
+                # We will try to allocate floating-ip by iterating through
+                # the list of configured subnets.
+                for fip_pool_subnet in fip_subnets['subnet_uuid']:
+                    try:
+                        # Record the subnets that we try to allocate from.
+                        subnets_tried.append(fip_pool_subnet)
+
+                        fip_addr = cls.addr_mgmt.ip_alloc_req(vn_fq_name,
+                                sub = fip_pool_subnet, asked_ip_addr=req_ip,
+                                alloc_id=obj_dict['uuid'])
+
+                    except cls.addr_mgmt.AddrMgmtSubnetExhausted:
+                        # This subnet is exhausted. Try next subnet.
+                        continue
+
+                if not fip_addr:
+                    # Floating-ip could not be allocated from any of the
+                    # configured subnets. Raise an exception.
+                    raise cls.addr_mgmt.AddrMgmtSubnetExhausted(vn_fq_name,
+                        subnets_tried)
+
             def undo():
                 db_conn.config_log(
                     'AddrMgmt: free FIP %s for vn=%s tenant=%s, on undo'
@@ -289,7 +366,7 @@ class AliasIpServer(Resource, AliasIp):
         vn_fq_name = obj_dict['fq_name'][:-2]
         req_ip = obj_dict.get("alias_ip_address")
         if req_ip and cls.addr_mgmt.is_ip_allocated(req_ip, vn_fq_name):
-            return (False, (400, 'Ip address already in use'))
+            return (False, (409, 'Ip address already in use'))
         try:
             aip_addr = cls.addr_mgmt.ip_alloc_req(vn_fq_name,
                                                   asked_ip_addr=req_ip,
@@ -419,7 +496,7 @@ class InstanceIpServer(Resource, InstanceIp):
         if req_ip and cls.addr_mgmt.is_ip_allocated(req_ip, vn_fq_name,
                                                     vn_uuid=vn_id):
             if not cls.addr_mgmt.is_gateway_ip(vn_dict, req_ip):
-                return (False, (400, 'Ip address already in use'))
+                return (False, (409, 'Ip address already in use'))
             elif cls._vmi_has_vm_ref(db_conn, obj_dict):
                 return (False,
                     (400, 'Gateway IP cannot be used by VM port'))
@@ -549,7 +626,7 @@ class LogicalRouterServer(Resource, LogicalRouter):
                     read_result.get('virtual_machine_refs')):
                 msg = "Port(%s) already in use by virtual-machine(%s)" %\
                       (vmi_id, read_result['parent_uuid'])
-                return (False, (400, msg))
+                return (False, (409, msg))
         return (True, '')
 
     @classmethod
@@ -611,7 +688,20 @@ class LogicalRouterServer(Resource, LogicalRouter):
                 db_conn, obj_dict)
         if not ok:
             return (ok, result)
-        return cls.is_port_in_use_by_vm(obj_dict, db_conn)
+
+        ok, result = cls.is_port_in_use_by_vm(obj_dict, db_conn)
+        if not ok:
+            return ok, result
+
+        # Check if type of all associated BGP VPN are 'l3'
+        ok, result = BgpvpnServer.check_router_supports_vpn_type(
+            db_conn, obj_dict)
+        if not ok:
+            return ok, result
+
+        # Check if we can reference the BGP VPNs
+        return BgpvpnServer.check_router_has_bgpvpn_assoc_via_network(
+            db_conn, obj_dict)
     # end pre_dbe_create
 
     @classmethod
@@ -620,7 +710,20 @@ class LogicalRouterServer(Resource, LogicalRouter):
                 db_conn, obj_dict, id)
         if not ok:
             return (ok, result)
-        return cls.is_port_in_use_by_vm(obj_dict, db_conn)
+
+        ok, result = cls.is_port_in_use_by_vm(obj_dict, db_conn)
+        if not ok:
+            return ok, result
+
+        # Check if type of all associated BGP VPN are 'l3'
+        ok, result = BgpvpnServer.check_router_supports_vpn_type(
+            db_conn, obj_dict, update=True)
+        if not ok:
+            return ok, result
+
+        # Check if we can reference the BGP VPNs
+        return BgpvpnServer.check_router_has_bgpvpn_assoc_via_network(
+            db_conn, obj_dict)
     # end pre_dbe_create
 
 # end class LogicalRouterServer
@@ -674,6 +777,47 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
     # end _check_vrouter_link
 
     @classmethod
+    def _check_bridge_domain_vmi_association(cls, obj_dict, db_conn, vn_uuid,
+                                             create):
+        vn_fq_name = []
+        if vn_uuid:
+            vn_fq_name = db_conn.uuid_to_fq_name(vn_uuid)
+
+        bridge_domain_links = {}
+        bd_refs = obj_dict.get('bridge_domain_refs') or []
+
+        vn_refs = obj_dict.get('virtual_network_refs') or []
+        if len(vn_refs) == 0 and len(bd_refs):
+            msg = "Virtual network can not be updated on virtual machine "\
+                  "interface(%s) while it refers a bridge domain"\
+                  %(obj_dict['uuid'])
+            return (False, msg)
+
+        for bd in bd_refs:
+            bd_fq_name = bd['to']
+            if bd_fq_name[0:3] != vn_fq_name:
+                msg = "Virtual machine interface(%s) can only refer to bridge "\
+                      "domain belonging to virtual network(%s)"\
+                      %(obj_dict['uuid'], vn_uuid)
+                return (False, msg)
+            bd_uuid = bd.get('uuid')
+            if not bd_uuid:
+                bd_uuid = db_conn.fq_name_to_uuid('bridge_domain', bd_fq_name)
+
+            bdmt = bd['attr']
+            vlan_tag = bdmt['vlan_tag']
+            if vlan_tag in bridge_domain_links:
+                msg = "Virtual machine interface(%s) already refers to bridge "\
+                      "domain(%s) for vlan tag %d"\
+                      %(obj_dict['uuid'], bd_uuid, vlan_tag)
+                return (False, msg)
+
+            bridge_domain_links[vlan_tag] = bd_uuid
+
+        return (True, '')
+    # end _check_bridge_domain_vmi_association
+
+    @classmethod
     def pre_dbe_create(cls, tenant_name, obj_dict, db_conn):
         vn_dict = obj_dict['virtual_network_refs'][0]
         vn_uuid = vn_dict.get('uuid')
@@ -691,6 +835,11 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
             return ok, result
 
         vn_dict = result
+
+        (ok, error) = cls._check_bridge_domain_vmi_association(obj_dict,
+                                                       db_conn, vn_uuid, True)
+        if not ok:
+            return (False, (400, error))
 
         inmac = None
         if 'virtual_machine_interface_mac_addresses' in obj_dict:
@@ -778,6 +927,14 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
                               db_conn, 'virtual_machine_interface', id)
         if not ok:
             return ok, read_result
+
+        vn_uuid = None
+        if 'virtual_network_refs' in read_result:
+            vn_uuid = read_result['virtual_network_refs'][0].get('uuid')
+        (ok, error) = cls._check_bridge_domain_vmi_association(obj_dict,
+                db_conn, vn_uuid, False)
+        if not ok:
+            return (False, (400, error))
 
         # check if the vmi is a internal interface of a logical
         # router
@@ -867,6 +1024,25 @@ class ServiceApplianceSetServer(Resource, ServiceApplianceSet):
         return True, ""
     # end pre_dbe_update
 # end class ServiceApplianceSetServer
+
+
+class BridgeDomainServer(Resource, BridgeDomain):
+    @classmethod
+    def pre_dbe_create(cls, tenant_name, obj_dict, db_conn):
+        vn_uuid = obj_dict.get('parent_uuid')
+        if vn_uuid is None:
+            vn_uuid = db_conn.fq_name_to_uuid('virtual_network', obj_dict['fq_name'][0:3])
+        ok, result = cls.dbe_read(db_conn, 'virtual_network', vn_uuid, obj_fields=['bridge_domains'])
+        if not ok:
+            return ok, result
+        if 'bridge_domains' in result and len(result['bridge_domains']) == 1:
+            msg = "Virtual network(%s) can have only one bridge domain. Bridge"\
+                  " domain(%s) is already created under this virtual network" %\
+                  (vn_uuid, result['bridge_domains'][0]['uuid'])
+            return (False, (400, msg))
+        return True, ""
+    # end pre_dbe_create
+# end class BridgeDomainServer
 
 class VirtualNetworkServer(Resource, VirtualNetwork):
 
@@ -1087,6 +1263,18 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         if not ok:
             return (False, (400, error))
 
+        # Check if network forwarding mode support BGP VPN types
+        ok, result = BgpvpnServer.check_network_supports_vpn_type(
+            db_conn, obj_dict)
+        if not ok:
+            return ok, result
+
+        # Check if we can reference the BGP VPNs
+        ok, result = BgpvpnServer.check_network_has_bgpvpn_assoc_via_router(
+            db_conn, obj_dict)
+        if not ok:
+            return ok, result
+
         ipam_refs = obj_dict.get('network_ipam_refs') or []
         try:
             cls.addr_mgmt.net_create_req(obj_dict)
@@ -1174,8 +1362,9 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         if not ok:
             return (False, (409, error))
 
-        fields = ['network_ipam_refs', 'virtual_network_network_id',
-                  'address_allocation_mode']
+        fields = ['network_ipam_refs', 'virtual_network_network_id', 'address_allocation_mode',
+                  'route_target_list', 'import_route_target_list', 'export_route_target_list',
+                  'multi_policy_service_chains_enabled']
         ok, read_result = cls.dbe_read(db_conn, 'virtual_network', id,
                                        obj_fields=fields)
         if not ok:
@@ -1209,6 +1398,18 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                                                              obj_dict)
         if not ok:
             return (ok, (409, result))
+
+        # Check if network forwarding mode support BGP VPN types
+        ok, result = BgpvpnServer.check_network_supports_vpn_type(
+            db_conn, obj_dict, update=True)
+        if not ok:
+            return ok, result
+
+        # Check if we can reference the BGP VPNs
+        ok, result = BgpvpnServer.check_network_has_bgpvpn_assoc_via_router(
+            db_conn, obj_dict)
+        if not ok:
+            return ok, result
 
         ipam_refs = obj_dict.get('network_ipam_refs') or []
         try:
@@ -2334,7 +2535,7 @@ class ForwardingClassServer(Resource, ForwardingClass):
     def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         ok, forwarding_class = cls.dbe_read(db_conn, 'forwarding_class', id)
         if not ok:
-            return ok, read_result
+            return ok, forwarding_class
 
         if 'forwarding_class_id' in obj_dict:
             fc_id = obj_dict['forwarding_class_id']
@@ -2447,3 +2648,284 @@ class QosConfigServer(Resource, QosConfig):
     def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn, **kwargs):
         return cls._check_qos_values(obj_dict, db_conn)
 # end class QosConfigServer
+
+
+class FloatingIpPoolServer(Resource, FloatingIpPool):
+    @classmethod
+    def pre_dbe_create(cls, tenant_name, obj_dict, db_conn):
+        #
+        # Floating-ip-pools corresponding to a virtual-network can be
+        # 'optionally' configured to be specific to a ipam subnet on a virtual-
+        # network.
+        #
+        # If the subnet is specified, sanity check the config to verify that
+        # the subnet exists in the virtual-network.
+        #
+
+        # If subnet info is not specified in the floating-ip-pool object, then
+        # there is nothing to validate. Just return.
+        try:
+            if (obj_dict['parent_type'] != 'virtual-network' or\
+                obj_dict['floating_ip_pool_subnets'] is None or\
+                obj_dict['floating_ip_pool_subnets']['subnet_uuid'] is None or\
+                not obj_dict['floating_ip_pool_subnets']['subnet_uuid']):
+                    return True, ""
+        except KeyError, TypeError:
+            return True, ""
+
+        try:
+            # Get the virtual-network object.
+            vn_fq_name = obj_dict['fq_name'][:-1]
+            vn_id = db_conn.fq_name_to_uuid('virtual_network', vn_fq_name)
+            ok, vn_dict = cls.dbe_read(db_conn, 'virtual_network', vn_id)
+            if not ok:
+                return ok, vn_dict
+
+            # Iterate through configured subnets on this FloatingIpPool.
+            # Validate the requested subnets are found on the virtual-network.
+            for fip_pool_subnet in \
+                obj_dict['floating_ip_pool_subnets']['subnet_uuid']:
+                vn_ipams = vn_dict['network_ipam_refs']
+                subnet_found = False
+                for ipam in vn_ipams:
+                     if not ipam['attr']:
+                         continue
+                     for ipam_subnet in ipam['attr']['ipam_subnets']:
+                         ipam_subnet_info = None
+                         if ipam_subnet['subnet_uuid']:
+                             if ipam_subnet['subnet_uuid'] != fip_pool_subnet:
+                                 # Subnet uuid does not match. This is not the
+                                 # requested subnet. Keep looking.
+                                 continue
+
+                             # Subnet of interest was found.
+                             subnet_found = True
+                             break
+
+                if not subnet_found:
+                    # Specified subnet was not found on the virtual-network.
+                    # Return failure.
+                    msg = "Subnet %s was not found in virtual-network %s" %\
+                        (fip_pool_subnet, vn_id)
+                    return (False, (400, msg))
+
+        except KeyError:
+            return (False,
+                (400, 'Incomplete info to create a floating-ip-pool'))
+
+        return True, ""
+# end class FloatingIpPoolServer
+
+
+class PhysicalRouterServer(Resource, PhysicalRouter):
+    @classmethod
+    def post_dbe_read(cls, obj_dict, db_conn):
+        if 'physical_router_user_credentials' in obj_dict:
+            if obj_dict['physical_router_user_credentials'].get('password'):
+                obj_dict['physical_router_user_credentials']['password'] = "**Password Hidden**"
+
+        return True, ''
+# end class PhysicalRouterServer
+
+
+class BgpvpnServer(Resource, Bgpvpn):
+    @classmethod
+    def _get_associated_bgpvpn_uuids(cls, db_conn, resource_type,
+                                     resource_dict, update=False):
+        bgpvpn_uuids = set(bgpvpn_ref['uuid'] for bgpvpn_ref
+                           in resource_dict.get('bgpvpn_refs', []))
+        if not update:
+            return True, bgpvpn_uuids
+
+        ok, result = cls.dbe_read(db_conn, resource_type,
+                                  resource_dict['uuid'], ['bgpvpn_refs'])
+        if not ok:
+            return ok,  result
+        bgpvpn_refs = result.get('bgpvpn_refs', [])
+        [bgpvpn_uuids.add(bgpvpn_ref['uuid']) for bgpvpn_ref in bgpvpn_refs]
+
+        return True, bgpvpn_uuids
+
+    @classmethod
+    def check_network_supports_vpn_type(cls, db_conn, vn_dict, update=False):
+        """
+        Validate the associated bgpvpn types correspond to the virtual
+        forwarding type.
+        """
+        if not vn_dict:
+            return True, ''
+
+        ok, result = cls._get_associated_bgpvpn_uuids(db_conn,
+                                                      'virtual_network',
+                                                      vn_dict, update)
+        if not ok:
+            return ok, result
+        bgpvpn_uuids = result
+        if not bgpvpn_uuids:
+            return True, ''
+
+        forwarding_mode = 'l2_l3'
+        virtual_network_properties = vn_dict.get('virtual_network_properties')
+        if virtual_network_properties is not None:
+           forwarding_mode = virtual_network_properties.get('forwarding_mode')
+
+        # Forwarding mode 'l2_l3' (default mode) can support all vpn types
+        if forwarding_mode == 'l2_l3':
+            return True, ''
+
+        ok, result = db_conn.dbe_list('bgpvpn',
+                                      obj_uuids=list(bgpvpn_uuids),
+                                      field_names=['bgpvpn_type'])
+        if not ok:
+            return ok, (500, 'Error in dbe_list: %s' % pformat(result))
+        bgpvpns = result
+
+        vpn_types = set(bgpvpn['bgpvpn_type'] for bgpvpn in bgpvpns)
+        if len(vpn_types) > 1:
+            msg = ("Cannot associates different bgpvpn types '%s' on a "
+                   "virtual network with a forwarding mode different to"
+                   "'l2_l3'" % vpn_types)
+            return False, (400, msg)
+        elif set([forwarding_mode]) != vpn_types:
+            msg = ("Cannot associates bgpvpn type '%s' with a virtual "
+                   "network in forwarding mode '%s'" % (vpn_types.pop(),
+                                                        forwarding_mode))
+            return False, (400, msg)
+        return True, ''
+
+    @classmethod
+    def check_router_supports_vpn_type(cls, db_conn, lr_dict, update=False):
+        """Limit associated bgpvpn types to 'l3' for logical router."""
+
+        if not lr_dict:
+            return True, ''
+
+        ok, result = cls._get_associated_bgpvpn_uuids(db_conn,
+                                                      'logical_router',
+                                                      lr_dict, update)
+        if not ok:
+            return ok, result
+        bgpvpn_uuids = result
+        if not bgpvpn_uuids:
+            return True, ''
+
+        ok, result = db_conn.dbe_list('bgpvpn',
+                                      obj_uuids=bgpvpn_uuids,
+                                      field_names=['bgpvpn_type'])
+        if not ok:
+            return ok, (500, 'Error in dbe_list: %s' % pformat(result))
+        bgpvpns = result
+
+        bgpvpn_not_supported = [bgpvpn for bgpvpn in bgpvpns
+                                if bgpvpn['bgpvpn_type'] != 'l3']
+
+        if not bgpvpn_not_supported:
+            return True, ''
+
+        msg = "Only bgpvpn type 'l3' can be associated to a logical router:\n"
+        for bgpvpn in bgpvpn_not_supported:
+            msg += ("- bgpvpn %s(%s) type is %s\n" %
+                    (bgpvpn.get('display_name', bgpvpn['fq_name'][-1]),
+                     bgpvpn['uuid'], bgpvpn['bgpvpn_type']))
+        return False, (400, msg)
+
+    @classmethod
+    def check_network_has_bgpvpn_assoc_via_router(cls, db_conn, vn_dict):
+        """
+        Check if logical routers attached to the network already have
+        a bgpvpn associated to it. If yes, forbid to add bgpvpn to that
+        networks.
+        """
+        if vn_dict.get('bgpvpn_refs') is None:
+            return True, ''
+
+        # List all logical router's vmis of networks
+        filters = {
+            'virtual_machine_interface_device_owner':
+            ['network:router_interface']
+        }
+        ok, result = db_conn.dbe_list('virtual_machine_interface',
+                                      back_ref_uuids=[vn_dict['uuid']],
+                                      filters=filters,
+                                      field_names=['logical_router_back_refs'])
+        if not ok:
+            return ok, (500, 'Error in dbe_list: %s' % pformat(result))
+        vmis = result
+
+        # Read bgpvpn refs of logical routers founded
+        lr_uuids = [vmi['logical_router_back_refs'][0]['uuid']
+                    for vmi in vmis]
+        if not lr_uuids:
+            return True, ''
+        ok, result = db_conn.dbe_list('logical_router',
+                                      obj_uuids=lr_uuids,
+                                      field_names=['bgpvpn_refs'])
+        if not ok:
+            return ok, (500, 'Error in dbe_list: %s' % pformat(result))
+        lrs = result
+        founded_bgpvpns = [(bgpvpn_ref['to'][-1], bgpvpn_ref['uuid'],
+                            lr.get('display_name', lr['fq_name'][-1]),
+                            lr['uuid'])
+                           for lr in lrs
+                           for bgpvpn_ref in lr.get('bgpvpn_refs', [])]
+        if not founded_bgpvpns:
+            return True, ''
+        msg = ("Network %s (%s) is linked to a logical router which is "
+               "associated to bgpvpn(s):\n" %
+               (vn_dict.get('display_name', vn_dict['fq_name'][-1]),
+                vn_dict['uuid']))
+        for founded_bgpvpn in founded_bgpvpns:
+            msg += ("- bgpvpn %s (%s) associated to router %s (%s)\n" %
+                    founded_bgpvpn)
+            return False, (400, msg[:-1])
+
+    @classmethod
+    def check_router_has_bgpvpn_assoc_via_network(cls, db_conn, lr_dict):
+        """
+        Check if virtual networks attached to the router already have
+        a bgpvpn associated to it. If yes, forbid to add bgpvpn to that
+        routers.
+        """
+        if lr_dict.get('bgpvpn_refs') is None:
+            return True, ''
+
+        vmi_uuids = [vmi_ref['uuid'] for vmi_ref in
+                     lr_dict.get('virtual_machine_interface_refs', [])]
+        if not vmi_uuids:
+            return True, ''
+
+        # List vmis to obtain their virtual networks
+        ok, result = db_conn.dbe_list('virtual_machine_interface',
+                                      obj_uuids=vmi_uuids,
+                                      field_names=['virtual_network_refs'])
+        if not ok:
+            return ok, (500, 'Error in dbe_list: %s' % pformat(result))
+        vmis = result
+        vn_uuids = [vn_ref['uuid']
+                    for vmi in vmis
+                    for vn_ref in vmi.get('virtual_network_refs', [])]
+        if not vn_uuids:
+            return True, ''
+
+        # List bgpvpn refs of virtual networks founded
+        ok, result = db_conn.dbe_list('virtual_network',
+                                      obj_uuids=vn_uuids,
+                                      field_names=['bgpvpn_refs'])
+        if not ok:
+            return ok, (500, 'Error in dbe_list: %s' % pformat(result))
+        vns = result
+        founded_bgpvpns = [(bgpvpn_ref['to'][-1], bgpvpn_ref['uuid'],
+                            vn.get('display_name', vn['fq_name'][-1]),
+                            vn['uuid'])
+                           for vn in vns
+                           for bgpvpn_ref in vn.get('bgpvpn_refs', [])]
+        if not founded_bgpvpns:
+            return True, ''
+        msg = ("Router %s (%s) is linked to virtual network(s) which is/are "
+               "associated to bgpvpn(s):\n" %
+               (lr_dict.get('display_name', lr_dict['fq_name'][-1]),
+                lr_dict['uuid']))
+        for founded_bgpvpn in founded_bgpvpns:
+            msg += ("- bgpvpn %s (%s) associated to network %s (%s)\n" %
+                    founded_bgpvpn)
+            return False, (400, msg[:-1])

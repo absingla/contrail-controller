@@ -18,6 +18,9 @@ import requests
 import ConfigParser
 import cStringIO
 import argparse
+import signal
+import random
+import hashlib
 
 import os
 
@@ -33,7 +36,7 @@ from cfgm_common.vnc_amqp import VncAmqpHandle
 
 from config_db import *
 
-from pysandesh.sandesh_base import Sandesh, SandeshSystem
+from pysandesh.sandesh_base import Sandesh, SandeshSystem, SandeshConfig
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 from sandesh_common.vns.ttypes import Module
@@ -522,7 +525,24 @@ class SvcMonitor(object):
         for cls in DBBaseSM.get_obj_type_map().values():
             cls.reset()
 
-
+    def sighup_handler(self):
+        if self._conf_file:
+            config = ConfigParser.SafeConfigParser()
+            config.read(self._conf_file)
+            if 'DEFAULTS' in config.sections():
+                try:
+                    collectors = config.get('DEFAULTS', 'collectors')
+                    if type(collectors) is str:
+                        collectors = collectors.split()
+                        new_chksum = hashlib.md5("".join(collectors)).hexdigest()
+                        if new_chksum != self._chksum:
+                            self._chksum = new_chksum 
+                            config.random_collectors = random.sample(collectors, len(collectors))
+                            self.logger.sandesh_reconfig_collectors(config)
+                except ConfigParser.NoOptionError as e:
+                     pass 
+    # end sighup_handler
+                        
 def skip_check_service(si):
     # wait for first launch
     if not si.launch_count:
@@ -631,10 +651,6 @@ def parse_args(args_str):
                          --rabbit_user guest
                          --rabbit_password guest
                          --cassandra_server_list 10.1.2.3:9160
-                         # for RDBMS backend
-                         --db_engine rdbms
-                         --rdbms_server_list 127.0.0.1:3306
-                         --rdbms_connection_config sqlite:///.test.db
                          --api_server_ip 10.1.2.3
                          --api_server_port 8082
                          --api_server_use_ssl False
@@ -672,10 +688,7 @@ def parse_args(args_str):
         'rabbit_password': 'guest',
         'rabbit_vhost': None,
         'rabbit_ha_mode': False,
-        'db_engine': 'cassandra',
         'cassandra_server_list': '127.0.0.1:9160',
-        'rdbms_server_list': "127.0.0.1:3306",
-        'rdbms_connection_config': "",
         'api_server_ip': '127.0.0.1',
         'api_server_port': '8082',
         'api_server_use_ssl': False,
@@ -728,19 +741,21 @@ def parse_args(args_str):
         'analytics_server_port': '8081',
         'availability_zone': None,
         'netns_availability_zone': None,
+        'aaa_mode': cfgm_common.AAA_MODE_DEFAULT_VALUE,
     }
     cassandraopts = {
         'cassandra_user': None,
         'cassandra_password': None,
     }
-
-    # rdbms options
-    rdbmsopts = {
-        'rdbms_user'     : None,
-        'rdbms_password' : None,
-        'rdbms_connection': None
+    sandeshopts = {
+        'sandesh_keyfile': '/etc/contrail/ssl/private/server-privkey.pem',
+        'sandesh_certfile': '/etc/contrail/ssl/certs/server.pem',
+        'sandesh_ca_cert': '/etc/contrail/ssl/certs/ca-cert.pem',
+        'sandesh_ssl_enable': False,
+        'introspect_ssl_enable': False
     }
 
+    saved_conf_file = args.conf_file
     config = ConfigParser.SafeConfigParser()
     if args.conf_file:
         config.read(args.conf_file)
@@ -755,8 +770,8 @@ def parse_args(args_str):
             schedops.update(dict(config.items("SCHEDULER")))
         if 'CASSANDRA' in config.sections():
             cassandraopts.update(dict(config.items('CASSANDRA')))
-        if 'RDBMS' in config.sections():
-                rdbmsopts.update(dict(config.items('RDBMS')))
+        if 'SANDESH' in config.sections():
+            sandeshopts.update(dict(config.items('SANDESH')))
 
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
@@ -771,21 +786,14 @@ def parse_args(args_str):
     defaults.update(secopts)
     defaults.update(ksopts)
     defaults.update(schedops)
-    defaults.update(rdbmsopts)
     defaults.update(cassandraopts)
+    defaults.update(sandeshopts)
     parser.set_defaults(**defaults)
 
     parser.add_argument(
         "--cassandra_server_list",
         help="List of cassandra servers in IP Address:Port format",
         nargs='+')
-    parser.add_argument(
-        "--rdbms_server_list",
-        help="List of cassandra servers in IP Address:Port format",
-        nargs='+')
-    parser.add_argument(
-        "--rdbms_connection",
-        help="DB Connection string")
     parser.add_argument(
         "--reset_config", action="store_true",
         help="Warning! Destroy previous configuration and start clean")
@@ -821,6 +829,9 @@ def parse_args(args_str):
                         help="Use syslog for logging")
     parser.add_argument("--syslog_facility",
                         help="Syslog facility to receive log lines")
+    parser.add_argument("--aaa_mode",
+                        choices=cfgm_common.AAA_MODE_VALID_VALUES,
+                        help="AAA mode")
     parser.add_argument("--admin_user",
                         help="Name of keystone admin user")
     parser.add_argument("--admin_password",
@@ -845,10 +856,9 @@ def parse_args(args_str):
                         help="Sandesh send rate limit in messages/sec.")
     parser.add_argument("--check_service_interval",
                         help="Check service interval")
-    parser.add_argument("--db_engine",
-        help="Database engine to use, default cassandra")
 
     args = parser.parse_args(remaining_argv)
+    args._conf_file = saved_conf_file
     args.config_sections = config
     if type(args.cassandra_server_list) is str:
         args.cassandra_server_list = args.cassandra_server_list.split()
@@ -861,16 +871,31 @@ def parse_args(args_str):
     if args.netns_availability_zone and \
             args.netns_availability_zone.lower() == 'none':
         args.netns_availability_zone = None
-    if type(args.rdbms_server_list) is str:
-        args.rdbms_server_list =\
-            args.rdbms_server_list.split()
+    args.sandesh_config = SandeshConfig(args.sandesh_keyfile,
+        args.sandesh_certfile, args.sandesh_ca_cert,
+        args.sandesh_ssl_enable, args.introspect_ssl_enable)
+
     return args
 
 
 def run_svc_monitor(args=None):
-    monitor = SvcMonitor(args)
 
+    # randomize collector list
+    args.random_collectors = args.collectors
+    if args.collectors:
+        args.random_collectors = random.sample(args.collectors, len(args.collectors))
+
+    monitor = SvcMonitor(args)
     monitor._zookeeper_client = _zookeeper_client
+    monitor._conf_file = args._conf_file
+    monitor._chksum = ""
+    if args.collectors:
+        monitor._chksum = hashlib.md5("".join(args.collectors)).hexdigest()
+
+    """ @sighup
+    SIGHUP handler to indicate configuration changes
+    """
+    gevent.signal(signal.SIGHUP, monitor.sighup_handler)
 
     # Retry till API server is up
     connected = False
