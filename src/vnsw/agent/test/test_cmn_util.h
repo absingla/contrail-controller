@@ -9,6 +9,11 @@
 
 using namespace std;
 
+#define EXPECT_TRUE_RET(a) \
+    do { EXPECT_TRUE((a)); if ((a) == false) ret = false; } while(0);
+#define EXPECT_FALSE_RET(a) \
+    do { EXPECT_FALSE((a)); if ((a) == true) ret = false; }  while(0);
+
 class VmiSubscribeEntry;
 static const int kProjectUuid = 101;
 
@@ -125,7 +130,9 @@ NextHop *InetInterfaceNHGet(NextHopTable *table, const char *ifname,
 NextHop *ReceiveNHGet(NextHopTable *table, const char *ifname, bool policy);
 bool VrfFind(const char *name);
 bool VrfFind(const char *name, bool ret_del);
+VrfEntry *VrfGet(size_t index);
 VrfEntry *VrfGet(const char *name, bool ret_del=false);
+uint32_t GetVrfId(const char *name);
 bool VnFind(int id);
 VnEntry *VnGet(int id);
 bool VxlanFind(int id);
@@ -438,8 +445,8 @@ void DelInstanceIp(const char *name);
 extern BgpPeer *bgp_peer_;
 VxLanId* GetVxLan(const Agent *agent, uint32_t vxlan_id);
 bool FindVxLanId(const Agent *agent, uint32_t vxlan_id);
-bool FindMplsLabel(MplsLabel::Type type, uint32_t label);
-MplsLabel *GetActiveLabel(MplsLabel::Type type, uint32_t label);
+bool FindMplsLabel(uint32_t label);
+MplsLabel *GetActiveLabel(uint32_t label);
 uint32_t GetFlowKeyNH(int id);
 uint32_t GetFlowKeyNH(char *name);
 bool FindNH(NextHopKey *key);
@@ -619,7 +626,8 @@ void SendBgpServiceConfig(const std::string &ip,
 void AddAddressVrfAssignAcl(const char *intf_name, int intf_id,
                             const char *sip, const char *dip, int proto,
                             int sport_start, int sport_end, int dport_start,
-                            int dport_end, const char *vrf, const char *ignore_acl);
+                            int dport_end, const char *vrf, const char *ignore_acl,
+                            const char *svc_intf_type = NULL);
 void SendBgpServiceConfig(const std::string &ip,
                           uint32_t source_port,
                           uint32_t id,

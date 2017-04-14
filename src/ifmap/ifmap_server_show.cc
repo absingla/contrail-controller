@@ -8,12 +8,16 @@
 
 #include <boost/bind.hpp>
 #include <boost/assign/list_of.hpp>
+#include <boost/regex.hpp>
 #include "base/logging.h"
 #include "db/db.h"
 #include "db/db_graph.h"
 #include "db/db_graph_vertex.h"
 #include "db/db_table_partition.h"
 #include "base/bitset.h"
+
+#include "ifmap/client/config_client_manager.h"
+#include "ifmap/client/config_db_client.h"
 
 #include "ifmap/ifmap_client.h"
 #include "ifmap/ifmap_exporter.h"
@@ -34,6 +38,8 @@
 
 #include <pugixml/pugixml.hpp>
 
+using boost::regex;
+using boost::regex_search;
 using namespace boost::assign;
 using namespace std;
 using namespace pugi;
@@ -165,7 +171,6 @@ public:
 bool ShowIFMapTable::TableToBuffer(const IFMapTableShowReq *request,
         IFMapTable *table, IFMapServer *server, const string &last_node_name,
         ShowData *show_data) {
-
     DBEntryBase *src = NULL;
     if (last_node_name.length()) {
         // If the last_node_name is set, it was the last node printed in the
@@ -181,20 +186,20 @@ bool ShowIFMapTable::TableToBuffer(const IFMapTableShowReq *request,
     }
 
     bool buffer_full = false;
-    string search_string = request->get_search_string();
+    regex search_expr(request->get_search_string());
     DBTablePartBase *partition = table->GetTablePartition(0);
     if (!src) {
         src = partition->GetFirst();
     }
     for (; src != NULL; src = partition->GetNext(src)) {
         IFMapNode *src_node = static_cast<IFMapNode *>(src);
-        if (!search_string.empty() &&
-            (src_node->ToString().find(search_string) == string::npos)) {
+        if (!regex_search(src_node->ToString(), search_expr)) {
             continue;
         }
         IFMapNodeShowInfo dest;
         IFMapNodeCopier copyNode(&dest, src, server);
         show_data->send_buffer.push_back(dest);
+
         // If we have picked up enough nodes for this round...
         if (show_data->send_buffer.size() == kMaxElementsPerRound) {
             // Save the values needed for the next round. When we come
@@ -479,7 +484,8 @@ public:
     }
 
     static bool IncludeLink(DBEntryBase *src, const string &search_string,
-                            const string &metadata);
+                            const regex &search_expr, const string &metadata,
+                            const regex &metadata_expr);
     static void CopyNode(IFMapLinkShowInfo *dest, DBEntryBase *src,
                          IFMapServer *server);
     static bool BufferStageCommon(const IFMapLinkTableShowReq *request,
@@ -507,23 +513,25 @@ public:
 };
 
 bool ShowIFMapLinkTable::IncludeLink(DBEntryBase *src,
-        const string &search_string, const string &metadata) {
+        const string &search_string, const regex &search_expr,
+        const string &metadata, const regex &metadata_expr) {
     IFMapLink *link = static_cast<IFMapLink *>(src);
     IFMapNode *left = link->left();
     IFMapNode *right = link->right();
 
-    // If we do not find the search string in the names of either of the 2 ends,
-    // do not include the link
+    // If we do not find the search string in the names of either of the
+    // two ends, do not include the link.
     if (!search_string.empty() &&
-        (!left || (left->ToString().find(search_string) == string::npos)) &&
-        (!right || (right->ToString().find(search_string) == string::npos))) {
+        (!left || !regex_search(left->ToString(), search_expr)) &&
+        (!right || !regex_search(right->ToString(), search_expr))) {
         return false;
     }
-    // If the metadata does not match, do not include the link
-    if (!metadata.empty() &&
-        (link->metadata().find(metadata) == string::npos)) {
+
+    // If the metadata does not match, do not include the link.
+    if (!metadata.empty() && !regex_search(link->metadata(), metadata_expr)) {
         return false;
     }
+
     return true;
 }
 
@@ -619,6 +627,8 @@ bool ShowIFMapLinkTable::BufferStageCommon(const IFMapLinkTableShowReq *request,
     IFMapLinkTable *table =  static_cast<IFMapLinkTable *>(
         sctx->ifmap_server()->database()->FindTable("__ifmap_metadata__.0"));
     if (table) {
+        regex search_expr(request->get_search_string());
+        regex metadata_expr(request->get_metadata());
         ShowData *show_data = static_cast<ShowData *>(data);
         show_data->send_buffer.reserve(kMaxElementsPerRound);
         show_data->table_size = table->Size();
@@ -631,8 +641,8 @@ bool ShowIFMapLinkTable::BufferStageCommon(const IFMapLinkTableShowReq *request,
             src = partition->GetFirst();
         }
         for (; src != NULL; src = partition->GetNext(src)) {
-            if (IncludeLink(src, request->get_search_string(),
-                            request->get_metadata())) {
+            if (IncludeLink(src, request->get_search_string(), search_expr,
+                            request->get_metadata(), metadata_expr)) {
                 IFMapLinkShowInfo dest;
                 CopyNode(&dest, src, sctx->ifmap_server());
                 show_data->send_buffer.push_back(dest);
@@ -1941,3 +1951,411 @@ void IFMapNodeTableListShowReq::HandleRequest() const {
     RequestPipeline rp(ps);
 }
 
+class ShowConfigDBUUIDCache {
+public:
+    static const uint32_t kMaxElementsPerRound = 50;
+
+    struct ShowData : public RequestPipeline::InstData {
+        vector<ConfigDBUUIDCacheEntry> send_buffer;
+    };
+
+    static RequestPipeline::InstData *AllocBuffer(int stage) {
+        return static_cast<RequestPipeline::InstData *>(new ShowData);
+    }
+
+    static bool BufferStageCommon(const ConfigDBUUIDCacheReq *request,
+                                  int instNum, RequestPipeline::InstData *data,
+                                  const string &last_uuid);
+    static bool BufferStage(const Sandesh *sr,
+                            const RequestPipeline::PipeSpec ps, int stage,
+                            int instNum, RequestPipeline::InstData *data);
+    static bool BufferStageIterate(const Sandesh *sr,
+                               const RequestPipeline::PipeSpec ps, int stage,
+                               int instNum, RequestPipeline::InstData *data);
+    static void SendStageCommon(const ConfigDBUUIDCacheReq *request,
+                                const RequestPipeline::PipeSpec ps,
+                                ConfigDBUUIDCacheResp *response);
+    static bool SendStage(const Sandesh *sr, const RequestPipeline::PipeSpec ps,
+                          int stage, int instNum,
+                          RequestPipeline::InstData *data);
+    static bool SendStageIterate(const Sandesh *sr,
+                                 const RequestPipeline::PipeSpec ps, int stage,
+                                 int instNum, RequestPipeline::InstData *data);
+    static bool SortList(const ConfigDBUUIDCacheEntry& lhs,
+                         const ConfigDBUUIDCacheEntry& rhs);
+};
+
+bool ShowConfigDBUUIDCache::SortList(
+        const ConfigDBUUIDCacheEntry& lhs,
+        const ConfigDBUUIDCacheEntry& rhs) {
+    BOOL_KEY_COMPARE(lhs.uuid, rhs.uuid);
+    return false;
+}
+
+bool ShowConfigDBUUIDCache::BufferStageCommon(const ConfigDBUUIDCacheReq *req,
+        int instNum, RequestPipeline::InstData *data, const string &last_uuid) {
+    IFMapSandeshContext *sctx =
+        static_cast<IFMapSandeshContext *>(req->module_context("IFMap"));
+    ConfigClientManager *ccmgr = sctx->ifmap_server()->get_config_manager();
+    ShowData *show_data = static_cast<ShowData *>(data);
+    show_data->send_buffer.reserve(kMaxElementsPerRound);
+    if (req->get_uuid().length()) {
+        ConfigDBUUIDCacheEntry entry;
+        if (!ccmgr->config_db_client()->UUIDToObjCacheShow(instNum,
+                                                   req->get_uuid(), entry)) {
+            return true;
+        }
+        show_data->send_buffer.push_back(entry);
+        return true;
+    } else {
+        ccmgr->config_db_client()->UUIDToObjCacheShow(instNum, last_uuid,
+                                  kMaxElementsPerRound, show_data->send_buffer);
+        return true;
+    }
+}
+
+bool ShowConfigDBUUIDCache::BufferStage(const Sandesh *sr,
+                                 const RequestPipeline::PipeSpec ps,
+                                 int stage, int instNum,
+                                 RequestPipeline::InstData *data) {
+    const ConfigDBUUIDCacheReq *request =
+        static_cast<const ConfigDBUUIDCacheReq *>(ps.snhRequest_.get());
+    string last_uuid;
+    return BufferStageCommon(request, instNum, data, last_uuid);
+}
+
+bool ShowConfigDBUUIDCache::BufferStageIterate(const Sandesh *sr,
+                                        const RequestPipeline::PipeSpec ps,
+                                        int stage, int instNum,
+                                        RequestPipeline::InstData *data) {
+    const ConfigDBUUIDCacheReqIterate *request_iterate =
+        static_cast<const ConfigDBUUIDCacheReqIterate *>(ps.snhRequest_.get());
+
+    ConfigDBUUIDCacheReq *request = new ConfigDBUUIDCacheReq;
+    request->set_context(request_iterate->context());
+    string last_uuid = request_iterate->get_uuid_info();
+    BufferStageCommon(request, instNum, data, last_uuid);
+    request->Release();
+    return true;
+}
+
+void ShowConfigDBUUIDCache::SendStageCommon(const ConfigDBUUIDCacheReq *request,
+                                     const RequestPipeline::PipeSpec ps,
+                                     ConfigDBUUIDCacheResp *response) {
+    const RequestPipeline::StageData *prev_stage_data = ps.GetStageData(0);
+
+    vector<ConfigDBUUIDCacheEntry> uuid_cache_list;
+    for (size_t i = 0; i < prev_stage_data->size(); ++i) {
+        const ShowConfigDBUUIDCache::ShowData &show_data = static_cast
+            <const ShowConfigDBUUIDCache::ShowData &>(prev_stage_data->at(i));
+        if (show_data.send_buffer.size()) {
+            size_t list_size = uuid_cache_list.size();
+            uuid_cache_list.reserve(list_size + show_data.send_buffer.size());
+            copy(show_data.send_buffer.begin(),
+                 show_data.send_buffer.end(),
+                 std::back_inserter(uuid_cache_list));
+            if (list_size) {
+                std::inplace_merge(uuid_cache_list.begin(),
+                       uuid_cache_list.begin() + list_size,
+                       uuid_cache_list.end(),
+                       boost::bind(&ShowConfigDBUUIDCache::SortList, _1, _2));
+            }
+        }
+    }
+
+    // If we have filled the buffer, set next_batch with all the values we will
+    // need in the next round.
+    string next_batch;
+    if (uuid_cache_list.size() > kMaxElementsPerRound) {
+        vector<ConfigDBUUIDCacheEntry> ouput_list(uuid_cache_list.begin(),
+                              uuid_cache_list.begin() + kMaxElementsPerRound);
+        response->set_uuid_cache(ouput_list);
+        next_batch = ouput_list.back().uuid;
+    } else {
+        response->set_uuid_cache(uuid_cache_list);
+    }
+
+    response->set_next_batch(next_batch);
+}
+
+bool ShowConfigDBUUIDCache::SendStage(const Sandesh *sr,
+                               const RequestPipeline::PipeSpec ps,
+                               int stage, int instNum,
+                               RequestPipeline::InstData *data) {
+    const ConfigDBUUIDCacheReq *request =
+        static_cast<const ConfigDBUUIDCacheReq *>(ps.snhRequest_.get());
+    ConfigDBUUIDCacheResp *response = new ConfigDBUUIDCacheResp;
+    SendStageCommon(request, ps, response);
+    response->set_context(request->context());
+    response->set_more(false);
+    response->Response();
+    return true;
+}
+
+bool ShowConfigDBUUIDCache::SendStageIterate(const Sandesh *sr,
+                                      const RequestPipeline::PipeSpec ps,
+                                      int stage, int instNum,
+                                      RequestPipeline::InstData *data) {
+    const ConfigDBUUIDCacheReqIterate *request_iterate =
+        static_cast<const ConfigDBUUIDCacheReqIterate *>(ps.snhRequest_.get());
+
+    ConfigDBUUIDCacheResp *response = new ConfigDBUUIDCacheResp;
+    ConfigDBUUIDCacheReq *request = new ConfigDBUUIDCacheReq;
+    request->set_context(request_iterate->context());
+    request->set_uuid(request_iterate->get_uuid_info());
+    SendStageCommon(request, ps, response);
+    response->set_context(request->context());
+    response->set_more(false);
+    response->Response();
+
+    request->Release();
+    return true;
+}
+
+void ConfigDBUUIDCacheReq::HandleRequest() const {
+
+    RequestPipeline::StageSpec s0, s1;
+    TaskScheduler *scheduler = TaskScheduler::GetInstance();
+
+    // 2 stages - first: gather/read, second: send
+
+    s0.taskId_ = scheduler->GetTaskId("cassandra::Reader");
+    s0.allocFn_ = ShowConfigDBUUIDCache::AllocBuffer;
+    s0.cbFn_ = ShowConfigDBUUIDCache::BufferStage;
+    for (int i = 0; i < ConfigClientManager::GetNumConfigReader(); ++i) {
+        s0.instances_.push_back(i);
+    }
+
+    // control-node ifmap show command task
+    s1.taskId_ = scheduler->GetTaskId("cn_ifmap::ShowCommand");
+    s1.cbFn_ = ShowConfigDBUUIDCache::SendStage;
+    s1.instances_.push_back(0);
+
+    RequestPipeline::PipeSpec ps(this);
+    ps.stages_= list_of(s0)(s1);
+    RequestPipeline rp(ps);
+}
+
+void ConfigDBUUIDCacheReqIterate::HandleRequest() const {
+
+    RequestPipeline::StageSpec s0, s1;
+    TaskScheduler *scheduler = TaskScheduler::GetInstance();
+
+    // 2 stages - first: gather/read, second: send
+
+    s0.taskId_ = scheduler->GetTaskId("cassandra::Reader");
+    s0.allocFn_ = ShowConfigDBUUIDCache::AllocBuffer;
+    s0.cbFn_ = ShowConfigDBUUIDCache::BufferStageIterate;
+    for (int i = 0; i < ConfigClientManager::GetNumConfigReader(); ++i) {
+        s0.instances_.push_back(i);
+    }
+
+    // control-node ifmap show command task
+    s1.taskId_ = scheduler->GetTaskId("cn_ifmap::ShowCommand");
+    s1.cbFn_ = ShowConfigDBUUIDCache::SendStageIterate;
+    s1.instances_.push_back(0);
+
+    RequestPipeline::PipeSpec ps(this);
+    ps.stages_= list_of(s0)(s1);
+    RequestPipeline rp(ps);
+}
+
+class ShowConfigDBUUIDToFQName {
+public:
+    static const uint32_t kMaxElementsPerRound = 50;
+
+    struct ShowData : public RequestPipeline::InstData {
+        vector<ConfigDBFQNameCacheEntry> send_buffer;
+    };
+
+    static RequestPipeline::InstData *AllocBuffer(int stage) {
+        return static_cast<RequestPipeline::InstData *>(new ShowData);
+    }
+
+    static bool BufferStageCommon(const ConfigDBUUIDToFQNameReq *request,
+                                  RequestPipeline::InstData *data,
+                                  const string &last_uuid);
+    static bool BufferStage(const Sandesh *sr,
+                            const RequestPipeline::PipeSpec ps, int stage,
+                            int instNum, RequestPipeline::InstData *data);
+    static bool BufferStageIterate(const Sandesh *sr,
+                                   const RequestPipeline::PipeSpec ps, int stage,
+                                   int instNum, RequestPipeline::InstData *data);
+    static void SendStageCommon(const ConfigDBUUIDToFQNameReq *request,
+                                const RequestPipeline::PipeSpec ps,
+                                ConfigDBUUIDToFQNameResp *response);
+    static bool SendStage(const Sandesh *sr, const RequestPipeline::PipeSpec ps,
+                          int stage, int instNum,
+                          RequestPipeline::InstData *data);
+    static bool SendStageIterate(const Sandesh *sr,
+                                 const RequestPipeline::PipeSpec ps, int stage,
+                                 int instNum, RequestPipeline::InstData *data);
+    static bool SortList(const ConfigDBFQNameCacheEntry& lhs,
+                         const ConfigDBFQNameCacheEntry& rhs);
+};
+
+bool ShowConfigDBUUIDToFQName::BufferStageCommon(
+                     const ConfigDBUUIDToFQNameReq *request,
+                     RequestPipeline::InstData *data, const string &last_uuid) {
+    IFMapSandeshContext *sctx =
+        static_cast<IFMapSandeshContext *>(request->module_context("IFMap"));
+    ConfigClientManager *ccmgr = sctx->ifmap_server()->get_config_manager();
+    ShowData *show_data = static_cast<ShowData *>(data);
+    show_data->send_buffer.reserve(kMaxElementsPerRound);
+    if (request->get_uuid().length()) {
+        ConfigDBFQNameCacheEntry entry;
+        if (!ccmgr->config_db_client()->UUIDToFQNameShow(request->get_uuid(),
+                                                         entry)) {
+            return true;
+        }
+        show_data->send_buffer.push_back(entry);
+        return true;
+    } else {
+        ccmgr->config_db_client()->UUIDToFQNameShow(last_uuid,
+                                kMaxElementsPerRound, show_data->send_buffer);
+        return true;
+    }
+}
+
+bool ShowConfigDBUUIDToFQName::BufferStage(const Sandesh *sr,
+                                 const RequestPipeline::PipeSpec ps,
+                                 int stage, int instNum,
+                                 RequestPipeline::InstData *data) {
+    const ConfigDBUUIDToFQNameReq *request =
+        static_cast<const ConfigDBUUIDToFQNameReq *>(ps.snhRequest_.get());
+    string last_uuid;
+    return BufferStageCommon(request, data, last_uuid);
+}
+
+bool ShowConfigDBUUIDToFQName::BufferStageIterate(const Sandesh *sr,
+                                        const RequestPipeline::PipeSpec ps,
+                                        int stage, int instNum,
+                                        RequestPipeline::InstData *data) {
+    const ConfigDBUUIDToFQNameReqIterate *request_iterate =
+      static_cast<const ConfigDBUUIDToFQNameReqIterate *>(ps.snhRequest_.get());
+
+    ConfigDBUUIDToFQNameReq *request = new ConfigDBUUIDToFQNameReq;
+    request->set_context(request_iterate->context());
+    string last_uuid = request_iterate->get_uuid_info();
+    BufferStageCommon(request, data, last_uuid);
+    request->Release();
+    return true;
+}
+
+bool ShowConfigDBUUIDToFQName::SortList(
+        const ConfigDBFQNameCacheEntry& lhs,
+        const ConfigDBFQNameCacheEntry& rhs) {
+    BOOL_KEY_COMPARE(lhs.uuid, rhs.uuid);
+    return false;
+}
+
+void ShowConfigDBUUIDToFQName::SendStageCommon(
+                           const ConfigDBUUIDToFQNameReq *request,
+                           const RequestPipeline::PipeSpec ps,
+                           ConfigDBUUIDToFQNameResp *response) {
+    const RequestPipeline::StageData *prev_stage_data = ps.GetStageData(0);
+
+    vector<ConfigDBFQNameCacheEntry> fq_name_cache_list;
+    const ShowConfigDBUUIDToFQName::ShowData &show_data = static_cast
+        <const ShowConfigDBUUIDToFQName::ShowData &>(prev_stage_data->at(0));
+    if (show_data.send_buffer.size()) {
+        size_t list_size = fq_name_cache_list.size();
+        fq_name_cache_list.reserve(list_size + show_data.send_buffer.size());
+        copy(show_data.send_buffer.begin(), show_data.send_buffer.end(),
+             std::back_inserter(fq_name_cache_list));
+        if (list_size) {
+            std::inplace_merge(fq_name_cache_list.begin(),
+               fq_name_cache_list.begin() + list_size,
+               fq_name_cache_list.end(),
+               boost::bind(&ShowConfigDBUUIDToFQName::SortList, _1, _2));
+        }
+    }
+
+    // If we have filled the buffer, set next_batch with all the values we will
+    // need in the next round.
+    string next_batch;
+    if (fq_name_cache_list.size() == kMaxElementsPerRound) {
+        next_batch = fq_name_cache_list.back().uuid;
+    }
+
+    response->set_fqname_cache(fq_name_cache_list);
+    response->set_next_batch(next_batch);
+}
+
+bool ShowConfigDBUUIDToFQName::SendStage(const Sandesh *sr,
+                               const RequestPipeline::PipeSpec ps,
+                               int stage, int instNum,
+                               RequestPipeline::InstData *data) {
+    const ConfigDBUUIDToFQNameReq *request =
+        static_cast<const ConfigDBUUIDToFQNameReq *>(ps.snhRequest_.get());
+    ConfigDBUUIDToFQNameResp *response = new ConfigDBUUIDToFQNameResp;
+    SendStageCommon(request, ps, response);
+    response->set_context(request->context());
+    response->set_more(false);
+    response->Response();
+    return true;
+}
+
+bool ShowConfigDBUUIDToFQName::SendStageIterate(const Sandesh *sr,
+                                      const RequestPipeline::PipeSpec ps,
+                                      int stage, int instNum,
+                                      RequestPipeline::InstData *data) {
+    const ConfigDBUUIDToFQNameReqIterate *request_iterate =
+        static_cast<const ConfigDBUUIDToFQNameReqIterate *>(ps.snhRequest_.get());
+
+    ConfigDBUUIDToFQNameResp *response = new ConfigDBUUIDToFQNameResp;
+    ConfigDBUUIDToFQNameReq *request = new ConfigDBUUIDToFQNameReq;
+    request->set_context(request_iterate->context());
+    request->set_uuid(request_iterate->get_uuid_info());
+    SendStageCommon(request, ps, response);
+    response->set_context(request->context());
+    response->set_more(false);
+    response->Response();
+
+    request->Release();
+    return true;
+}
+
+void ConfigDBUUIDToFQNameReq::HandleRequest() const {
+
+    RequestPipeline::StageSpec s0, s1;
+    TaskScheduler *scheduler = TaskScheduler::GetInstance();
+
+    // 2 stages - first: gather/read, second: send
+
+    s0.taskId_ = scheduler->GetTaskId("cassandra::Reader");
+    s0.allocFn_ = ShowConfigDBUUIDToFQName::AllocBuffer;
+    s0.cbFn_ = ShowConfigDBUUIDToFQName::BufferStage;
+    s0.instances_.push_back(0);
+
+    // control-node ifmap show command task
+    s1.taskId_ = scheduler->GetTaskId("cn_ifmap::ShowCommand");
+    s1.cbFn_ = ShowConfigDBUUIDToFQName::SendStage;
+    s1.instances_.push_back(0);
+
+    RequestPipeline::PipeSpec ps(this);
+    ps.stages_= list_of(s0)(s1);
+    RequestPipeline rp(ps);
+}
+
+void ConfigDBUUIDToFQNameReqIterate::HandleRequest() const {
+
+    RequestPipeline::StageSpec s0, s1;
+    TaskScheduler *scheduler = TaskScheduler::GetInstance();
+
+    // 2 stages - first: gather/read, second: send
+
+    s0.taskId_ = scheduler->GetTaskId("cassandra::Reader");
+    s0.allocFn_ = ShowConfigDBUUIDToFQName::AllocBuffer;
+    s0.cbFn_ = ShowConfigDBUUIDToFQName::BufferStageIterate;
+    s0.instances_.push_back(0);
+
+    // control-node ifmap show command task
+    s1.taskId_ = scheduler->GetTaskId("cn_ifmap::ShowCommand");
+    s1.cbFn_ = ShowConfigDBUUIDToFQName::SendStageIterate;
+    s1.instances_.push_back(0);
+
+    RequestPipeline::PipeSpec ps(this);
+    ps.stages_= list_of(s0)(s1);
+    RequestPipeline rp(ps);
+}

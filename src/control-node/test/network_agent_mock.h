@@ -183,18 +183,18 @@ public:
 };
 
 struct NextHop {
-    NextHop() : no_label_(false), label_(0) { }
+    NextHop() : no_label_(false), label_(0), l3_label_(0) { }
     NextHop(std::string address) :
-            address_(address), no_label_(false), label_(0) {
+            address_(address), no_label_(false), label_(0), l3_label_(0) {
         tunnel_encapsulations_.push_back("gre");
     }
     NextHop(bool no_label, std::string address) :
-            address_(address), no_label_(no_label), label_(0) {
+            address_(address), no_label_(no_label), label_(0), l3_label_(0) {
     }
     NextHop(std::string address, uint32_t label, std::string tunnel,
             const std::string virtual_network = "") :
-                address_(address), no_label_(false), label_(label),
-                virtual_network_(virtual_network) {
+            address_(address), no_label_(false), label_(label), l3_label_(0),
+            virtual_network_(virtual_network) {
         if (tunnel.empty()) {
             tunnel_encapsulations_.push_back("gre");
         } else if (tunnel == "all") {
@@ -207,11 +207,19 @@ struct NextHop {
             tunnel_encapsulations_.push_back(tunnel);
         }
     }
+    NextHop(std::string address, std::string mac, uint32_t label,
+        uint32_t l3_label, const std::string virtual_network = "") :
+                address_(address), mac_(mac), no_label_(false), label_(label),
+                l3_label_(l3_label), virtual_network_(virtual_network) {
+        tunnel_encapsulations_.push_back("vxlan");
+    }
 
     bool operator==(NextHop other) {
         if (address_ != other.address_) return false;
+        if (mac_ != other.mac_) return false;
         if (no_label_ != other.no_label_) return false;
         if (label_ != other.label_) return false;
+        if (l3_label_ != other.l3_label_) return false;
         if (tunnel_encapsulations_.size() !=
                 other.tunnel_encapsulations_.size()) {
             return false;
@@ -231,13 +239,13 @@ struct NextHop {
     }
 
     std::string address_;
+    std::string mac_;
     bool no_label_;
     int label_;
+    int l3_label_;
     std::vector<std::string> tunnel_encapsulations_;
     std::string virtual_network_;
 };
-
-typedef std::vector<NextHop> NextHops;
 
 class XmppDocumentMock {
 public:
@@ -255,29 +263,28 @@ public:
     pugi::xml_document *AddEorMarker();
     pugi::xml_document *RouteAddXmlDoc(const std::string &network,
         const std::string &prefix,
-        const NextHops &nexthops = NextHops(),
+        const NextHop &nh = NextHop(),
         const RouteAttributes &attributes = RouteAttributes());
     pugi::xml_document *RouteDeleteXmlDoc(const std::string &network, 
         const std::string &prefix);
 
     pugi::xml_document *Inet6RouteAddXmlDoc(const std::string &network,
-        const std::string &prefix, const NextHops &nexthops,
+        const std::string &prefix, const NextHop &nh,
         const RouteAttributes &attributes);
     pugi::xml_document *Inet6RouteChangeXmlDoc(const std::string &network,
-        const std::string &prefix, const NextHops &nexthops,
+        const std::string &prefix, const NextHop &nh,
         const RouteAttributes &attributes);
     pugi::xml_document *Inet6RouteDeleteXmlDoc(const std::string &network,
         const std::string &prefix);
     pugi::xml_document *Inet6RouteAddBogusXmlDoc(const std::string &network,
-        const std::string &prefix, NextHops nexthops, TestErrorType error_type);
+        const std::string &prefix, NextHop nh, TestErrorType error_type);
 
     pugi::xml_document *RouteEnetAddXmlDoc(const std::string &network,
                                            const std::string &prefix,
-                                           const NextHops &nexthops,
+                                           const NextHop &nh,
                                            const RouteAttributes &attributes);
     pugi::xml_document *RouteEnetDeleteXmlDoc(const std::string &network,
-                                              const std::string &prefix,
-                                              NextHops nexthops = NextHops());
+                                              const std::string &prefix);
     pugi::xml_document *RouteMcastAddXmlDoc(const std::string &network, 
                                             const std::string &sg,
                                             const std::string &nexthop,
@@ -286,6 +293,7 @@ public:
     pugi::xml_document *RouteMcastDeleteXmlDoc(const std::string &network, 
                                                const std::string &sg);
     pugi::xml_document *SubscribeXmlDoc(const std::string &network, int id,
+                                        bool no_ribout = false,
                                         std::string type = kNetworkServiceJID);
     pugi::xml_document *UnsubscribeXmlDoc(const std::string &network, int id,
                                         std::string type = kNetworkServiceJID);
@@ -298,18 +306,18 @@ public:
 private:
     pugi::xml_node PubSubHeader(std::string type);
     pugi::xml_document *SubUnsubXmlDoc(
-            const std::string &network, int id, bool sub, std::string type);
+            const std::string &network, int id, bool no_ribout, bool sub,
+            std::string type);
     pugi::xml_document *Inet6RouteAddDeleteXmlDoc(const std::string &network,
-            const std::string &prefix, Oper oper,
-            const NextHops &nexthops = NextHops(),
+            const std::string &prefix, Oper oper, const NextHop &nh = NextHop(),
             const RouteAttributes &attributes = RouteAttributes());
     pugi::xml_document *RouteAddDeleteXmlDoc(const std::string &network,
             const std::string &prefix, bool add,
-            const NextHops &nexthop = NextHops(),
+            const NextHop &nh = NextHop(),
             const RouteAttributes &attributes = RouteAttributes());
     pugi::xml_document *RouteEnetAddDeleteXmlDoc(const std::string &network,
             const std::string &prefix, bool add,
-            const NextHops &nexthops = NextHops(),
+            const NextHop &nh = NextHop(),
             const RouteAttributes &attributes = RouteAttributes());
     pugi::xml_document *RouteMcastAddDeleteXmlDoc(const std::string &network,
             const std::string &sg, bool add,
@@ -384,6 +392,7 @@ public:
             bool ipv6 () const { return ipv6_; }
             bool HasSubscribed(const std::string &network);
             void Subscribe(const std::string &network, int id = -1,
+                           bool no_ribout = false,
                            bool wait_for_established = true,
                            bool send_subscribe = true);
             void Unsubscribe(const std::string &network, int id = -1,
@@ -427,11 +436,16 @@ public:
     void SessionUp();
 
     void SubscribeAll(const std::string &network, int id = -1,
+                      bool no_ribout = false,
                       bool wait_for_established = true) {
-        route_mgr_->Subscribe(network, id, wait_for_established, true);
-        inet6_route_mgr_->Subscribe(network, id, wait_for_established, false);
-        enet_route_mgr_->Subscribe(network, id, wait_for_established, false);
-        mcast_route_mgr_->Subscribe(network, id, wait_for_established, false);
+        route_mgr_->Subscribe(network, id, no_ribout,
+                              wait_for_established, true);
+        inet6_route_mgr_->Subscribe(network, id, no_ribout,
+                                    wait_for_established, false);
+        enet_route_mgr_->Subscribe(network, id, no_ribout,
+                                   wait_for_established, false);
+        mcast_route_mgr_->Subscribe(network, id, no_ribout,
+                                    wait_for_established, false);
     }
     void UnsubscribeAll(const std::string &network, int id = -1,
                         bool wait_for_established = true,
@@ -448,8 +462,8 @@ public:
     }
 
     void Subscribe(const std::string &network, int id = -1,
-                   bool wait_for_established = true) {
-        route_mgr_->Subscribe(network, id, wait_for_established);
+                   bool wait_for_established = true, bool no_ribout = false) {
+        route_mgr_->Subscribe(network, id, no_ribout, wait_for_established);
     }
     void Unsubscribe(const std::string &network, int id = -1,
                      bool wait_for_established = true,
@@ -470,8 +484,9 @@ public:
     }
 
     void Inet6Subscribe(const std::string &network, int id = -1,
-                        bool wait_for_established = true) {
-        inet6_route_mgr_->Subscribe(network, id, wait_for_established);
+                        bool wait_for_established = true,
+                        bool no_ribout = false) {
+        inet6_route_mgr_->Subscribe(network, id, no_ribout, wait_for_established);
     }
     void Inet6Unsubscribe(const std::string &network, int id = -1,
                           bool wait_for_established = true) {
@@ -488,25 +503,22 @@ public:
     void AddRoute(const std::string &network, const std::string &prefix,
                   const std::string nexthop = "",
                   int local_pref = 0, int med = 0);
-    void AddRoute(const std::string &network, const std::string &prefix,
-                  const NextHops &nexthops, int local_pref = 0);
-    void AddRoute(const std::string &network, const std::string &prefix,
-                  const NextHop &nexthop, const RouteAttributes &attributes);
-    void AddRoute(const std::string &network, const std::string &prefix,
-                  const NextHops &nexthops, const RouteAttributes &attributes);
     void AddRoute(const string &network_name, const string &prefix,
                   const string &nexthop, const RouteAttributes &attributes);
+    void AddRoute(const std::string &network, const std::string &prefix,
+                  const NextHop &nexthop,
+                  const RouteAttributes &attributes = RouteAttributes());
     void DeleteRoute(const std::string &network, const std::string &prefix);
 
     void AddInet6Route(const std::string &network, const std::string &prefix,
-        const NextHops &nexthops = NextHops(),
+        const NextHop &nh = NextHop(),
         const RouteAttributes &attributes = RouteAttributes());
     void AddInet6Route(const std::string &network, const std::string &prefix,
         const std::string &nexthop_str, int local_pref = 100, int med = 0);
     void AddInet6Route(const std::string &network, const std::string &prefix,
         const std::string &nexthop, const RouteAttributes &attributes);
     void ChangeInet6Route(const std::string &network, const std::string &prefix,
-        const NextHops &nexthops = NextHops(),
+        const NextHop &nh = NextHop(),
         const RouteAttributes &attributes = RouteAttributes());
     void DeleteInet6Route(const std::string &network,
         const std::string &prefix);
@@ -516,7 +528,7 @@ public:
 
     void EnetSubscribe(const std::string &network, int id = -1,
                        bool wait_for_established = true) {
-        enet_route_mgr_->Subscribe(network, id, wait_for_established);
+        enet_route_mgr_->Subscribe(network, id, false, wait_for_established);
     }
     void EnetUnsubscribe(const std::string &network, int id = -1,
                          bool wait_for_established = true) {
@@ -534,25 +546,17 @@ public:
                       const std::string nexthop = "",
                       const RouteParams *params = NULL);
     void AddEnetRoute(const std::string &network, const std::string &prefix,
-                      const NextHop &nexthop,
-                      const RouteParams *params = NULL);
+                      const NextHop &nh, const RouteParams *params = NULL);
     void AddEnetRoute(const std::string &network, const std::string &prefix,
-                      const NextHops &nexthops,
-                      const RouteParams *params = NULL);
-    void AddEnetRoute(const std::string &network, const std::string &prefix,
-                      const NextHop &nexthop,
-                      const RouteAttributes &attributes);
+                      const NextHop &nh, const RouteAttributes &attributes);
     void AddEnetRoute(const std::string &network, const std::string &prefix,
                       const std::string &nexthop,
-                      const RouteAttributes &attributes);
-    void AddEnetRoute(const std::string &network, const std::string &prefix,
-                      const NextHops &nexthops,
                       const RouteAttributes &attributes);
     void DeleteEnetRoute(const std::string &network, const std::string &prefix);
 
     void McastSubscribe(const std::string &network, int id = -1,
                         bool wait_for_established = true) {
-        mcast_route_mgr_->Subscribe(network, id, wait_for_established);
+        mcast_route_mgr_->Subscribe(network, id, false, wait_for_established);
     }
     void McastUnsubscribe(const std::string &network, int id = -1,
                           bool wait_for_established = true) {

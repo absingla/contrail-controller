@@ -26,7 +26,6 @@ class PktModule;
 class VirtualGateway;
 class ServicesModule;
 class MulticastHandler;
-class DiscoveryAgentClient;
 class AgentDBEntry;
 class XmppClient;
 class OperDB;
@@ -42,6 +41,7 @@ namespace OVSDB {
 class OvsdbClient;
 };
 class ConfigManager;
+class EventNotifier;
 
 class Interface;
 typedef boost::intrusive_ptr<Interface> InterfaceRef;
@@ -204,7 +204,6 @@ class XmppInit;
 class AgentXmppChannel;
 class AgentIfMapXmppChannel;
 class AgentDnsXmppChannel;
-class DiscoveryServiceClient;
 class EventManager;
 class TaskTbbKeepAwake;
 class IFMapAgentStaleCleaner;
@@ -237,7 +236,6 @@ extern void RouterIdDepInit(Agent *agent);
 #define MIN_UNICAST_LABEL_RANGE 4098
 #define MAX_XMPP_SERVERS 2
 #define XMPP_SERVER_PORT 5269
-#define DISCOVERY_SERVER_PORT 5998
 #define METADATA_IP_ADDR ntohl(inet_addr("169.254.169.254"))
 #define METADATA_PORT 8775
 #define METADATA_NAT_PORT 80
@@ -295,6 +293,7 @@ extern void RouterIdDepInit(Agent *agent);
 #define kL2RouteDbTableSuffix  "l2.route.0"
 #define kMcastRouteDbTableSuffix "mc.route.0"
 #define kEvpnRouteDbTableSuffix  "evpn.route.0"
+#define kEventNotifierTask "Agent::EventNotifier"
 
 class Agent {
 public:
@@ -323,6 +322,7 @@ public:
     static const uint32_t kFlowKSyncTokens = 25;
     static const uint32_t kFlowDelTokens = 16;
     static const uint32_t kFlowUpdateTokens = 16;
+    static const uint32_t kMacLearningDefaultTokens = 256;
     static const uint8_t kInvalidQueueId = 255;
     static const int kInvalidCpuId = -1;
     enum ForwardingMode {
@@ -544,24 +544,6 @@ public:
 
     AgentSignal *agent_signal() const { return agent_signal_.get(); }
 
-    void UpdateDiscoveryServerResponseList(std::vector<DSResponse> resp) {
-        ds_response_.clear();
-        ds_response_ = resp;
-    }
-
-    std::vector<DSResponse> GetDiscoveryServerResponseList() {
-        return (ds_response_);
-    }
-
-    void UpdateDiscoveryDnsServerResponseList(std::vector<DSResponse> resp) {
-        ds_dns_response_.clear();
-        ds_dns_response_ = resp;
-    }
-
-    std::vector<DSResponse> GetDiscoveryDnsServerResponseList() {
-        return (ds_dns_response_);
-    }
-
     std::vector<string> &GetControllerlist() {
         return (controller_list_);
     }
@@ -722,29 +704,6 @@ public:
     const uint32_t dns_server_port(uint8_t idx) const {return dns_port_[idx];}
     void set_dns_server_port(uint32_t port, uint8_t idx) {
         dns_port_[idx] = port;
-    }
-
-    /* Discovery Server, port, service-instances */
-    const std::string &discovery_server() const {return dss_addr_;}
-    const uint32_t discovery_server_port() {
-        return dss_port_; 
-    }
-    const int discovery_xmpp_server_instances() const {
-        return dss_xs_instances_;
-    }
-
-    DiscoveryServiceClient *discovery_service_client() {
-        return ds_client_; 
-    }
-    void set_discovery_service_client(DiscoveryServiceClient *client) {
-        ds_client_ = client;
-    }
-
-    const std::string &discovery_client_name() const {
-        return discovery_client_name_;
-    }
-    void set_discovery_client_name(const std::string &name) {
-        discovery_client_name_ = name;
     }
 
     const std::string &host_name() const {return host_name_; }
@@ -915,9 +874,6 @@ public:
     ServicesModule *services() const;
     void set_services(ServicesModule *services);
 
-    DiscoveryAgentClient *discovery_client() const;
-    void set_discovery_client(DiscoveryAgentClient *client);
-
     VirtualGateway *vgw() const;
     void set_vgw(VirtualGateway *vgw);
 
@@ -935,6 +891,9 @@ public:
 
     ResourceManager *resource_manager() const;
     void set_resource_manager(ResourceManager *resource_manager);
+
+    EventNotifier *event_notifier() const;
+    void set_event_notifier(EventNotifier *mgr);
 
     // Miscellaneous
     EventManager *event_manager() const {return event_mgr_;}
@@ -1046,9 +1005,6 @@ public:
     void SetAgentTaskPolicy();
     void CopyConfig(AgentParam *params);
     void CopyFilteredParams();
-    const std::string BuildDiscoveryClientName(std::string mod_name,
-                                               std::string id);
-
     bool ResourceManagerReady() const { return resource_manager_ready_; }
     void SetResourceManagerReady();
 
@@ -1154,6 +1110,7 @@ public:
 
     static uint16_t ProtocolStringToInt(const std::string &str);
     VrouterObjectLimits GetVrouterObjectLimits();
+    void SetXmppDscp(uint8_t val);
 
 private:
 
@@ -1178,6 +1135,7 @@ private:
     DiagTable *diag_table_;
     VNController *controller_;
     ResourceManager *resource_manager_;
+    EventNotifier *event_notifier_;
 
     EventManager *event_mgr_;
     boost::shared_ptr<AgentXmppChannel> agent_xmpp_channel_[MAX_XMPP_SERVERS];
@@ -1189,7 +1147,6 @@ private:
     XmppInit *dns_xmpp_init_[MAX_XMPP_SERVERS];
     IFMapAgentStaleCleaner *agent_stale_cleaner_;
     AgentXmppChannel *cn_mcast_builder_;
-    DiscoveryServiceClient *ds_client_;
     uint16_t metadata_server_port_;
     // Host name of node running the daemon
     std::string host_name_;
@@ -1260,9 +1217,6 @@ private:
     std::string dns_addr_[MAX_XMPP_SERVERS];
     uint32_t dns_port_[MAX_XMPP_SERVERS];
     bool dns_auth_enable_;
-    // Discovery Responses
-    std::vector<DSResponse>ds_response_;
-    std::vector<DSResponse>ds_dns_response_;
     // Config
     std::vector<std::string>controller_list_;
     uint32_t controller_chksum_;
@@ -1270,11 +1224,6 @@ private:
     uint32_t dns_chksum_;
     std::vector<std::string>collector_list_;
     uint32_t collector_chksum_;
-    // Discovery
-    std::string dss_addr_;
-    uint32_t dss_port_;
-    int dss_xs_instances_;
-    std::string discovery_client_name_;
     std::string ip_fabric_intf_name_;
     std::string vhost_interface_name_;
     std::string pkt_interface_name_;

@@ -4,20 +4,20 @@
 import argparse, os, ConfigParser, sys, re
 from pysandesh.sandesh_base import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
-from sandesh_common.vns.constants import ModuleNames, HttpPortTopology, \
-    API_SERVER_DISCOVERY_SERVICE_NAME, OpServerAdminPort
+from sandesh_common.vns.constants import HttpPortTopology, \
+    OpServerAdminPort, \
+    ServicesDefaultConfigurationFiles, SERVICE_TOPOLOGY
 from sandesh_common.vns.ttypes import Module
-import discoveryclient.client as discovery_client
 import traceback
 from vnc_api.vnc_api import VncApi
 
 class CfgParser(object):
-    CONF_DEFAULT_PATH = '/etc/contrail/contrail-topology.conf'
+    CONF_DEFAULT_PATHS = ServicesDefaultConfigurationFiles.get(
+        SERVICE_TOPOLOGY, None)
     def __init__(self, argv):
         self._args = None
         self.__pat = None
         self._argv = argv or ' '.join(sys.argv[1:])
-        self._disc = None
 
     def parse(self):
         '''
@@ -30,8 +30,6 @@ contrail-topology [-h] [-c FILE]
                          [--use_syslog] [--syslog_facility SYSLOG_FACILITY]
                          [--scan_frequency SCAN_FREQUENCY]
                          [--http_server_port HTTP_SERVER_PORT]
-                         [--disc_server_ip 127.0.0.1]
-                         [--disc_server_port 5998]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -61,10 +59,8 @@ optional arguments:
         conf_parser = argparse.ArgumentParser(add_help=False)
 
         kwargs = {'help': "Specify config file", 'metavar':"FILE",
-                  'action':'append'
+                  'action':'append', 'default': self.CONF_DEFAULT_PATHS,
                  }
-        if os.path.exists(self.CONF_DEFAULT_PATH):
-            kwargs['default'] = [self.CONF_DEFAULT_PATH]
         conf_parser.add_argument("-c", "--conf_file", **kwargs)
         args, remaining_argv = conf_parser.parse_known_args(self._argv.split())
 
@@ -83,9 +79,9 @@ optional arguments:
             'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
             'cluster_id'      : '',
         }
-        disc_opts = {
-            'disc_server_ip'     : '127.0.0.1',
-            'disc_server_port'   : 5998,
+        api_opts = {
+            'api_server_list' : ['127.0.0.1:8082'],
+            'api_server_use_ssl' : False
         }
         ksopts = {
             'auth_host': '127.0.0.1',
@@ -110,12 +106,18 @@ optional arguments:
             config.read(args.conf_file)
             if 'DEFAULTS' in config.sections():
                 defaults.update(dict(config.items("DEFAULTS")))
-            if 'DISCOVERY' in config.sections():
-                disc_opts.update(dict(config.items('DISCOVERY')))
+            if 'API_SERVER' in config.sections():
+                api_opts.update(dict(config.items("API_SERVER")))
             if 'KEYSTONE' in config.sections():
                 ksopts.update(dict(config.items("KEYSTONE")))
             if 'SANDESH' in config.sections():
                 sandesh_opts.update(dict(config.items('SANDESH')))
+                if 'sandesh_ssl_enable' in config.options('SANDESH'):
+                    sandesh_opts['sandesh_ssl_enable'] = config.getboolean(
+                        'SANDESH', 'sandesh_ssl_enable')
+                if 'introspect_ssl_enable' in config.options('SANDESH'):
+                    sandesh_opts['introspect_ssl_enable'] = config.getboolean(
+                        'SANDESH', 'introspect_ssl_enable')
         # Override with CLI options
         # Don't surpress add_help here so it will handle -h
         parser = argparse.ArgumentParser(
@@ -124,9 +126,9 @@ optional arguments:
             # print script description with -h/--help
             description=__doc__,
             # Don't mess with format of description
-            formatter_class=argparse.RawDescriptionHelpFormatter,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
-        defaults.update(disc_opts)
+        defaults.update(api_opts)
         defaults.update(ksopts)
         defaults.update(sandesh_opts)
         parser.set_defaults(**defaults)
@@ -158,10 +160,6 @@ optional arguments:
             help="introspect server port")
         parser.add_argument("--zookeeper",
             help="ip:port of zookeeper server")
-        parser.add_argument("--disc_server_ip",
-            help="Discovery Server IP address")
-        parser.add_argument("--disc_server_port", type=int,
-            help="Discovery Server port")
         parser.add_argument("--sandesh_send_rate_limit", type=int,
             help="Sandesh send rate limit in messages/sec.")
         parser.add_argument("--cluster_id",
@@ -188,18 +186,21 @@ optional arguments:
             help="Enable ssl for sandesh connection")
         parser.add_argument("--introspect_ssl_enable", action="store_true",
             help="Enable ssl for introspect connection")
+        parser.add_argument("--api_server_list",
+            help="List of api-servers in ip:port format separated by space",
+            nargs="+")
+        parser.add_argument("--api_server_use_ssl",
+            help="Use SSL to connect to api-server")
 
         self._args = parser.parse_args(remaining_argv)
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
         if type(self._args.analytics_api) is str:
             self._args.analytics_api = self._args.analytics_api.split()
+        if type(self._args.api_server_list) is str:
+            self._args.api_server_list = self._args.api_server_list.split()
 
         self._args.config_sections = config
-        self._disc = discovery_client.DiscoveryClient(
-                        self._args.disc_server_ip,
-                        self._args.disc_server_port,
-                        ModuleNames[Module.CONTRAIL_TOPOLOGY])
         self._args.conf_file = args.conf_file
 
     def _pat(self):
@@ -262,24 +263,17 @@ optional arguments:
                              self._args.sandesh_ssl_enable,
                              self._args.introspect_ssl_enable)
 
-    def api_svrs(self):
-        a = self._disc.subscribe(API_SERVER_DISCOVERY_SERVICE_NAME, 0)
-        x = a.read()
-        return map(lambda d:d['ip-address'] + ':' + d['port'], x)
-
     def vnc_api(self, notifycb=None):
         e = SystemError('Cant connect to API server')
         for rt in (5, 2, 7, 9, 16, 25):
-            for api_server in self.api_svrs():
+            for api_server in self._args.api_server_list:
                 srv = api_server.split(':')
-                if len(srv) == 2:
-                    ip, port = srv[0], int(srv[1])
-                else:
-                    ip, port = '127.0.0.1', int(srv[0])
                 try:
                     vnc = VncApi(self._args.admin_user,
                                  self._args.admin_password,
                                  self._args.admin_tenant_name,
+                                 srv[0], srv[1],
+                                 api_server_use_ssl=self._args.api_server_use_ssl,
                                  auth_host=self._args.auth_host,
                                  auth_port=self._args.auth_port,
                                  auth_protocol=self._args.auth_protocol)

@@ -262,6 +262,7 @@ static const char *config_2_control_nodes_different_asn = "\
         <identifier>192.168.0.1</identifier>\
         <address>127.0.0.1</address>\
         <port>%d</port>\
+        <router-type>external-control-node</router-type>\
         <session to=\'Y\'>\
             <address-families>\
                 <family>route-target</family>\
@@ -274,6 +275,7 @@ static const char *config_2_control_nodes_different_asn = "\
         <identifier>192.168.0.2</identifier>\
         <address>127.0.0.2</address>\
         <port>%d</port>\
+        <router-type>external-control-node</router-type>\
         <session to=\'X\'>\
             <address-families>\
                 <family>route-target</family>\
@@ -824,9 +826,8 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, RouteWithCommunity) {
     vector<std::string> community_a;
     community_a.push_back("no-reoriginate");
     test::RouteAttributes attr_a(community_a);
-    test::NextHops nexthops_a;
-    nexthops_a.push_back(test::NextHop("192.168.1.1"));
-    agent_a_->AddRoute("blue", route_a.str(), nexthops_a, attr_a);
+    test::NextHop nexthop_a("192.168.1.1");
+    agent_a_->AddRoute("blue", route_a.str(), nexthop_a, attr_a);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B
@@ -837,7 +838,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, RouteWithCommunity) {
 
     community_a.push_back("64521:9999");
     attr_a.SetCommunities(community_a);
-    agent_a_->AddRoute("blue", route_a.str(), nexthops_a, attr_a);
+    agent_a_->AddRoute("blue", route_a.str(), nexthop_a, attr_a);
     task_util::WaitForIdle();
 
     sort(community_a.begin(), community_a.end());
@@ -890,9 +891,8 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, RouteWithNoExportCommunity) {
     vector<std::string> community_a;
     community_a.push_back("no-export");
     test::RouteAttributes attr_a(community_a);
-    test::NextHops nexthops_a;
-    nexthops_a.push_back(test::NextHop("192.168.1.1"));
-    agent_a_->AddRoute("blue", route_a.str(), nexthops_a, attr_a);
+    test::NextHop nexthop_a("192.168.1.1");
+    agent_a_->AddRoute("blue", route_a.str(), nexthop_a, attr_a);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agent A
@@ -939,16 +939,15 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, RouteExplicitMed) {
     agent_a_->Subscribe("blue", 1);
     agent_b_->Subscribe("blue", 1);
 
-    // Add route from agent A with local preference 100 and med 500.
+    // Add route from agent A with med 500.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    agent_a_->AddRoute("blue", route_a.str(), "192.168.1.1", 100, 500);
+    agent_a_->AddRoute("blue", route_a.str(), "192.168.1.1", 0, 500);
     task_util::WaitForIdle();
 
-    // Verify that route showed up on agents A and B with local preference 100
-    // and med 500.
-    VerifyRouteExists(agent_a_, "blue", route_a.str(), "192.168.1.1", 100, 500);
-    VerifyRouteExists(agent_b_, "blue", route_a.str(), "192.168.1.1", 100, 500);
+    // Verify that route showed up on agents A and B with med 500.
+    VerifyRouteExists(agent_a_, "blue", route_a.str(), "192.168.1.1", 0, 500);
+    VerifyRouteExists(agent_b_, "blue", route_a.str(), "192.168.1.1", 0, 500);
 
     // Delete route from agent A.
     agent_a_->DeleteRoute("blue", route_a.str());
@@ -1021,6 +1020,179 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, RouteLocalPrefToMed) {
     // Verify that route is deleted at agents A and B.
     VerifyRouteNoExists(agent_a_, "blue", route_a.str());
     VerifyRouteNoExists(agent_b_, "blue", route_a.str());
+
+    // Close the sessions.
+    agent_a_->SessionDown();
+    agent_b_->SessionDown();
+}
+
+//
+// Route added with local preference has auto calculated local preference
+// (via med) in the other AS.
+//
+TEST_F(BgpXmppInetvpn2ControlNodeTest, RouteLocalPrefToLocalPref) {
+    Configure(config_2_control_nodes_different_asn);
+    task_util::WaitForIdle();
+
+    // Create XMPP Agent A connected to XMPP server X.
+    agent_a_.reset(
+        new test::NetworkAgentMock(&evm_, "agent-a", xs_x_->GetPort(),
+            "127.0.0.1", "127.0.0.1"));
+    TASK_UTIL_EXPECT_TRUE(agent_a_->IsEstablished());
+
+    // Create XMPP Agent B connected to XMPP server Y.
+    agent_b_.reset(
+        new test::NetworkAgentMock(&evm_, "agent-b", xs_y_->GetPort(),
+            "127.0.0.2", "127.0.0.2"));
+    TASK_UTIL_EXPECT_TRUE(agent_b_->IsEstablished());
+
+    // Register to blue instance
+    agent_a_->Subscribe("blue", 1);
+    agent_b_->Subscribe("blue", 1);
+
+    // Add route from agent A with local preference 100.
+    stringstream route_a;
+    route_a << "10.1.1.1/32";
+    agent_a_->AddRoute("blue", route_a.str(), "192.168.1.1", 100);
+    task_util::WaitForIdle();
+
+    // Verify that route showed up on agents A and B with local preference 100.
+    VerifyRouteExists(agent_a_, "blue", route_a.str(), "192.168.1.1", 100);
+    VerifyRouteExists(agent_b_, "blue", route_a.str(), "192.168.1.1", 100);
+
+    // Change route from agent A to local preference 200.
+    agent_a_->AddRoute("blue", route_a.str(), "192.168.1.1", 200);
+    task_util::WaitForIdle();
+
+    // Verify that route showed up on agents A and B with local preference 200.
+    VerifyRouteExists(agent_a_, "blue", route_a.str(), "192.168.1.1", 200);
+    VerifyRouteExists(agent_b_, "blue", route_a.str(), "192.168.1.1", 200);
+
+    // Change route from agent A to local preference 400.
+    agent_a_->AddRoute("blue", route_a.str(), "192.168.1.1", 400);
+    task_util::WaitForIdle();
+
+    // Verify that route showed up on agents A and B with local preference 400.
+    VerifyRouteExists(agent_a_, "blue", route_a.str(), "192.168.1.1", 400);
+    VerifyRouteExists(agent_b_, "blue", route_a.str(), "192.168.1.1", 400);
+
+    // Delete route from agent A.
+    agent_a_->DeleteRoute("blue", route_a.str());
+    task_util::WaitForIdle();
+
+    // Verify that route is deleted at agents A and B.
+    VerifyRouteNoExists(agent_a_, "blue", route_a.str());
+    VerifyRouteNoExists(agent_b_, "blue", route_a.str());
+
+    // Close the sessions.
+    agent_a_->SessionDown();
+    agent_b_->SessionDown();
+}
+
+//
+// Route is not advertised to agent that subscribed with no-ribout.
+//
+TEST_F(BgpXmppInetvpn2ControlNodeTest, SubscribeNoRibOut1) {
+    Configure();
+    task_util::WaitForIdle();
+
+    // Create XMPP Agent A connected to XMPP server X.
+    agent_a_.reset(
+        new test::NetworkAgentMock(&evm_, "agent-a", xs_x_->GetPort(),
+            "127.0.0.1", "127.0.0.1"));
+    TASK_UTIL_EXPECT_TRUE(agent_a_->IsEstablished());
+
+    // Create XMPP Agent B connected to XMPP server Y.
+    agent_b_.reset(
+        new test::NetworkAgentMock(&evm_, "agent-b", xs_y_->GetPort(),
+            "127.0.0.2", "127.0.0.2"));
+    TASK_UTIL_EXPECT_TRUE(agent_b_->IsEstablished());
+
+    // Register agent A to blue instance with no-ribout.
+    // Register agent B to blue instance.
+    agent_a_->Subscribe("blue", 1, true, true);
+    agent_b_->Subscribe("blue", 1);
+
+    // Add route from agent A.
+    stringstream route_a;
+    route_a << "10.1.1.1/32";
+    agent_a_->AddRoute("blue", route_a.str(), "192.168.1.1", 200);
+    task_util::WaitForIdle();
+
+    // Verify that route showed up on agent B, but not on agent A.
+    VerifyRouteExists(agent_b_, "blue", route_a.str(), "192.168.1.1", 200);
+    VerifyRouteNoExists(agent_a_, "blue", route_a.str());
+
+    // Unsubscribe agent B from blue instance and subscribe with no-ribout.
+    agent_b_->Unsubscribe("blue");
+    agent_b_->Subscribe("blue", 1, true, true);
+
+    // Verify that route is not present at agents A and B.
+    VerifyRouteNoExists(agent_a_, "blue", route_a.str());
+    VerifyRouteNoExists(agent_b_, "blue", route_a.str());
+
+    // Delete route from agent A.
+    agent_a_->DeleteRoute("blue", route_a.str());
+    task_util::WaitForIdle();
+
+    // Verify that route is deleted at agents A and B.
+    VerifyRouteNoExists(agent_a_, "blue", route_a.str());
+    VerifyRouteNoExists(agent_b_, "blue", route_a.str());
+
+    // Close the sessions.
+    agent_a_->SessionDown();
+    agent_b_->SessionDown();
+}
+
+//
+// Route is not advertised to agent that subscribed with no-ribout.
+//
+TEST_F(BgpXmppInetvpn2ControlNodeTest, SubscribeNoRibOut2) {
+    Configure();
+    task_util::WaitForIdle();
+
+    // Create XMPP Agent A connected to XMPP server X.
+    agent_a_.reset(
+        new test::NetworkAgentMock(&evm_, "agent-a", xs_x_->GetPort(),
+            "127.0.0.1", "127.0.0.1"));
+    TASK_UTIL_EXPECT_TRUE(agent_a_->IsEstablished());
+
+    // Create XMPP Agent B connected to XMPP server Y.
+    agent_b_.reset(
+        new test::NetworkAgentMock(&evm_, "agent-b", xs_y_->GetPort(),
+            "127.0.0.2", "127.0.0.2"));
+    TASK_UTIL_EXPECT_TRUE(agent_b_->IsEstablished());
+
+    // Register agent A to blue instance with no-ribout.
+    // Register agent B to blue instance.
+    agent_a_->Subscribe("blue", 1, true, true);
+    agent_b_->Subscribe("blue", 1);
+
+    // Add route from agent B.
+    stringstream route_b;
+    route_b << "10.1.1.2/32";
+    agent_b_->AddRoute("blue", route_b.str(), "192.168.1.2", 200);
+    task_util::WaitForIdle();
+
+    // Verify that route showed up on agent B, but not on agent A.
+    VerifyRouteExists(agent_b_, "blue", route_b.str(), "192.168.1.2", 200);
+    VerifyRouteNoExists(agent_a_, "blue", route_b.str());
+
+    // Unsubscribe agent A from blue instance and subscribe without no-ribout.
+    agent_a_->Unsubscribe("blue");
+    agent_a_->Subscribe("blue", 1);
+
+    // Verify that route is present at agents A and B.
+    VerifyRouteExists(agent_a_, "blue", route_b.str(), "192.168.1.2", 200);
+    VerifyRouteExists(agent_b_, "blue", route_b.str(), "192.168.1.2", 200);
+
+    // Delete route from agent B.
+    agent_b_->DeleteRoute("blue", route_b.str());
+    task_util::WaitForIdle();
+
+    // Verify that route is deleted at agents A and B.
+    VerifyRouteNoExists(agent_a_, "blue", route_b.str());
+    VerifyRouteNoExists(agent_b_, "blue", route_b.str());
 
     // Close the sessions.
     agent_a_->SessionDown();
@@ -2032,9 +2204,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, MultipleRouteAddDelete6) {
     bs_x_->update_sender()->DisableProcessing();
 
     // Add routes from agent A.
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
     vector<int> sgids1 = list_of(8000001)(8000003);
     vector<int> sgids2 = list_of(8000002)(8000004);
     for (int idx = 0; idx < kRouteCount; ++idx) {
@@ -2042,10 +2212,10 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, MultipleRouteAddDelete6) {
         int seq = idx + 1;
         if (idx % 2 == 0) {
             test::RouteAttributes attributes(lpref, seq, sgids2);
-            agent_a_->AddRoute("blue", BuildPrefix(idx), next_hops, attributes);
+            agent_a_->AddRoute("blue", BuildPrefix(idx), next_hop, attributes);
         } else {
             test::RouteAttributes attributes(lpref, seq, sgids1);
-            agent_a_->AddRoute("blue", BuildPrefix(idx), next_hops, attributes);
+            agent_a_->AddRoute("blue", BuildPrefix(idx), next_hop, attributes);
         }
     }
     task_util::WaitForIdle();
@@ -2463,10 +2633,8 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, TunnelEncap) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1", 0, "udp");
-    next_hops.push_back(next_hop);
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, 100);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, 100);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B.
@@ -2511,10 +2679,8 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, VirtualNetworkIndexChange) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1", 0, "udp");
-    next_hops.push_back(next_hop);
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, 100);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, 100);
     task_util::WaitForIdle();
 
     // Verify the origin VN on agents A and B.
@@ -2565,14 +2731,12 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, SecurityGroupsSameAsn) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
     vector<int> sgids = list_of
         (SecurityGroup::kMaxGlobalId - 1)(SecurityGroup::kMaxGlobalId + 1)
         (SecurityGroup::kMaxGlobalId - 2)(SecurityGroup::kMaxGlobalId + 2);
     test::RouteAttributes attributes(sgids);
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B with expected sgids.
@@ -2618,14 +2782,12 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, SecurityGroupsDifferentAsn) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
     vector<int> sgids = list_of
         (SecurityGroup::kMaxGlobalId - 1)(SecurityGroup::kMaxGlobalId + 1)
         (SecurityGroup::kMaxGlobalId - 2)(SecurityGroup::kMaxGlobalId + 2);
     test::RouteAttributes attributes(sgids);
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B with expected sgids.
@@ -2675,14 +2837,12 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, IpFabricVrf) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
     vector<int> sgids = list_of
         (SecurityGroup::kMaxGlobalId - 1)(SecurityGroup::kMaxGlobalId + 1)
         (SecurityGroup::kMaxGlobalId - 2)(SecurityGroup::kMaxGlobalId + 2);
     test::RouteAttributes attributes(sgids);
-    agent_a_->AddRoute(ip_fabric_ri, route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute(ip_fabric_ri, route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B with expected sgids.
@@ -2735,14 +2895,12 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_1) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
 
     // Use default LoadBalance attribute
     LoadBalance loadBalance;
     test::RouteAttributes attributes(loadBalance.ToAttribute());
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B with expected lba.
@@ -2788,9 +2946,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_2) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
 
     // Use LoadBalance attribute with all boolean options set
     LoadBalance::bytes_type data =
@@ -2799,7 +2955,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_2) {
             0xF8, 0x00, 0x80, 0x00, 0x00, 0x00 } };
     LoadBalance loadBalance(data);
     test::RouteAttributes attributes(loadBalance.ToAttribute());
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B with expected lba.
@@ -2845,9 +3001,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_3) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
 
     // Use LoadBalance attribute with all boolean options reset
     // i.e, no loadBalance attribute
@@ -2857,7 +3011,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_3) {
             0xa8, 0x00, 0x80, 0x00, 0x00, 0x00 } };
     LoadBalance loadBalance(data);
     test::RouteAttributes attributes(loadBalance.ToAttribute());
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Verify that route showed up on agents A and B with expected lba.
@@ -2906,9 +3060,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_4) {
     // Add route from agent A.
     stringstream route_a;
     route_a << "10.1.1.1/32";
-    test::NextHops next_hops;
     test::NextHop next_hop("192.168.1.1");
-    next_hops.push_back(next_hop);
 
     // Use LoadBalance attribute with all boolean options reset.
     LoadBalance::bytes_type data =
@@ -2917,7 +3069,7 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, LoadBalanceExtendedCommunity_4) {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } };
     LoadBalance loadBalance(data);
     test::RouteAttributes attributes(loadBalance.ToAttribute());
-    agent_a_->AddRoute("blue", route_a.str(), next_hops, attributes);
+    agent_a_->AddRoute("blue", route_a.str(), next_hop, attributes);
     task_util::WaitForIdle();
 
     // Even though the load-balance attribute sent was empty, we expect the
@@ -3455,10 +3607,9 @@ TEST_F(BgpXmppInetvpn2ControlNodeTest, RoutingPolicy_UpdateLocalPref) {
     community_a.push_back("11:13");
     community_a.push_back("22:13");
     test::RouteAttributes attr_a(community_a);
-    test::NextHops nexthops_a;
-    nexthops_a.push_back(test::NextHop("192.168.1.1"));
-    agent_a_->AddRoute("blue", route_a.str(), nexthops_a, attr_a);
-    agent_b_->AddRoute("blue", route_a.str(), nexthops_a, attr_a);
+    test::NextHop nexthop_a("192.168.1.1");
+    agent_a_->AddRoute("blue", route_a.str(), nexthop_a, attr_a);
+    agent_b_->AddRoute("blue", route_a.str(), nexthop_a, attr_a);
     task_util::WaitForIdle();
 
     VerifyRouteExists(agent_a_, "blue", route_a.str(), "192.168.1.1", 9999);

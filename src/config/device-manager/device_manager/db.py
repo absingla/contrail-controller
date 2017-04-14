@@ -17,6 +17,7 @@ from vnc_api.vnc_api import *
 import copy
 import socket
 import gevent
+import traceback
 from gevent import queue
 from cfgm_common.vnc_object_db import VncObjectDBClient
 from netaddr import IPAddress
@@ -64,26 +65,6 @@ class BgpRouterDM(DBBaseDM):
                 peer.bgp_routers[self.uuid] = attrs
         self.bgp_routers = new_peers
 
-    def sandesh_build(self):
-        return sandesh.BgpRouter(name=self.name, uuid=self.uuid,
-                                 peers=self.bgp_routers,
-                                 physical_router=self.physical_router)
-
-    @classmethod
-    def sandesh_request(cls, req):
-        # Return the list of BGP routers
-        resp = sandesh.BgpRouterListResp(bgp_routers=[])
-        if req.name_or_uuid is None:
-            for router in cls.values():
-                sandesh_router = router.sandesh_build()
-                resp.bgp_routers.extend(sandesh_router)
-        else:
-            router = cls.find_by_name_or_uuid(req.name_or_uuid)
-            if router:
-                sandesh_router = router.sandesh_build()
-                resp.bgp_routers.extend(sandesh_router)
-        resp.response(req.context())
-
     def get_all_bgp_router_ips(self):
         bgp_router_ips = {}
         if self.params['address'] is not None:
@@ -112,6 +93,7 @@ class PhysicalRouterDM(DBBaseDM):
         self.config_manager = None
         self.nc_q = queue.Queue(maxsize=1)
         self.vn_ip_map = {'irb': {}, 'lo0': {}}
+        self.device_config = {}
         self.init_cs_state()
         self.update(obj_dict)
         self.config_manager = PhysicalRouterConfig(
@@ -129,7 +111,8 @@ class PhysicalRouterDM(DBBaseDM):
             obj = self.read_obj(self.uuid)
         self.name = obj['fq_name'][-1]
         self.management_ip = obj.get('physical_router_management_ip')
-        self.dataplane_ip = obj.get('physical_router_dataplane_ip')
+        self.loopback_ip = obj.get('physical_router_loopback_ip', '')
+        self.dataplane_ip = obj.get('physical_router_dataplane_ip') or self.loopback_ip
         self.vendor = obj.get('physical_router_vendor_name', '')
         self.product = obj.get('physical_router_product_name', '')
         self.vnc_managed = obj.get('physical_router_vnc_managed')
@@ -146,7 +129,13 @@ class PhysicalRouterDM(DBBaseDM):
             self.config_manager.update(
                 self.management_ip, self.user_credentials, self.vendor,
                 self.product)
+            self.init_device_config()
     # end update
+
+    def init_device_config(self):
+        if not self.device_config:
+            self.device_config = self.config_manager.get_device_config()
+    # end init_device_config
 
     @classmethod
     def delete(cls, uuid):
@@ -189,7 +178,8 @@ class PhysicalRouterDM(DBBaseDM):
             try:
                 self.push_config()
             except Exception as e:
-                self._logger.error("Exception: " + str(e))
+                tb = traceback.format_exc()
+                self._logger.error("Exception: " + str(e) + tb)
     # end
 
     def is_valid_ip(self, ip_str):
@@ -207,7 +197,7 @@ class PhysicalRouterDM(DBBaseDM):
             ip_used_for = vn_subnet[1]
             ip = self._object_db.get_ip(self.uuid + ':' + subnet, ip_used_for)
             if ip:
-                self.vn_ip_map[ip_used_for][subnet] = ip['ip_address']
+                self.vn_ip_map[ip_used_for][subnet] = ip
     # end init_cs_state
 
     def reserve_ip(self, vn_uuid, subnet_uuid):
@@ -228,6 +218,7 @@ class PhysicalRouterDM(DBBaseDM):
         try:
             vn = VirtualNetwork()
             vn.set_uuid(vn_uuid)
+            ip_addr = ip_addr.split('/')[0]
             self._manager._vnc_lib.virtual_network_ip_free(
                 vn, [ip_addr])
             return True
@@ -563,6 +554,15 @@ class PhysicalRouterDM(DBBaseDM):
         if self.delete_config() or not self.is_vnc_managed():
             return
         self.config_manager.reset_bgp_config()
+
+        self.init_device_config()
+        model = self.device_config.get('product-model')
+        if 'mx' not in model.lower():
+            self._logger.error("physical router: %s, product model is not supported. "
+                      "device configuration=%s" % (self.uuid, str(self.device_config)))
+            self.device_config = {}
+            return
+
         bgp_router = BgpRouterDM.get(self.bgp_router)
         if bgp_router:
             for peer_uuid, attr in bgp_router.bgp_routers.items():
@@ -587,6 +587,9 @@ class PhysicalRouterDM(DBBaseDM):
                     tunnel_ip,
                     GlobalSystemConfigDM.ip_fabric_subnets,
                     bgp_router_ips)
+
+        if self.loopback_ip:
+            self.config_manager.add_lo0_unit_0_interface(self.loopback_ip)
 
         vn_dict = self.get_vn_li_map()
         self.evaluate_vn_irb_ip_map(set(vn_dict.keys()), 'l2_l3', 'irb', False)
@@ -1311,10 +1314,15 @@ class DMCassandraDB(VncObjectDBClient):
     dm_object_db_instance = None
 
     @classmethod
-    def getInstance(cls, manager=None, zkclient=None):
+    def get_instance(cls, manager=None, zkclient=None):
         if cls.dm_object_db_instance == None:
             cls.dm_object_db_instance = DMCassandraDB(manager, zkclient)
         return cls.dm_object_db_instance
+    # end
+
+    @classmethod
+    def clear_instance(cls):
+        cls.dm_object_db_instance = None
     # end
 
     def __init__(self, manager, zkclient):
@@ -1461,7 +1469,7 @@ class DMCassandraDB(VncObjectDBClient):
         self.add(self._PR_VN_IP_CF, key, {DMUtils.get_ip_cs_column_name(ip_used_for): ip})
     # end
 
-    def delete_ip(self, ip_used_for):
+    def delete_ip(self, key, ip_used_for):
         self.delete(self._PR_VN_IP_CF, key, [DMUtils.get_ip_cs_column_name(ip_used_for)])
     # end
 

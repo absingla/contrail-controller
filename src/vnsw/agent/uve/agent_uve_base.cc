@@ -16,6 +16,7 @@
 #include <uve/stats_interval_types.h>
 #include <init/agent_param.h>
 #include <oper/mirror_table.h>
+#include <oper/global_vrouter.h>
 #include <uve/vrouter_stats_collector.h>
 #include <cmn/agent_stats.h>
 
@@ -78,26 +79,6 @@ uint8_t AgentUveBase::ExpectedConnections(uint8_t &num_control_nodes,
     uint8_t count = 0;
     AgentParam *cfg = agent_->params();
 
-    /* If Discovery server is configured, increment the count by 1 for each
-     * possible discovery service if we subscribe to that service. We subscribe
-     * to a discovery service only if the service IP is not configured
-     * explicitly */
-    if (!agent_->discovery_server().empty()) {
-        // Discovery:Collector
-        if (cfg->collector_server_list().size() == 0) {
-            count++;
-        }
-        // Discovery:dns-server
-        if (!cfg->dns_server_1().to_ulong() &&
-            !cfg->dns_server_2().to_ulong()) {
-            count++;
-        }
-        // Discovery:xmpp-server
-        if (!cfg->xmpp_server_1().to_ulong() &&
-            !cfg->xmpp_server_2().to_ulong() ) {
-            count++;
-        }
-    }
     for (int i = 0; i < MAX_XMPP_SERVERS; i++) {
         if (!agent_->controller_ifmap_xmpp_server(i).empty()) {
             num_control_nodes++;
@@ -109,8 +90,7 @@ uint8_t AgentUveBase::ExpectedConnections(uint8_t &num_control_nodes,
         }
     }
     //Increment 1 for collector service
-    if (!agent_->discovery_server().empty() ||
-        cfg->collector_server_list().size() != 0) {
+    if (cfg->collector_server_list().size() != 0) {
         count++;
     }
 
@@ -128,6 +108,13 @@ void AgentUveBase::UpdateMessage(const ConnectionInfo &cinfo,
     if (!name.empty()) {
         message += ":" + name;
     }
+}
+
+bool AgentUveBase::HasSelfConfiguration() const {
+    if (!agent_ || !agent_->oper_db() || !agent_->oper_db()->global_vrouter()) {
+        return false;
+    }
+    return agent_->oper_db()->global_vrouter()->configured();
 }
 
 void AgentUveBase::VrouterAgentProcessState
@@ -183,6 +170,15 @@ void AgentUveBase::VrouterAgentProcessState
     }
     if (!is_cup) {
         message += " connection down";
+    }
+    if (!HasSelfConfiguration()) {
+        // waiting for Global vrouter config
+        pstate = ProcessState::NON_FUNCTIONAL;
+        if (message.empty()) {
+            message = "No Configuration for self";
+        } else {
+            message += ", No Configuration for self";
+        }
     }
     for (int i = 0; i < MAX_XMPP_SERVERS; i++) {
         if (!agent_->controller_ifmap_xmpp_server(i).empty()) {

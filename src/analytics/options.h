@@ -139,8 +139,14 @@ public:
     const std::string zookeeper_server_list() const {
         return zookeeper_server_list_;
     }
+    const std::vector<std::string> uve_proxy_list() const {
+        return uve_proxy_list_;
+    }
     const std::vector<std::string> kafka_broker_list() const {
         return kafka_broker_list_;
+    }
+    const std::vector<std::string> collector_structured_syslog_forward_destination() const {
+        return collector_structured_syslog_forward_destination_;
     }
     const uint16_t partitions() const { return partitions_; }
     const std::string collector_server() const { return collector_server_; }
@@ -163,8 +169,6 @@ public:
     const DbWriteOptions get_db_write_options() const {
         return db_write_options_;
     }
-    const std::string discovery_server() const { return discovery_server_; }
-    const uint16_t discovery_port() const { return discovery_port_; }
     const std::string redis_server() const { return redis_server_; }
     const uint16_t redis_port() const { return redis_port_; }
     const std::string redis_password() const { return redis_password_; }
@@ -209,7 +213,14 @@ public:
     const std::string auth_user() const { return ks_user_; }
     const std::string auth_passwd() const { return ks_password_; }
     const std::string auth_tenant() const { return ks_tenant_; }
+    const std::string keystone_keyfile() const { return ks_key_; }
+    const std::string keystone_certfile() const { return ks_cert_; }
+    const std::string keystone_cafile() const { return ks_ca_; }
     const SandeshConfig &sandesh_config() const { return sandesh_config_; }
+    const std::vector<std::string> api_server_list() const {
+        return api_server_list_;
+    }
+    const bool api_server_use_ssl() const { return api_server_use_ssl_; }
 
 private:
     template <typename ValueType>
@@ -243,9 +254,8 @@ private:
     bool collector_protobuf_port_configured_;
     uint16_t collector_structured_syslog_port_;
     bool collector_structured_syslog_port_configured_;
+    std::vector<std::string> collector_structured_syslog_forward_destination_;
     std::vector<std::string> config_file_;
-    std::string discovery_server_;
-    uint16_t discovery_port_;
     std::string redis_server_;
     uint16_t redis_port_;
     std::string redis_password_;
@@ -275,6 +285,7 @@ private:
     uint64_t analytics_statistics_ttl_;
     std::vector<std::string> cassandra_server_list_;
     std::string zookeeper_server_list_;
+    std::vector<std::string> uve_proxy_list_;
     std::vector<std::string> kafka_broker_list_;
     uint16_t partitions_;
     uint32_t sandesh_ratelimit_;
@@ -293,6 +304,8 @@ private:
     std::string ks_key_;
     std::string ks_ca_;
     SandeshConfig sandesh_config_;
+    std::vector<std::string> api_server_list_;
+    bool api_server_use_ssl_;
 
     boost::program_options::options_description config_file_options_;
     DbWriteOptions db_write_options_;

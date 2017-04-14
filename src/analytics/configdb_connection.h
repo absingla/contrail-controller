@@ -9,28 +9,30 @@
 #include <tbb/atomic.h>
 #include <boost/shared_ptr.hpp>
 #include <boost/regex.hpp>
-#include "discovery/client/discovery_client.h"
 #include "http/client/vncapi.h"
 #include "parser_util.h"
 
 class Options;
-//class DiscoveryServiceClient;
 
 class ConfigDBConnection {
     public:
-        ConfigDBConnection(EventManager *evm, VncApiConfig *vnccfg);
+        typedef std::vector<std::pair<std::string, int> > ApiServerList;
+
+        ConfigDBConnection(EventManager *evm,
+            const ApiServerList &api_servers,
+            const VncApiConfig &api_config);
         ~ConfigDBConnection();
-        void Update(Options *o, DiscoveryServiceClient *c);
         boost::shared_ptr<VncApi> GetVnc();
         void RetryNextApi();
 
     private:
-        void InitVnc(EventManager *evm, VncApiConfig *vnccfg);
-        void APIfromDisc(Options *o, std::vector<DSResponse> response);
+        void InitVnc();
+
         boost::shared_ptr<VncApi> vnc_;
         EventManager *evm_;
+        ApiServerList api_server_list_;
         VncApiConfig vnccfg_;
-        std::vector<DSResponse> api_svr_list_;
+        int api_server_index_;
         mutable tbb::mutex mutex_;
 };
 

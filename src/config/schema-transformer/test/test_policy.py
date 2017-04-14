@@ -4,6 +4,8 @@
 
 import sys
 import gevent
+import gevent.monkey
+gevent.monkey.patch_all()
 from testtools.matchers import Contains
 
 from vnc_api.vnc_api import (VirtualNetwork, SequenceType,
@@ -12,6 +14,7 @@ from vnc_api.vnc_api import (VirtualNetwork, SequenceType,
 from test_case import STTestCase, retries, VerifyCommon
 sys.path.append("../common/tests")
 import test_common
+from schema_transformer.to_bgp import DBBaseST
 
 
 class VerifyPolicy(VerifyCommon):
@@ -130,7 +133,7 @@ class TestPolicy(STTestCase, VerifyPolicy):
         self._vnc_lib.virtual_network_create(vn2_obj)
 
         for obj in [vn1_obj, vn2_obj]:
-            self.assertTill(self.ifmap_has_ident, obj=obj)
+            self.assertTill(self.vnc_db_has_ident, obj=obj)
 
         self.check_ri_ref_present(self.get_ri_name(vn1_obj),
                                   self.get_ri_name(vn2_obj))
@@ -176,11 +179,8 @@ class TestPolicy(STTestCase, VerifyPolicy):
         np1.set_network_policy_entries(np1.network_policy_entries)
         self._vnc_lib.network_policy_update(np1)
 
-        self.assertTill(
-            self.ifmap_ident_has_link,
-            type_fq_name=('routing-instance', self.get_ri_name(vn1_obj)),
-            link_name='contrail:connection contrail:routing-instance:%s' %
-                ':'.join(self.get_ri_name(vn2_obj)))
+        self.check_ri_ref_present(self.get_ri_name(vn1_obj),
+                                  self.get_ri_name(vn2_obj))
         np1.network_policy_entries.policy_rule[0].action_list.simple_action = 'pass'
         np1.set_network_policy_entries(np1.network_policy_entries)
         self._vnc_lib.network_policy_update(np1)
@@ -188,11 +188,8 @@ class TestPolicy(STTestCase, VerifyPolicy):
         np2.set_network_policy_entries(np2.network_policy_entries)
         self._vnc_lib.network_policy_update(np2)
 
-        self.assertTill(
-            self.ifmap_ident_has_link,
-            type_fq_name=('routing-instance', self.get_ri_name(vn2_obj)),
-            link_name='contrail:connection contrail:routing-instance:%s' %
-                ':'.join(self.get_ri_name(vn1_obj)))
+        self.check_ri_ref_present(self.get_ri_name(vn1_obj),
+                                  self.get_ri_name(vn2_obj))
         vn1_obj.del_network_policy(np1)
         vn2_obj.del_network_policy(np2)
         self._vnc_lib.virtual_network_update(vn1_obj)
@@ -298,7 +295,7 @@ class TestPolicy(STTestCase, VerifyPolicy):
         vn1.set_network_policy(np, vnp)
         self._vnc_lib.virtual_network_update(vn1)
 
-        self.assertTill(self.ifmap_has_ident, obj=vn1)
+        self.assertTill(self.vnc_db_has_ident, obj=vn1)
 
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn1))
 
@@ -338,7 +335,7 @@ class TestPolicy(STTestCase, VerifyPolicy):
         vn1.set_network_policy(np, vnp)
         self._vnc_lib.virtual_network_update(vn1)
 
-        self.assertTill(self.ifmap_has_ident, obj=vn1)
+        self.assertTill(self.vnc_db_has_ident, obj=vn1)
 
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn1))
 
@@ -362,12 +359,12 @@ class TestPolicy(STTestCase, VerifyPolicy):
         vn_name = self.id() + 'vn'
         vn = self.create_virtual_network(vn_name, "10.1.1.0/24")
         gevent.sleep(2)
-        self.assertTill(self.ifmap_has_ident, obj=vn)
+        self.assertTill(self.vnc_db_has_ident, obj=vn)
 
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn))
 
         # stop st
-        self._st_greenlet.kill()
+        test_common.kill_schema_transformer(self._st_greenlet)
         gevent.sleep(5)
 
         # delete vn in api server
@@ -376,7 +373,7 @@ class TestPolicy(STTestCase, VerifyPolicy):
         # start st on a free port
         self._st_greenlet = gevent.spawn(test_common.launch_schema_transformer,
             self.id(), self._api_server_ip, self._api_server_port)
-        gevent.sleep(2)
+        test_common.wait_for_schema_transformer_up()
 
         # check if vn is deleted
         self.check_vn_is_deleted(uuid=vn.uuid)
@@ -384,6 +381,50 @@ class TestPolicy(STTestCase, VerifyPolicy):
         # check if ri is deleted
         self.check_ri_is_deleted(fq_name=self.get_ri_name(vn))
     # test_vn_delete
+
+    def schema_transformer_restart(self):
+        def mock_acl_update(*args, **kwargs):
+            self.assertTrue(False, 'Error: Should not have updated acl entries')
+        old_acl_update = DBBaseST._vnc_lib.access_control_list_update
+        DBBaseST._vnc_lib.access_control_list_update = mock_acl_update
+        test_common.reinit_schema_transformer()
+        DBBaseST._vnc_lib.access_control_list_update = old_acl_update
+
+
+    def test_acl_hash_entries(self):
+        vn1_name = self.id() + 'vn1'
+        vn2_name = self.id() + 'vn2'
+        vn1_obj = self.create_virtual_network(vn1_name, "10.2.1.0/24")
+        vn2_obj = self.create_virtual_network(vn2_name, "20.2.1.0/24")
+
+        np = self.create_network_policy(vn1_obj, vn2_obj)
+        seq = SequenceType(1, 1)
+        vnp = VirtualNetworkPolicyType(seq)
+        vn1_obj.set_network_policy(np, vnp)
+        vn2_obj.set_network_policy(np, vnp)
+        self._vnc_lib.virtual_network_update(vn1_obj)
+        self._vnc_lib.virtual_network_update(vn2_obj)
+
+        gevent.sleep(5)
+        acl = self._vnc_lib.access_control_list_read(fq_name=self.get_ri_name(vn1_obj))
+        acl2 = self._vnc_lib.access_control_list_read(fq_name=self.get_ri_name(vn2_obj))
+        acl_hash = acl.access_control_list_hash
+        acl_hash2 = acl2.access_control_list_hash
+
+        self.assertEqual(acl_hash, hash(acl.access_control_list_entries))
+        self.assertEqual(acl_hash2, hash(acl2.access_control_list_entries))
+
+        self.schema_transformer_restart()
+
+        vn1_obj.del_network_policy(np)
+        vn2_obj.del_network_policy(np)
+        self._vnc_lib.virtual_network_update(vn1_obj)
+        self._vnc_lib.virtual_network_update(vn2_obj)
+
+        self.delete_network_policy(np)
+        self._vnc_lib.virtual_network_delete(fq_name=vn1_obj.get_fq_name())
+        self._vnc_lib.virtual_network_delete(fq_name=vn2_obj.get_fq_name())
+    #end test_acl_hash_entries
 
 class TestCompressPolicy(TestPolicy):
 
@@ -424,8 +465,8 @@ class TestCompressPolicy(TestPolicy):
         self._vnc_lib.virtual_network_update(vn1)
         self._vnc_lib.virtual_network_update(vn2)
 
-        self.assertTill(self.ifmap_has_ident, obj=vn1)
-        self.assertTill(self.ifmap_has_ident, obj=vn2)
+        self.assertTill(self.vnc_db_has_ident, obj=vn1)
+        self.assertTill(self.vnc_db_has_ident, obj=vn2)
 
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn1))
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn2))
@@ -467,8 +508,8 @@ class TestCompressPolicy(TestPolicy):
         self._vnc_lib.virtual_network_update(vn1)
         self._vnc_lib.virtual_network_update(vn2)
 
-        self.assertTill(self.ifmap_has_ident, obj=vn1)
-        self.assertTill(self.ifmap_has_ident, obj=vn2)
+        self.assertTill(self.vnc_db_has_ident, obj=vn1)
+        self.assertTill(self.vnc_db_has_ident, obj=vn2)
 
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn1))
         self.check_vn_ri_state(fq_name=self.get_ri_name(vn2))

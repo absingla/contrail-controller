@@ -14,7 +14,6 @@
 #include <cfg/cfg_init.h>
 #include <cfg/cfg_filter.h>
 #include <cfg/cfg_mirror.h>
-#include <cfg/discovery_agent.h>
 
 #include <oper/vn.h>
 #include <oper/sg.h>
@@ -48,9 +47,6 @@ AgentConfig::AgentConfig(Agent *agent)
     cfg_filter_ = std::auto_ptr<CfgFilter>(new CfgFilter(this));
 
     cfg_graph_ = std::auto_ptr<DBGraph>(new DBGraph());
-    discovery_client_ = std::auto_ptr<DiscoveryAgentClient>
-        (new DiscoveryAgentClient(this));
-
     cfg_mirror_table_ = std::auto_ptr<MirrorCfgTable>(new MirrorCfgTable(this));
     agent_->set_mirror_cfg_table(cfg_mirror_table_.get());
 
@@ -63,7 +59,6 @@ AgentConfig::~AgentConfig() {
     cfg_filter_.reset();
     cfg_parser_.reset();
     cfg_graph_.reset();
-    discovery_client_.reset();
     cfg_mirror_table_.reset();
     cfg_intf_mirror_table_.reset();
 }
@@ -178,6 +173,10 @@ void AgentConfig::RegisterDBClients(DB *db) {
                                                        "physical-router")));
     assert(cfg_physical_device_table_);
 
+    cfg_health_check_table_ = (static_cast<IFMapAgentTable *>
+                                (IFMapTable::FindTable(agent_->db(),
+                                                       "service-health-check")));
+    assert(cfg_health_check_table_);
 
     cfg_qos_table_ = (static_cast<IFMapAgentTable *>
                       (IFMapTable::FindTable(agent_->db(),
@@ -217,18 +216,11 @@ void AgentConfig::Init() {
     cfg_intf_mirror_table_->Init();
 }
 
-void AgentConfig::InitDiscovery() {
-    agent_->discovery_client()->Init(agent_->params());
-}
-
 void AgentConfig::InitDone() {
-    discovery_client_->DiscoverServices();
 }
 
 void AgentConfig::Shutdown() {
     cfg_filter_->Shutdown();
-
-    discovery_client_->Shutdown();
 
     cfg_mirror_table_->Shutdown();
     cfg_intf_mirror_table_->Shutdown();

@@ -6,6 +6,7 @@
 
 #include <cmn/agent_factory.h>
 #include <cmn/agent_stats.h>
+#include <cmn/event_notifier.h>
 #include <init/agent_param.h>
 
 #include <cfg/cfg_init.h>
@@ -100,12 +101,6 @@ int AgentInit::Start() {
     agent_->CopyConfig(agent_param_);
 
     string module_name = ModuleName();
-    /* Discovery client name should have InstanceId as well because multiple
-     * instances of tor-agent can run on a single node.
-     */
-    string ds_client_name =
-        agent_->BuildDiscoveryClientName(module_name, InstanceId());
-    agent_->set_discovery_client_name(ds_client_name);
     agent_->set_agent_name(AgentName());
     agent_->set_instance_id(InstanceId());
     agent_->set_module_type(ModuleType());
@@ -151,7 +146,6 @@ bool AgentInit::InitBase() {
     InitCollectorBase();
     CreateVrfBase();
     CreateNextHopsBase();
-    InitDiscoveryBase();
     CreateInterfacesBase();
     InitDoneBase();
 
@@ -170,7 +164,7 @@ void AgentInit::InitLoggingBase() {
     InitLogging();
 }
 
-// Connect to collector specified in config, if discovery server is not set
+// Connect to collector specified in config
 void AgentInit::InitCollectorBase() {
     agent_->InitCollector();
     InitCollector();
@@ -186,6 +180,10 @@ void AgentInit::CreatePeersBase() {
 // Optional modules or modules that have different implementation are created
 // by init module
 void AgentInit::CreateModulesBase() {
+    //Event notify manager
+    event_notifier_.reset(new EventNotifier(agent()));
+    agent()->set_event_notifier(event_notifier_.get());
+
     cfg_.reset(new AgentConfig(agent()));
     agent_->set_cfg(cfg_.get());
 
@@ -202,6 +200,7 @@ void AgentInit::CreateModulesBase() {
 
     resource_manager_.reset(new ResourceManager(agent()));
     agent()->set_resource_manager(resource_manager_.get());
+
     CreateModules();
 }
 
@@ -293,14 +292,6 @@ void AgentInit::CreateNextHopsBase() {
 
 void AgentInit::CreateInterfacesBase() {
     CreateInterfaces();
-}
-
-void AgentInit::InitDiscoveryBase() {
-    if (cfg_.get()) {
-        cfg_->InitDiscovery();
-    }
-
-    InitDiscovery();
 }
 
 void AgentInit::ConnectToControllerBase() {

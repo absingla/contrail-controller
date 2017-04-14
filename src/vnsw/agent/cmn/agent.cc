@@ -23,8 +23,8 @@
 #include <cmn/agent_signal.h>
 #include <cfg/cfg_init.h>
 #include <cfg/cfg_mirror.h>
-#include <cfg/discovery_agent.h>
 #include <cmn/agent.h>
+#include <cmn/event_notifier.h>
 #include <controller/controller_init.h>
 
 #include <oper/operdb_init.h>
@@ -37,6 +37,7 @@
 #include <oper/mirror_table.h>
 #include <oper/mpls.h>
 #include <oper/peer.h>
+#include <xmpp/xmpp_client.h>
 
 #include <filter/acl.h>
 
@@ -322,11 +323,23 @@ void Agent::SetAgentTaskPolicy() {
                      sizeof(flow_stats_update_exclude_list) / sizeof(char *));
 
     const char *profile_task_exclude_list[] = {
+        AGENT_FLOW_STATS_MANAGER_TASK,
         AGENT_SHUTDOWN_TASKNAME,
         AGENT_INIT_TASKNAME
     };
     SetTaskPolicyOne("Agent::Profile", profile_task_exclude_list,
                      sizeof(profile_task_exclude_list) / sizeof(char *));
+
+    //event notify exclude list
+    const char *event_notify_exclude_list[] = {
+        "Agent::ControllerXmpp",
+        "db::DBTable",
+        kAgentResourceBackUpTask,
+        AGENT_SHUTDOWN_TASKNAME,
+        AGENT_INIT_TASKNAME
+    };
+    SetTaskPolicyOne(kEventNotifierTask, event_notify_exclude_list,
+                     sizeof(event_notify_exclude_list) / sizeof(char *));
 
 }
 
@@ -431,39 +444,11 @@ void Agent::CopyFilteredParams() {
 void Agent::CopyConfig(AgentParam *params) {
     params_ = params;
 
-    int count = 0;
-    int dns_count = 0;
-
     xs_auth_enable_ = params_->xmpp_auth_enabled();
     dns_auth_enable_ = params_->xmpp_dns_auth_enabled();
     xs_server_cert_ = params_->xmpp_server_cert();
     xs_server_key_ = params_->xmpp_server_key();
     xs_ca_cert_ = params_->xmpp_ca_cert();
-
-    if (params_->xmpp_server_1().to_ulong()) {
-        xs_addr_[count] = params_->xmpp_server_1().to_string();
-        count++;
-    }
-
-    if (params_->xmpp_server_2().to_ulong()) {
-        xs_addr_[count] = params_->xmpp_server_2().to_string();
-        count++;
-    }
-
-    if (params_->dns_server_1().to_ulong()) {
-        dns_port_[dns_count] = params_->dns_port_1();
-        dns_addr_[dns_count] = params_->dns_server_1().to_string();
-        dns_count++;
-    }
-
-    if (params_->dns_server_2().to_ulong()) {
-        dns_port_[dns_count] = params_->dns_port_2();
-        dns_addr_[dns_count] = params_->dns_server_2().to_string();
-        dns_count++;
-    }
-
-    dss_addr_ = params_->discovery_server();
-    dss_xs_instances_ = params_->xmpp_instance_count();
 
     CopyFilteredParams();
     InitializeFilteredParams();
@@ -504,23 +489,13 @@ void Agent::CopyConfig(AgentParam *params) {
     send_ratelimit_ = params_->sandesh_send_rate_limit();
 }
 
-DiscoveryAgentClient *Agent::discovery_client() const {
-    return cfg_->discovery_client();
-}
-
 void Agent::set_cn_mcast_builder(AgentXmppChannel *peer) {
     cn_mcast_builder_ =  peer;
 }
 
 void Agent::InitCollector() {
-    /* If Sandesh initialization is not being done via discovery we need to
-     * initialize here. We need to do sandesh initialization here for cases
-     * (i) When both Discovery and Collectors are configured.
-     * (ii) When both are not configured (to initilialize introspect)
-     * (iii) When only collector is configured
-     */
-    if (!discovery_server().empty() &&
-        params_->collector_server_list().size() == 0) {
+    /* We need to do sandesh initialization here */
+    if (params_->collector_server_list().size() == 0) {
         return;
     }
 
@@ -538,7 +513,7 @@ void Agent::InitCollector() {
                 g_vns_constants.NodeTypeNames.find(node_type)->second,
                 instance_id_,
                 event_manager(),
-                params_->http_server_port(), 0,
+                params_->http_server_port(),
                 GetCollectorlist(),
                 NULL, params_->derived_stats_map(),
                 params_->sandesh_config());
@@ -660,11 +635,12 @@ Agent::Agent() :
     params_(NULL), cfg_(NULL), stats_(NULL), ksync_(NULL), uve_(NULL),
     stats_collector_(NULL), flow_stats_manager_(NULL), pkt_(NULL),
     services_(NULL), vgw_(NULL), rest_server_(NULL), oper_db_(NULL),
-    diag_table_(NULL), controller_(NULL), resource_manager_(), event_mgr_(NULL),
+    diag_table_(NULL), controller_(NULL), resource_manager_(),
+    event_notifier_(), event_mgr_(NULL),
     agent_xmpp_channel_(), ifmap_channel_(),
     xmpp_client_(), xmpp_init_(), dns_xmpp_channel_(), dns_xmpp_client_(),
     dns_xmpp_init_(), agent_stale_cleaner_(NULL), cn_mcast_builder_(NULL),
-    ds_client_(NULL), metadata_server_port_(0), host_name_(""), agent_name_(""),
+    metadata_server_port_(0), host_name_(""), agent_name_(""),
     prog_name_(""), introspect_port_(0),
     instance_id_(g_vns_constants.INSTANCE_ID_DEFAULT),
     module_type_(Module::VROUTER_AGENT), module_name_(), send_ratelimit_(0),
@@ -676,15 +652,13 @@ Agent::Agent() :
     acl_table_(NULL), mirror_table_(NULL), vrf_assign_table_(NULL),
     vxlan_table_(NULL), service_instance_table_(NULL),
     physical_device_table_(NULL), physical_device_vn_table_(NULL),
-    config_manager_(), mirror_cfg_table_(NULL), intf_mirror_cfg_table_(NULL),
-    router_id_(0), prefix_len_(0), 
+    config_manager_(), mirror_cfg_table_(NULL),
+    intf_mirror_cfg_table_(NULL), router_id_(0), prefix_len_(0), 
     gateway_id_(0), compute_node_ip_(0), xs_cfg_addr_(""), xs_idx_(0),
     xs_addr_(), xs_port_(),
     xs_stime_(), xs_auth_enable_(false), xs_dns_idx_(0), dns_addr_(),
     dns_port_(), dns_auth_enable_(false), 
     controller_chksum_(0), dns_chksum_(0), collector_chksum_(0),
-    dss_addr_(""), dss_port_(0),
-    dss_xs_instances_(0), discovery_client_name_(),
     ip_fabric_intf_name_(""), vhost_interface_name_(""),
     pkt_interface_name_("pkt0"), arp_proto_(NULL),
     dhcp_proto_(NULL), dns_proto_(NULL), icmp_proto_(NULL),
@@ -723,8 +697,6 @@ Agent::Agent() :
 
     Module::type module = static_cast<Module::type>(module_type_);
     module_name_ = g_vns_constants.ModuleNames.find(module)->second;
-    discovery_client_name_ = BuildDiscoveryClientName(module_name_,
-                                                      instance_id_);
 
     agent_signal_.reset(
         AgentObjectFactory::Create<AgentSignal>(event_mgr_));
@@ -779,6 +751,14 @@ void Agent::set_stats(AgentStats *stats) {
 
 ConfigManager *Agent::config_manager() const {
     return config_manager_.get();
+}
+
+EventNotifier *Agent::event_notifier() const {
+    return event_notifier_;
+}
+
+void Agent::set_event_notifier(EventNotifier *val) {
+    event_notifier_ = val;
 }
 
 KSync *Agent::ksync() const {
@@ -937,10 +917,6 @@ bool Agent::vrouter_on_host() const {
     return params_->vrouter_on_host();
 }
 
-const string Agent::BuildDiscoveryClientName(string mod_name, string id) {
-    return (mod_name + ":" + id);
-}
-
 uint16_t
 Agent::ProtocolStringToInt(const std::string &proto) {
     if (proto == "tcp" || proto == "TCP") {
@@ -1010,6 +986,19 @@ bool Agent::MeasureQueueDelay() {
 
 void Agent::SetMeasureQueueDelay(bool val) {
     return params_->set_measure_queue_delay(val);
+}
+
+void Agent::SetXmppDscp(uint8_t val) {
+    for (uint8_t count = 0; count < MAX_XMPP_SERVERS; count++) {
+        XmppClient *client = xmpp_client_[count];
+        if (client) {
+            client->SetDscpValue(val);
+        }
+        client = dns_xmpp_client_[count];
+        if (client) {
+            client->SetDscpValue(val);
+        }
+    }
 }
 
 VrouterObjectLimits Agent::GetVrouterObjectLimits() {

@@ -518,7 +518,7 @@ BgpXmppChannel::~BgpXmppChannel() {
     STLDeleteElements(&defer_q_);
     assert(peer_deleted());
     assert(!close_manager_->IsMembershipInUse());
-    assert(routingtable_membership_request_map_.empty());
+    assert(table_membership_request_map_.empty());
     TimerManager::DeleteTimer(eor_receive_timer_);
     TimerManager::DeleteTimer(eor_send_timer_);
     BGP_LOG_PEER(Event, peer_.get(), SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
@@ -555,7 +555,7 @@ string BgpXmppChannel::StateName() const {
 
 
 size_t BgpXmppChannel::GetMembershipRequestQueueSize() const {
-    return routingtable_membership_request_map_.size();
+    return table_membership_request_map_.size();
 }
 
 void BgpXmppChannel::RoutingInstanceCallback(string vrf_name, int op) {
@@ -572,18 +572,18 @@ void BgpXmppChannel::RoutingInstanceCallback(string vrf_name, int op) {
     assert(rt_instance);
 
     if (op == RoutingInstanceMgr::INSTANCE_ADD) {
-        VrfMembershipRequestMap::iterator it =
-            vrf_membership_request_map_.find(vrf_name);
-        if (it == vrf_membership_request_map_.end())
+        const InstanceMembershipRequestState *imr_state =
+            GetInstanceMembershipState(vrf_name);
+        if (!imr_state)
             return;
-        ProcessDeferredSubscribeRequest(rt_instance, it->second);
-        vrf_membership_request_map_.erase(it);
+        ProcessDeferredSubscribeRequest(rt_instance, *imr_state);
+        DeleteInstanceMembershipState(vrf_name);
     } else {
-        SubscribedRoutingInstanceList::iterator it =
-            routing_instances_.find(rt_instance);
-        if (it == routing_instances_.end()) return;
-        rtarget_manager_->RoutingInstanceCallback(it->first,
-                                                           &it->second.targets);
+        SubscriptionState *sub_state = GetSubscriptionState(rt_instance);
+        if (!sub_state)
+            return;
+        rtarget_manager_->RoutingInstanceCallback(
+            rt_instance, &sub_state->targets);
     }
 }
 
@@ -601,23 +601,15 @@ TcpSession::Endpoint BgpXmppChannel::endpoint() const {
 
 bool BgpXmppChannel::XmppDecodeAddress(int af, const string &address,
                                        IpAddress *addrp, bool zero_ok) {
-    switch (af) {
-    case BgpAf::IPv4:
-        break;
-    default:
+    if (af != BgpAf::IPv4 && af != BgpAf::IPv6)
         return false;
-    }
 
     error_code error;
     *addrp = IpAddress::from_string(address, error);
-    if (error) {
+    if (error)
         return false;
-    }
-    if (zero_ok) {
-        return true;
-    } else {
-        return (addrp->to_v4().to_ulong() != 0);
-    }
+
+    return (zero_ok ? true : !addrp->is_unspecified());
 }
 
 //
@@ -627,11 +619,11 @@ bool BgpXmppChannel::GetMembershipInfo(BgpTable *table,
     int *instance_id, uint64_t *subscription_gen_id, RequestType *req_type) {
     *instance_id = -1;
     *subscription_gen_id = 0;
-    RoutingTableMembershipRequestMap::iterator loc =
-        routingtable_membership_request_map_.find(table->name());
-    if (loc != routingtable_membership_request_map_.end()) {
-        *req_type = loc->second.pending_req;
-        *instance_id = loc->second.instance_id;
+    TableMembershipRequestState *tmr_state =
+        GetTableMembershipState(table->name());
+    if (tmr_state) {
+        *req_type = tmr_state->pending_req;
+        *instance_id = tmr_state->instance_id;
         return true;
     } else {
         *req_type = NONE;
@@ -643,19 +635,68 @@ bool BgpXmppChannel::GetMembershipInfo(BgpTable *table,
 }
 
 //
-// Return true if there's a pending request, false otherwise.
+// Add entry to the pending table request map.
 //
-bool BgpXmppChannel::GetMembershipInfo(const string &vrf_name,
-    int *instance_id) {
-    *instance_id = -1;
-    VrfMembershipRequestMap::iterator loc =
-        vrf_membership_request_map_.find(vrf_name);
-    if (loc != vrf_membership_request_map_.end()) {
-        *instance_id = loc->second;
-        return true;
-    } else {
-        return false;
-    }
+void BgpXmppChannel::AddTableMembershipState(const string &table_name,
+    TableMembershipRequestState tmr_state) {
+    table_membership_request_map_.insert(make_pair(table_name, tmr_state));
+}
+
+//
+// Delete entry from the pending table request map.
+// Return true if the entry was found and deleted.
+//
+bool BgpXmppChannel::DeleteTableMembershipState(const string &table_name) {
+    return (table_membership_request_map_.erase(table_name) > 0);
+}
+
+//
+// Find entry in the pending table request map.
+//
+BgpXmppChannel::TableMembershipRequestState *
+BgpXmppChannel::GetTableMembershipState(
+    const string &table_name) {
+    TableMembershipRequestMap::iterator loc =
+        table_membership_request_map_.find(table_name);
+    return (loc == table_membership_request_map_.end() ? NULL : &loc->second);
+}
+
+//
+// Find entry in the pending table request map.
+// Const version.
+//
+const BgpXmppChannel::TableMembershipRequestState *
+BgpXmppChannel::GetTableMembershipState(
+    const string &table_name) const {
+    TableMembershipRequestMap::const_iterator loc =
+        table_membership_request_map_.find(table_name);
+    return (loc == table_membership_request_map_.end() ? NULL : &loc->second);
+}
+
+//
+// Add entry to the pending instance request map.
+//
+void BgpXmppChannel::AddInstanceMembershipState(const string &instance,
+    InstanceMembershipRequestState imr_state) {
+    instance_membership_request_map_.insert(make_pair(instance, imr_state));
+}
+
+//
+// Delete entry from the pending instance request map.
+// Return true if the entry was found and deleted.
+//
+bool BgpXmppChannel::DeleteInstanceMembershipState(const string &instance) {
+    return (instance_membership_request_map_.erase(instance) > 0);
+}
+
+//
+// Find the entry in the pending instance request map.
+//
+const BgpXmppChannel::InstanceMembershipRequestState *
+BgpXmppChannel::GetInstanceMembershipState(const string &instance) const {
+    InstanceMembershipRequestMap::const_iterator loc =
+        instance_membership_request_map_.find(instance);
+    return loc != instance_membership_request_map_.end() ? &loc->second : NULL;
 }
 
 //
@@ -700,9 +741,13 @@ bool BgpXmppChannel::VerifyMembership(const string &vrf_name,
             }
         }
     } else {
-        // Bail if there's no pending subscribe. route retract can be received
-        // while the instance is marked for deletion.
-        if (GetMembershipInfo(vrf_name, instance_id)) {
+        // Bail if there's no pending subscribe for the instance.
+        // Note that route retract can be received while the instance is
+        // marked for deletion.
+        const InstanceMembershipRequestState *imr_state =
+            GetInstanceMembershipState(vrf_name);
+        if (imr_state) {
+            *instance_id = imr_state->instance_id;
             *subscribe_pending = true;
         } else if (add_change || !rt_instance) {
             BGP_LOG_PEER_INSTANCE_CRITICAL(Peer(), vrf_name, BGP_PEER_DIR_IN,
@@ -863,8 +908,8 @@ bool BgpXmppChannel::ProcessMcastItem(string vrf_name,
             attrs.push_back(&ext);
 
         BgpAttrPtr attr = bgp_server_->attr_db()->Locate(attrs);
-        req.data.reset(new ErmVpnTable::RequestData(attr, flags,
-                                                    0, subscription_gen_id));
+        req.data.reset(new ErmVpnTable::RequestData(
+            attr, flags, 0, 0, subscription_gen_id));
         stats_[RX].reach++;
     } else {
         req.oper = DBRequest::DB_ENTRY_DELETE;
@@ -928,7 +973,6 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
 
     // Rules for routes in master instance:
     // - Label must be 0
-    // - Only the first nexthop is used
     // - Tunnel encapsulation is not required
     // - Do not add SourceRd and ExtCommunitySpec
     bool master = (vrf_name == BgpConfigManager::kMasterInstance);
@@ -965,118 +1009,97 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
             req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
             BgpAttrSpec attrs;
 
-            bool first_nh = true;
-            BgpTable::RequestData::NextHops nexthops;
             const NextHopListType &inh_list = item.entry.next_hops;
-            for (NextHopListType::const_iterator nit = inh_list.begin();
-                nit != inh_list.end(); ++nit, first_nh = false) {
-                BgpTable::RequestData::NextHop nexthop;
 
-                IpAddress nhop_address(Ip4Address(0));
-                if (!XmppDecodeAddress(nit->af, nit->address, &nhop_address)) {
+            // Agents should send only one next-hop in the item.
+            if (inh_list.next_hop.size() != 1) {
+                BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                    BGP_LOG_FLAG_ALL,
+                    "More than one nexthop received for inet route " <<
+                    inet_prefix.ToString());
+                return false;
+            }
+
+            NextHopListType::const_iterator nit = inh_list.begin();
+
+            IpAddress nhop_address(Ip4Address(0));
+            if (!XmppDecodeAddress(nit->af, nit->address, &nhop_address)) {
+                BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                    BGP_LOG_FLAG_ALL,
+                    "Bad nexthop address " << nit->address <<
+                    " for inet route " << inet_prefix.ToString());
+                return false;
+            }
+
+            if (family == Address::EVPN) {
+                if (nit->vni > 0xFFFFFF) {
                     BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
                         BGP_LOG_FLAG_ALL,
-                        "Bad nexthop address " << nit->address <<
+                        "Bad label " << nit->vni <<
                         " for inet route " << inet_prefix.ToString());
                     return false;
                 }
+                if (!nit->vni)
+                    continue;
+                if (nit->mac.empty())
+                    continue;
 
-                if (family == Address::EVPN) {
-                    if (nit->vni > 0xFFFFFF) {
-                        BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                            BGP_LOG_FLAG_ALL,
-                            "Bad label " << nit->vni <<
-                            " for inet route " << inet_prefix.ToString());
-                        return false;
-                    }
-                    if (!nit->vni)
-                        continue;
-                    if (nit->mac.empty())
-                        continue;
-                    if (nexthops.empty()) {
-                        MacAddress mac_addr =
-                            MacAddress::FromString(nit->mac, &error);
-                        if (error) {
-                            BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                                BGP_LOG_FLAG_ALL,
-                                "Bad next-hop mac address " << nit->mac);
-                            return false;
-                        }
-                        RouterMac router_mac(mac_addr);
-                        ext.communities.push_back(
-                            router_mac.GetExtCommunityValue());
-                    }
-                } else {
-                    if (nit->label > 0xFFFFF || (master && nit->label)) {
-                        BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                            BGP_LOG_FLAG_ALL,
-                            "Bad label " << nit->label <<
-                            " for inet route " << inet_prefix.ToString());
-                        return false;
-                    }
-                    if (!master && !nit->label)
-                        continue;
+                MacAddress mac_addr =
+                    MacAddress::FromString(nit->mac, &error);
+                if (error) {
+                    BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                        BGP_LOG_FLAG_ALL,
+                        "Bad next-hop mac address " << nit->mac);
+                    return false;
                 }
-
-                if (first_nh) {
-                    nh_address = nhop_address;
-                    if (family == Address::INET) {
-                        label = nit->label;
-                    } else {
-                        label = nit->vni;
-                    }
+                RouterMac router_mac(mac_addr);
+                ext.communities.push_back(router_mac.GetExtCommunityValue());
+            } else {
+                if (nit->label > 0xFFFFF || (master && nit->label)) {
+                    BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                        BGP_LOG_FLAG_ALL,
+                        "Bad label " << nit->label <<
+                        " for inet route " << inet_prefix.ToString());
+                    return false;
                 }
-
-                // Process tunnel encapsulation list.
-                bool no_tunnel_encap = true;
-                bool no_valid_tunnel_encap = true;
-                for (TunnelEncapsulationListType::const_iterator eit =
-                    nit->tunnel_encapsulation_list.begin();
-                    eit != nit->tunnel_encapsulation_list.end(); ++eit) {
-                    no_tunnel_encap = false;
-                    TunnelEncap tun_encap(*eit);
-                    if (tun_encap.tunnel_encap() == TunnelEncapType::UNSPEC)
-                        continue;
-                    if (family == Address::INET &&
-                        tun_encap.tunnel_encap() == TunnelEncapType::VXLAN) {
-                        continue;
-                    }
-                    if (family == Address::EVPN &&
-                        tun_encap.tunnel_encap() != TunnelEncapType::VXLAN) {
-                        continue;
-                    }
-                    no_valid_tunnel_encap = false;
-                    if (first_nh) {
-                        ext.communities.push_back(
-                            tun_encap.GetExtCommunityValue());
-                    }
-                    nexthop.tunnel_encapsulations_.push_back(
-                        tun_encap.GetExtCommunity());
-                }
-
-                // Mark the path as infeasible if all tunnel encaps published
-                // by agent are invalid.
-                if (!no_tunnel_encap && no_valid_tunnel_encap && !master) {
-                    flags = BgpPath::NoTunnelEncap;
-                }
-
-                nexthop.flags_ = flags;
-                nexthop.address_ = nhop_address;
-                nexthop.label_ =
-                    family == Address::INET ? nit->label : nit->vni;
-                if (!master) {
-                    nexthop.source_rd_ = RouteDistinguisher(
-                        nhop_address.to_v4().to_ulong(), instance_id);
-                }
-                nexthops.push_back(nexthop);
-
-                if (master)
-                    break;
+                if (!master && !nit->label)
+                    continue;
             }
 
-            // Skip if there are no valid next hops for the inet/evpn route.
-            if (nexthops.empty())
-                continue;
+            nh_address = nhop_address;
+            if (family == Address::INET) {
+                label = nit->label;
+            } else {
+                label = nit->vni;
+            }
+
+            // Process tunnel encapsulation list.
+            bool no_tunnel_encap = true;
+            bool no_valid_tunnel_encap = true;
+            for (TunnelEncapsulationListType::const_iterator eit =
+                nit->tunnel_encapsulation_list.begin();
+                eit != nit->tunnel_encapsulation_list.end(); ++eit) {
+                no_tunnel_encap = false;
+                TunnelEncap tun_encap(*eit);
+                if (tun_encap.tunnel_encap() == TunnelEncapType::UNSPEC)
+                    continue;
+                if (family == Address::INET &&
+                    tun_encap.tunnel_encap() == TunnelEncapType::VXLAN) {
+                    continue;
+                }
+                if (family == Address::EVPN &&
+                    tun_encap.tunnel_encap() != TunnelEncapType::VXLAN) {
+                    continue;
+                }
+                no_valid_tunnel_encap = false;
+                ext.communities.push_back(tun_encap.GetExtCommunityValue());
+            }
+
+            // Mark the path as infeasible if all tunnel encaps published
+            // by agent are invalid.
+            if (!no_tunnel_encap && no_valid_tunnel_encap && !master) {
+                flags = BgpPath::NoTunnelEncap;
+            }
 
             BgpAttrLocalPref local_pref(item.entry.local_preference);
             if (local_pref.local_pref != 0)
@@ -1091,7 +1114,7 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
             if (med.med != 0)
                 attrs.push_back(&med);
 
-            // Process community tags
+            // Process community tags.
             const CommunityTagListType &ict_list =
                 item.entry.community_tag_list;
             for (CommunityTagListType::const_iterator cit = ict_list.begin();
@@ -1141,8 +1164,8 @@ bool BgpXmppChannel::ProcessItem(string vrf_name,
                 attrs.push_back(&ext);
 
             BgpAttrPtr attr = bgp_server_->attr_db()->Locate(attrs);
-            req.data.reset(new BgpTable::RequestData(attr, nexthops,
-                subscription_gen_id));
+            req.data.reset(new BgpTable::RequestData(
+                attr, flags, label, 0, subscription_gen_id));
         } else {
             req.oper = DBRequest::DB_ENTRY_DELETE;
         }
@@ -1221,6 +1244,12 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
         return false;
     }
 
+    // Rules for routes in master instance:
+    // - Label must be 0
+    // - Tunnel encapsulation is not required
+    // - Do not add SourceRd and ExtCommunitySpec
+    bool master = (vrf_name == BgpConfigManager::kMasterInstance);
+
     // vector<Address::Family> family_list = list_of(Address::INET6)(Address::EVPN);
     vector<Address::Family> family_list = list_of(Address::INET6);
     BOOST_FOREACH(Address::Family family, family_list) {
@@ -1253,114 +1282,98 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
             req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
             BgpAttrSpec attrs;
 
-            bool first_nh = true;
-            BgpTable::RequestData::NextHops nexthops;
             const NextHopListType &inh_list = item.entry.next_hops;
-            for (NextHopListType::const_iterator nit = inh_list.begin();
-                nit != inh_list.end(); ++nit, first_nh = false) {
-                BgpTable::RequestData::NextHop nexthop;
 
-                IpAddress nhop_address(Ip4Address(0));
-                if (!XmppDecodeAddress(nit->af, nit->address, &nhop_address)) {
-                    error_stats().incr_inet6_rx_bad_nexthop_count();
+            // Agents should send only one next-hop in the item.
+            if (inh_list.next_hop.size() != 1) {
+                BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                    BGP_LOG_FLAG_ALL,
+                    "More than one nexthop received for inet6 route " <<
+                    inet6_prefix.ToString());
+                return false;
+            }
+
+            NextHopListType::const_iterator nit = inh_list.begin();
+
+            IpAddress nhop_address(Ip4Address(0));
+            if (!XmppDecodeAddress(nit->af, nit->address, &nhop_address)) {
+                error_stats().incr_inet6_rx_bad_nexthop_count();
+                BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                    BGP_LOG_FLAG_ALL,
+                    "Bad nexthop address " << nit->address <<
+                    " for inet6 route " << inet6_prefix.ToString());
+                return false;
+            }
+
+            if (family == Address::EVPN) {
+                if (nit->vni > 0xFFFFFF) {
                     BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
                         BGP_LOG_FLAG_ALL,
-                        "Bad nexthop address " << nit->address <<
+                        "Bad label " << nit->vni <<
                         " for inet6 route " << inet6_prefix.ToString());
                     return false;
                 }
+                if (!nit->vni)
+                    continue;
+                if (nit->mac.empty())
+                    continue;
 
-                if (family == Address::EVPN) {
-                    if (nit->vni > 0xFFFFFF) {
-                        BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                            BGP_LOG_FLAG_ALL,
-                            "Bad label " << nit->vni <<
-                            " for inet6 route " << inet6_prefix.ToString());
-                        return false;
-                    }
-                    if (!nit->vni)
-                        continue;
-                    if (nit->mac.empty())
-                        continue;
-                    if (nexthops.empty()) {
-                        MacAddress mac_addr =
-                            MacAddress::FromString(nit->mac, &error);
-                        if (error) {
-                            BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                                BGP_LOG_FLAG_ALL,
-                                "Bad next-hop mac address " << nit->mac);
-                            return false;
-                        }
-                        RouterMac router_mac(mac_addr);
-                        ext.communities.push_back(
-                            router_mac.GetExtCommunityValue());
-                    }
-                } else {
-                    if (nit->label > 0xFFFFF) {
-                        BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                            BGP_LOG_FLAG_ALL,
-                            "Bad label " << nit->vni <<
-                            " for inet6 route " << inet6_prefix.ToString());
-                        return false;
-                    }
-                    if (!nit->label)
-                        continue;
+                MacAddress mac_addr =
+                    MacAddress::FromString(nit->mac, &error);
+                if (error) {
+                    BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                        BGP_LOG_FLAG_ALL,
+                        "Bad next-hop mac address " << nit->mac);
+                    return false;
                 }
-
-                if (first_nh) {
-                    nh_address = nhop_address;
-                    if (family == Address::INET6) {
-                        label = nit->label;
-                    } else {
-                        label = nit->vni;
-                    }
+                RouterMac router_mac(mac_addr);
+                ext.communities.push_back(router_mac.GetExtCommunityValue());
+            } else {
+                if (nit->label > 0xFFFFF || (master && nit->label)) {
+                    BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                        BGP_LOG_FLAG_ALL,
+                        "Bad label " << nit->label <<
+                        " for inet6 route " << inet6_prefix.ToString());
+                    return false;
                 }
-
-                // Process tunnel encapsulation list.
-                bool no_tunnel_encap = true;
-                bool no_valid_tunnel_encap = true;
-                for (TunnelEncapsulationListType::const_iterator eit =
-                    nit->tunnel_encapsulation_list.begin();
-                    eit != nit->tunnel_encapsulation_list.end(); ++eit) {
-                    no_tunnel_encap = false;
-                    TunnelEncap tun_encap(*eit);
-                    if (tun_encap.tunnel_encap() == TunnelEncapType::UNSPEC)
-                        continue;
-                    if (family == Address::INET6 &&
-                        tun_encap.tunnel_encap() == TunnelEncapType::VXLAN) {
-                        continue;
-                    }
-                    if (family == Address::EVPN &&
-                        tun_encap.tunnel_encap() != TunnelEncapType::VXLAN) {
-                        continue;
-                    }
-                    no_valid_tunnel_encap = false;
-                    if (first_nh) {
-                        ext.communities.push_back(
-                            tun_encap.GetExtCommunityValue());
-                    }
-                    nexthop.tunnel_encapsulations_.push_back(
-                        tun_encap.GetExtCommunity());
-                }
-
-                // Mark the path as infeasible if all tunnel encaps published
-                // by agent are invalid.
-                if (!no_tunnel_encap && no_valid_tunnel_encap) {
-                    flags = BgpPath::NoTunnelEncap;
-                }
-
-                nexthop.flags_ = flags;
-                nexthop.address_ = nhop_address;
-                nexthop.label_ =
-                    family == Address::INET6 ? nit->label : nit->vni;
-                nexthop.source_rd_ = RouteDistinguisher(
-                    nhop_address.to_v4().to_ulong(), instance_id);
-                nexthops.push_back(nexthop);
+                if (!master && !nit->label)
+                    continue;
             }
 
-            // Skip if there are no valid next hops for the inet6/evpn route.
-            if (nexthops.empty())
-                continue;
+            nh_address = nhop_address;
+            if (family == Address::INET6) {
+                label = nit->label;
+            } else {
+                label = nit->vni;
+            }
+
+            // Process tunnel encapsulation list.
+            bool no_tunnel_encap = true;
+            bool no_valid_tunnel_encap = true;
+            for (TunnelEncapsulationListType::const_iterator eit =
+                nit->tunnel_encapsulation_list.begin();
+                eit != nit->tunnel_encapsulation_list.end(); ++eit) {
+                no_tunnel_encap = false;
+                TunnelEncap tun_encap(*eit);
+                if (tun_encap.tunnel_encap() == TunnelEncapType::UNSPEC)
+                    continue;
+                if (family == Address::INET6 &&
+                    tun_encap.tunnel_encap() == TunnelEncapType::VXLAN) {
+                    continue;
+                }
+                if (family == Address::EVPN &&
+                    tun_encap.tunnel_encap() != TunnelEncapType::VXLAN) {
+                    continue;
+                }
+                no_valid_tunnel_encap = false;
+                ext.communities.push_back(tun_encap.GetExtCommunityValue());
+            }
+
+            // Mark the path as infeasible if all tunnel encaps published
+            // by agent are invalid.
+            if (!no_tunnel_encap && no_valid_tunnel_encap && !master) {
+                flags = BgpPath::NoTunnelEncap;
+            }
 
             BgpAttrLocalPref local_pref(item.entry.local_preference);
             if (local_pref.local_pref != 0)
@@ -1375,7 +1388,7 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
             if (med.med != 0)
                 attrs.push_back(&med);
 
-            // Process community tags
+            // Process community tags.
             const CommunityTagListType &ict_list =
                 item.entry.community_tag_list;
             for (CommunityTagListType::const_iterator cit = ict_list.begin();
@@ -1388,12 +1401,16 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
                 comm.communities.push_back(rt_community);
             }
 
-            BgpAttrNextHop nexthop(nh_address.to_v4().to_ulong());
+            BgpAttrNextHop nexthop(nh_address);
             attrs.push_back(&nexthop);
 
-            BgpAttrSourceRd source_rd(
-                RouteDistinguisher(nh_address.to_v4().to_ulong(), instance_id));
-            attrs.push_back(&source_rd);
+            BgpAttrSourceRd source_rd;
+            if (!master) {
+                uint32_t addr = nh_address.to_v4().to_ulong();
+                source_rd =
+                    BgpAttrSourceRd(RouteDistinguisher(addr, instance_id));
+                attrs.push_back(&source_rd);
+            }
 
             // Process security group list.
             const SecurityGroupListType &isg_list =
@@ -1406,7 +1423,7 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
 
             if (item.entry.mobility.seqno) {
                 MacMobility mm(item.entry.mobility.seqno,
-                               item.entry.mobility.sticky);
+                    item.entry.mobility.sticky);
                 ext.communities.push_back(mm.GetExtCommunityValue());
             } else if (item.entry.sequence_number) {
                 MacMobility mm(item.entry.sequence_number);
@@ -1420,12 +1437,12 @@ bool BgpXmppChannel::ProcessInet6Item(string vrf_name,
 
             if (!comm.communities.empty())
                 attrs.push_back(&comm);
-            if (!ext.communities.empty())
+            if (!master && !ext.communities.empty())
                 attrs.push_back(&ext);
 
             BgpAttrPtr attr = bgp_server_->attr_db()->Locate(attrs);
-            req.data.reset(new BgpTable::RequestData(attr, nexthops,
-                subscription_gen_id));
+            req.data.reset(new BgpTable::RequestData(
+                attr, flags, label, 0, subscription_gen_id));
         } else {
             req.oper = DBRequest::DB_ENTRY_DELETE;
         }
@@ -1554,13 +1571,13 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
     uint32_t ethernet_tag = item.entry.nlri.ethernet_tag;
     EvpnPrefix evpn_prefix(rd, ethernet_tag, mac_addr, ip_addr);
 
-    EvpnTable::RequestData::NextHops nexthops;
     DBRequest req;
     ExtCommunitySpec ext;
     req.key.reset(new EvpnTable::RequestKey(evpn_prefix, peer_.get()));
 
     IpAddress nh_address(Ip4Address(0));
     uint32_t label = 0;
+    uint32_t l3_label = 0;
     uint32_t flags = 0;
     bool label_is_vni = false;
 
@@ -1576,66 +1593,67 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
             return false;
         }
 
-        bool first_nh = true;
-        for (EnetNextHopListType::const_iterator nit = inh_list.begin();
-             nit != inh_list.end(); ++nit, first_nh = false) {
-            EvpnTable::RequestData::NextHop nexthop;
-            IpAddress nhop_address(Ip4Address(0));
+        // Agents should send only one next-hop in the item.
+        if (inh_list.next_hop.size() != 1) {
+            BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                BGP_LOG_FLAG_ALL,
+                "More than one nexthop received for enet route " <<
+                evpn_prefix.ToXmppIdString());
+            return false;
+        }
 
-            if (!XmppDecodeAddress(nit->af, nit->address, &nhop_address)) {
+        EnetNextHopListType::const_iterator nit = inh_list.begin();
+
+        IpAddress nhop_address(Ip4Address(0));
+
+        if (!XmppDecodeAddress(nit->af, nit->address, &nhop_address)) {
+            BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
+                BGP_LOG_FLAG_ALL, "Bad nexthop address " << nit->address <<
+                " for enet route " << evpn_prefix.ToXmppIdString());
+            return false;
+        }
+
+        nh_address = nhop_address;
+        label = nit->label;
+        l3_label = nit->l3_label;
+        if (!nit->mac.empty()) {
+            MacAddress rmac_addr =
+                MacAddress::FromString(nit->mac, &error);
+            if (error) {
                 BGP_LOG_PEER_INSTANCE_WARNING(Peer(), vrf_name,
-                    BGP_LOG_FLAG_ALL, "Bad nexthop address " << nit->address <<
+                    BGP_LOG_FLAG_ALL,
+                    "Bad next-hop mac address " << nit->mac <<
                     " for enet route " << evpn_prefix.ToXmppIdString());
                 return false;
             }
-            if (first_nh) {
-                nh_address = nhop_address;
-                label = nit->label;
-            }
+            RouterMac router_mac(rmac_addr);
+            ext.communities.push_back(router_mac.GetExtCommunityValue());
+        }
 
-            // Process tunnel encapsulation list.
-            bool no_tunnel_encap = true;
-            bool no_valid_tunnel_encap = true;
-            for (EnetTunnelEncapsulationListType::const_iterator eit =
-                 nit->tunnel_encapsulation_list.begin();
-                 eit != nit->tunnel_encapsulation_list.end(); ++eit) {
-                no_tunnel_encap = false;
-                TunnelEncap tun_encap(*eit);
-                if (tun_encap.tunnel_encap() == TunnelEncapType::UNSPEC)
-                    continue;
-                no_valid_tunnel_encap = false;
-                if (tun_encap.tunnel_encap() == TunnelEncapType::VXLAN)
-                    label_is_vni = true;
-                if (first_nh) {
-                    ext.communities.push_back(
-                        tun_encap.GetExtCommunityValue());
-                    if (tun_encap.tunnel_encap() == TunnelEncapType::GRE) {
-                        TunnelEncap alt_tun_encap(TunnelEncapType::MPLS_O_GRE);
-                        ext.communities.push_back(
-                            alt_tun_encap.GetExtCommunityValue());
-                    }
-                }
-                nexthop.tunnel_encapsulations_.push_back(
-                    tun_encap.GetExtCommunity());
-                if (tun_encap.tunnel_encap() == TunnelEncapType::GRE) {
-                    TunnelEncap alt_tun_encap(TunnelEncapType::MPLS_O_GRE);
-                    nexthop.tunnel_encapsulations_.push_back(
-                        alt_tun_encap.GetExtCommunity());
-                }
+        // Process tunnel encapsulation list.
+        bool no_tunnel_encap = true;
+        bool no_valid_tunnel_encap = true;
+        for (EnetTunnelEncapsulationListType::const_iterator eit =
+            nit->tunnel_encapsulation_list.begin();
+            eit != nit->tunnel_encapsulation_list.end(); ++eit) {
+            no_tunnel_encap = false;
+            TunnelEncap tun_encap(*eit);
+            if (tun_encap.tunnel_encap() == TunnelEncapType::UNSPEC)
+                continue;
+            no_valid_tunnel_encap = false;
+            if (tun_encap.tunnel_encap() == TunnelEncapType::VXLAN)
+                label_is_vni = true;
+            ext.communities.push_back(tun_encap.GetExtCommunityValue());
+            if (tun_encap.tunnel_encap() == TunnelEncapType::GRE) {
+                TunnelEncap alt_tun_encap(TunnelEncapType::MPLS_O_GRE);
+                ext.communities.push_back(alt_tun_encap.GetExtCommunityValue());
             }
+        }
 
-            // Mark the path as infeasible if all tunnel encaps published
-            // by agent are invalid.
-            if (!no_tunnel_encap && no_valid_tunnel_encap) {
-                flags = BgpPath::NoTunnelEncap;
-            }
-
-            nexthop.flags_ = flags;
-            nexthop.address_ = nhop_address;
-            nexthop.label_ = nit->label;
-            nexthop.source_rd_ = RouteDistinguisher(
-                nhop_address.to_v4().to_ulong(), instance_id);
-            nexthops.push_back(nexthop);
+        // Mark the path as infeasible if all tunnel encaps published
+        // by agent are invalid.
+        if (!no_tunnel_encap && no_valid_tunnel_encap) {
+            flags = BgpPath::NoTunnelEncap;
         }
 
         BgpAttrLocalPref local_pref(item.entry.local_preference);
@@ -1663,14 +1681,14 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
         const EnetSecurityGroupListType &isg_list =
             item.entry.security_group_list;
         for (EnetSecurityGroupListType::const_iterator sit = isg_list.begin();
-             sit != isg_list.end(); ++sit) {
+            sit != isg_list.end(); ++sit) {
             SecurityGroup sg(bgp_server_->autonomous_system(), *sit);
             ext.communities.push_back(sg.GetExtCommunityValue());
         }
 
         if (item.entry.mobility.seqno) {
             MacMobility mm(item.entry.mobility.seqno,
-                           item.entry.mobility.sticky);
+                item.entry.mobility.sticky);
             ext.communities.push_back(mm.GetExtCommunityValue());
         } else if (item.entry.sequence_number) {
             MacMobility mm(item.entry.sequence_number);
@@ -1718,8 +1736,8 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
 
         BgpAttrPtr attr = bgp_server_->attr_db()->Locate(attrs);
 
-        req.data.reset(new EvpnTable::RequestData(attr, nexthops,
-                                                  subscription_gen_id));
+        req.data.reset(new EvpnTable::RequestData(
+            attr, flags, label, l3_label, subscription_gen_id));
         stats_[RX].reach++;
     } else {
         req.oper = DBRequest::DB_ENTRY_DELETE;
@@ -1741,7 +1759,8 @@ bool BgpXmppChannel::ProcessEnetItem(string vrf_name,
     BGP_LOG_PEER_INSTANCE(Peer(), vrf_name,
         SandeshLevel::SYS_DEBUG, BGP_LOG_FLAG_TRACE,
         "Enet route " << evpn_prefix.ToXmppIdString() <<
-        " with next-hop " << nh_address << " and label " << label <<
+        " with next-hop " << nh_address <<
+        " label " << label << " l3-label " << l3_label <<
         " enqueued for " << (add_change ? "add/change" : "delete"));
     table->Enqueue(&req);
     return true;
@@ -1783,7 +1802,8 @@ bool BgpXmppChannel::ResumeClose() {
     return true;
 }
 
-void BgpXmppChannel::RegisterTable(int line, BgpTable *table, int instance_id) {
+void BgpXmppChannel::RegisterTable(int line, BgpTable *table,
+    const TableMembershipRequestState *tmr_state) {
     // Defer if Membership manager is in use (by close manager).
     if (close_manager_->IsMembershipInUse()) {
         BGP_LOG_PEER_TABLE(Peer(), SandeshLevel::SYS_DEBUG,
@@ -1796,9 +1816,18 @@ void BgpXmppChannel::RegisterTable(int line, BgpTable *table, int instance_id) {
     BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
                  BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                  "Subscribe to table " << table->name() <<
-                 " with id " << instance_id);
-    mgr->Register(peer_.get(), table, bgp_policy_, instance_id);
-    channel_stats_.table_subscribe++;
+                 (tmr_state->no_ribout ? " (no ribout)" : "") <<
+                 " with id " << tmr_state->instance_id);
+    if (tmr_state->no_ribout) {
+        mgr->RegisterRibIn(peer_.get(), table);
+        mgr->SetRegistrationInfo(peer_.get(), table, tmr_state->instance_id,
+            manager_->get_subscription_gen_id());
+        channel_stats_.table_subscribe++;
+        MembershipRequestCallback(table);
+    } else {
+        mgr->Register(peer_.get(), table, bgp_policy_, tmr_state->instance_id);
+        channel_stats_.table_subscribe++;
+    }
 
     // If EndOfRib Send timer is running, cancel it and reschedule it after all
     // outstanding membership registrations are complete.
@@ -1823,28 +1852,29 @@ void BgpXmppChannel::UnregisterTable(int line, BgpTable *table) {
     channel_stats_.table_unsubscribe++;
 }
 
-#define RegisterTable(table, id) RegisterTable(__LINE__, table, id)
+#define RegisterTable(table, tmr_state) \
+    RegisterTable(__LINE__, table, tmr_state)
 #define UnregisterTable(table) UnregisterTable(__LINE__, table)
 
 // Process all pending membership requests of various tables.
 void BgpXmppChannel::ProcessPendingSubscriptions() {
     assert(!close_manager_->IsMembershipInUse());
-    BOOST_FOREACH(RoutingTableMembershipRequestMap::value_type &i,
-                  routingtable_membership_request_map_) {
+    BOOST_FOREACH(TableMembershipRequestMap::value_type &entry,
+                  table_membership_request_map_) {
         BgpTable *table = static_cast<BgpTable *>(
-            bgp_server_->database()->FindTable(i.first));
-        MembershipRequestState state = i.second;
-        if (state.current_req == SUBSCRIBE) {
-            RegisterTable(table, state.instance_id);
+            bgp_server_->database()->FindTable(entry.first));
+        const TableMembershipRequestState &tmr_state = entry.second;
+        if (tmr_state.current_req == SUBSCRIBE) {
+            RegisterTable(table, &tmr_state);
         } else {
-            assert(state.current_req == UNSUBSCRIBE);
+            assert(tmr_state.current_req == UNSUBSCRIBE);
             UnregisterTable(table);
         }
     }
 }
 
-size_t BgpXmppChannel::membership_requests() const {
-    return routingtable_membership_request_map_.size();
+size_t BgpXmppChannel::table_membership_requests() const {
+    return table_membership_request_map_.size();
 }
 
 bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
@@ -1853,17 +1883,16 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
         return true;
     }
 
-    RoutingTableMembershipRequestMap::iterator loc =
-        routingtable_membership_request_map_.find(table_name);
-    if (loc == routingtable_membership_request_map_.end()) {
+    TableMembershipRequestState *tmr_state =
+        GetTableMembershipState(table_name);
+    if (!tmr_state) {
         BGP_LOG_PEER_INSTANCE_CRITICAL(Peer(), table_name,
                      BGP_PEER_DIR_IN, BGP_LOG_FLAG_ALL,
                      "Table not in subscribe/unsubscribe request queue");
         assert(false);
     }
 
-    MembershipRequestState state = loc->second;
-    if (state.current_req == SUBSCRIBE) {
+    if (tmr_state->current_req == SUBSCRIBE) {
         BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
                      BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                      "Subscribe to table " << table_name << " completed");
@@ -1876,13 +1905,13 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
     }
 
     if (defer_peer_close_) {
-        routingtable_membership_request_map_.erase(loc);
-        if (routingtable_membership_request_map_.size())
+        DeleteTableMembershipState(table_name);
+        if (table_membership_requests())
             return true;
         defer_peer_close_ = false;
         ResumeClose();
     } else {
-        ProcessMembershipResponse(table_name, loc);
+        ProcessMembershipResponse(table_name, tmr_state);
     }
 
     assert(channel_stats_.table_subscribe_complete <=
@@ -1901,44 +1930,49 @@ bool BgpXmppChannel::MembershipResponseHandler(string table_name) {
 }
 
 bool BgpXmppChannel::ProcessMembershipResponse(string table_name,
-        RoutingTableMembershipRequestMap::iterator loc) {
+    TableMembershipRequestState *tmr_state) {
     BgpTable *table = static_cast<BgpTable *>
         (bgp_server_->database()->FindTable(table_name));
     if (!table) {
-        routingtable_membership_request_map_.erase(loc);
+        DeleteTableMembershipState(table_name);
         return true;
     }
     BgpMembershipManager *mgr = bgp_server_->membership_mgr();
-    MembershipRequestState state = loc->second;
 
-    if ((state.current_req == UNSUBSCRIBE) &&
-        (state.pending_req == SUBSCRIBE)) {
+    if ((tmr_state->current_req == UNSUBSCRIBE) &&
+        (tmr_state->pending_req == SUBSCRIBE)) {
         // Process pending subscribe now that unsubscribe has completed.
-        RegisterTable(table, state.instance_id);
-        loc->second.current_req = SUBSCRIBE;
+        tmr_state->current_req = SUBSCRIBE;
+        RegisterTable(table, tmr_state);
         return true;
-    } else if ((state.current_req == SUBSCRIBE) &&
-               (state.pending_req == UNSUBSCRIBE)) {
+    } else if ((tmr_state->current_req == SUBSCRIBE) &&
+               (tmr_state->pending_req == UNSUBSCRIBE)) {
         // Process pending unsubscribe now that subscribe has completed.
+        tmr_state->current_req = UNSUBSCRIBE;
         UnregisterTable(table);
-        loc->second.current_req = UNSUBSCRIBE;
+        return true;
+    } else if ((tmr_state->current_req == SUBSCRIBE) &&
+        (tmr_state->pending_req == SUBSCRIBE) &&
+        (mgr->IsRibOutRegistered(peer_.get(), table) == tmr_state->no_ribout)) {
+        // Trigger an unsubscribe so that we can subsequently subscribe with
+        // the updated value of no_ribout.
+        tmr_state->current_req = UNSUBSCRIBE;
+        UnregisterTable(table);
         return true;
     }
-
-    routingtable_membership_request_map_.erase(loc);
 
     string vrf_name = table->routing_instance()->name();
     VrfTableName vrf_n_table = make_pair(vrf_name, table->name());
 
-    if (state.pending_req == UNSUBSCRIBE) {
-        if (vrf_membership_request_map_.find(vrf_name) ==
-            vrf_membership_request_map_.end()) {
+    if (tmr_state->pending_req == UNSUBSCRIBE) {
+        if (!GetInstanceMembershipState(vrf_name))
             assert(defer_q_.count(vrf_n_table) == 0);
-        }
+        DeleteTableMembershipState(table_name);
         return true;
-    } else if (state.pending_req == SUBSCRIBE) {
-        mgr->SetRegistrationInfo(peer_.get(), table, state.instance_id,
+    } else if (tmr_state->pending_req == SUBSCRIBE) {
+        mgr->SetRegistrationInfo(peer_.get(), table, tmr_state->instance_id,
             manager_->get_subscription_gen_id());
+        DeleteTableMembershipState(table_name);
     }
 
     for (DeferQ::iterator it = defer_q_.find(vrf_n_table);
@@ -1948,6 +1982,7 @@ bool BgpXmppChannel::ProcessMembershipResponse(string table_name,
 
     // Erase all elements for the table
     defer_q_.erase(vrf_n_table);
+
     return true;
 }
 
@@ -1976,12 +2011,13 @@ void BgpXmppChannel::FillInstanceMembershipInfo(BgpNeighborResp *resp) const {
         rtarget_manager_->FillInfo(&instance, entry.second.targets);
         instance_list.push_back(instance);
     }
-    BOOST_FOREACH(const VrfMembershipRequestMap::value_type &entry,
-        vrf_membership_request_map_) {
+    BOOST_FOREACH(const InstanceMembershipRequestMap::value_type &entry,
+        instance_membership_request_map_) {
+        const InstanceMembershipRequestState &imr_state = entry.second;
         BgpNeighborRoutingInstance instance;
         instance.set_name(entry.first);
         instance.set_state("pending");
-        instance.set_index(entry.second);
+        instance.set_index(imr_state.instance_id);
         instance_list.push_back(instance);
     }
     resp->set_routing_instances(instance_list);
@@ -1994,25 +2030,23 @@ void BgpXmppChannel::FillTableMembershipInfo(BgpNeighborResp *resp) const {
 
     BOOST_FOREACH(const BgpNeighborRoutingTable &table, old_table_list) {
         old_table_set.insert(table.get_name());
-        if (routingtable_membership_request_map_.find(table.get_name()) ==
-            routingtable_membership_request_map_.end()) {
+        if (!GetTableMembershipState(table.get_name()))
             new_table_list.push_back(table);
-        }
     }
 
-    BOOST_FOREACH(const RoutingTableMembershipRequestMap::value_type &entry,
-        routingtable_membership_request_map_) {
+    BOOST_FOREACH(const TableMembershipRequestMap::value_type &entry,
+        table_membership_request_map_) {
         BgpNeighborRoutingTable table;
         table.set_name(entry.first);
         if (old_table_set.find(entry.first) != old_table_set.end())
             table.set_current_state("subscribed");
-        const MembershipRequestState &state = entry.second;
-        if (state.current_req == SUBSCRIBE) {
+        const TableMembershipRequestState &tmr_state = entry.second;
+        if (tmr_state.current_req == SUBSCRIBE) {
             table.set_current_request("subscribe");
         } else {
             table.set_current_request("unsubscribe");
         }
-        if (state.pending_req == SUBSCRIBE) {
+        if (tmr_state.pending_req == SUBSCRIBE) {
             table.set_pending_request("subscribe");
         } else {
             table.set_pending_request("unsubscribe");
@@ -2128,8 +2162,28 @@ void BgpXmppChannel::AddSubscriptionState(RoutingInstance *rt_instance,
     }
 }
 
+void BgpXmppChannel::DeleteSubscriptionState(RoutingInstance *rt_instance) {
+    routing_instances_.erase(rt_instance);
+}
+
+BgpXmppChannel::SubscriptionState *BgpXmppChannel::GetSubscriptionState(
+    RoutingInstance *rt_instance) {
+    SubscribedRoutingInstanceList::iterator loc =
+        routing_instances_.find(rt_instance);
+    return (loc != routing_instances_.end() ? &loc->second : NULL);
+}
+
+const BgpXmppChannel::SubscriptionState *BgpXmppChannel::GetSubscriptionState(
+    RoutingInstance *rt_instance) const {
+    SubscribedRoutingInstanceList::const_iterator loc =
+        routing_instances_.find(rt_instance);
+    return (loc != routing_instances_.end() ? &loc->second : NULL);
+}
+
 void BgpXmppChannel::ProcessDeferredSubscribeRequest(RoutingInstance *instance,
-                                                     int instance_id) {
+    const InstanceMembershipRequestState &imr_state) {
+    int instance_id = imr_state.instance_id;
+    bool no_ribout = imr_state.no_ribout;
     AddSubscriptionState(instance, instance_id);
     RoutingInstance::RouteTableList const rt_list = instance->GetTables();
     for (RoutingInstance::RouteTableList::const_iterator it = rt_list.begin();
@@ -2138,10 +2192,10 @@ void BgpXmppChannel::ProcessDeferredSubscribeRequest(RoutingInstance *instance,
         if (table->IsVpnTable() || table->family() == Address::RTARGET)
             continue;
 
-        MembershipRequestState state(SUBSCRIBE, instance_id);
-        routingtable_membership_request_map_.insert(
-            make_pair(table->name(), state));
-        RegisterTable(table, instance_id);
+        TableMembershipRequestState tmr_state(
+            SUBSCRIBE, instance_id, no_ribout);
+        AddTableMembershipState(table->name(), tmr_state);
+        RegisterTable(table, &tmr_state);
     }
 }
 
@@ -2149,6 +2203,7 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
         string vrf_name, const XmppStanza::XmppMessageIq *iq,
         bool add_change) {
     int instance_id = -1;
+    bool no_ribout = false;
 
     if (add_change) {
         XmlPugi *pugi = reinterpret_cast<XmlPugi *>(iq->dom.get());
@@ -2157,6 +2212,9 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
              node = node.next_sibling()) {
             if (strcmp(node.name(), "instance-id") == 0) {
                 instance_id = node.text().as_int();
+            }
+            if (strcmp(node.name(), "no-ribout") == 0) {
+                no_ribout = node.text().as_bool();
             }
         }
     }
@@ -2171,19 +2229,19 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
                      " not found when processing " <<
                      (add_change ? "subscribe" : "unsubscribe"));
         if (add_change) {
-            if (vrf_membership_request_map_.find(vrf_name) !=
-                vrf_membership_request_map_.end()) {
+            if (GetInstanceMembershipState(vrf_name)) {
                 BGP_LOG_PEER_WARNING(Membership, Peer(),
                              BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                              "Duplicate subscribe for routing instance " <<
                              vrf_name << ", triggering close");
                 channel_->Close();
             } else {
-                vrf_membership_request_map_[vrf_name] = instance_id;
+                AddInstanceMembershipState(vrf_name,
+                    InstanceMembershipRequestState(instance_id, no_ribout));
                 channel_stats_.instance_subscribe++;
             }
         } else {
-            if (vrf_membership_request_map_.erase(vrf_name)) {
+            if (DeleteInstanceMembershipState(vrf_name)) {
                 FlushDeferQ(vrf_name);
                 channel_stats_.instance_unsubscribe++;
             } else {
@@ -2202,22 +2260,21 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
                      " is being deleted when processing " <<
                      (add_change ? "subscribe" : "unsubscribe"));
         if (add_change) {
-            if (vrf_membership_request_map_.find(vrf_name) !=
-                vrf_membership_request_map_.end()) {
+            if (GetInstanceMembershipState(vrf_name)) {
                 BGP_LOG_PEER_WARNING(Membership, Peer(),
                              BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                              "Duplicate subscribe for routing instance " <<
                              vrf_name << ", triggering close");
                 channel_->Close();
-            } else if (routing_instances_.find(rt_instance) !=
-                routing_instances_.end()) {
+            } else if (GetSubscriptionState(rt_instance)) {
                 BGP_LOG_PEER_WARNING(Membership, Peer(),
                              BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                              "Duplicate subscribe for routing instance " <<
                              vrf_name << ", triggering close");
                 channel_->Close();
             } else {
-                vrf_membership_request_map_[vrf_name] = instance_id;
+                AddInstanceMembershipState(vrf_name,
+                    InstanceMembershipRequestState(instance_id, no_ribout));
                 channel_stats_.instance_subscribe++;
             }
             return;
@@ -2226,12 +2283,11 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
             // we need to process the unsubscribe if vrf is not in the request
             // map.  This would be the normal case where we wait for agent to
             // unsubscribe in order to remove routes added by it.
-            if (vrf_membership_request_map_.erase(vrf_name)) {
+            if (DeleteInstanceMembershipState(vrf_name)) {
                 FlushDeferQ(vrf_name);
                 channel_stats_.instance_unsubscribe++;
                 return;
-            } else if (routing_instances_.find(rt_instance) ==
-                routing_instances_.end()) {
+            } else if (!GetSubscriptionState(rt_instance)) {
                 BGP_LOG_PEER_WARNING(Membership, Peer(),
                              BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                              "Spurious unsubscribe for routing instance " <<
@@ -2243,8 +2299,7 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
         }
     } else {
         if (add_change) {
-            if (routing_instances_.find(rt_instance) !=
-                routing_instances_.end()) {
+            if (GetSubscriptionState(rt_instance)) {
                 if (!close_manager_->IsCloseInProgress()) {
                     BGP_LOG_PEER_WARNING(Membership, Peer(),
                                  BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
@@ -2256,8 +2311,7 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
             }
             channel_stats_.instance_subscribe++;
         } else {
-            if (routing_instances_.find(rt_instance) ==
-                routing_instances_.end()) {
+            if (!GetSubscriptionState(rt_instance)) {
                 BGP_LOG_PEER_WARNING(Membership, Peer(),
                              BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                              "Spurious unsubscribe for routing instance " <<
@@ -2273,7 +2327,7 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
         AddSubscriptionState(rt_instance, instance_id);
     } else  {
         rtarget_manager_->PublishRTargetRoute(rt_instance, false);
-        routing_instances_.erase(rt_instance);
+        DeleteSubscriptionState(rt_instance);
     }
 
     RoutingInstance::RouteTableList const rt_list = rt_instance->GetTables();
@@ -2284,41 +2338,41 @@ void BgpXmppChannel::ProcessSubscriptionRequest(
             continue;
 
         if (add_change) {
-            RoutingTableMembershipRequestMap::iterator loc =
-                routingtable_membership_request_map_.find(table->name());
-            if (loc == routingtable_membership_request_map_.end()) {
-                MembershipRequestState state(SUBSCRIBE, instance_id);
-                routingtable_membership_request_map_.insert(
-                    make_pair(table->name(), state));
+            TableMembershipRequestState *tmr_state =
+                GetTableMembershipState(table->name());
+            if (!tmr_state) {
+                TableMembershipRequestState tmp_tmr_state(
+                    SUBSCRIBE, instance_id, no_ribout);
+                AddTableMembershipState(table->name(), tmp_tmr_state);
+                RegisterTable(table, &tmp_tmr_state);
             } else {
-                loc->second.instance_id = instance_id;
-                loc->second.pending_req = SUBSCRIBE;
-                continue;
+                tmr_state->instance_id = instance_id;
+                tmr_state->pending_req = SUBSCRIBE;
+                tmr_state->no_ribout = no_ribout;
             }
-            RegisterTable(table, instance_id);
         } else {
             if (defer_q_.count(make_pair(vrf_name, table->name()))) {
                 BGP_LOG_PEER(Membership, Peer(), SandeshLevel::SYS_DEBUG,
                              BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA,
                              "Flush deferred route requests for table " <<
                              table->name() << " on unsubscribe");
+                FlushDeferQ(vrf_name, table->name());
             }
 
-            // Erase all elements for the table
-            FlushDeferQ(vrf_name, table->name());
+            // Erase all elements for the table.
 
-            RoutingTableMembershipRequestMap::iterator loc =
-                routingtable_membership_request_map_.find(table->name());
-            if (loc == routingtable_membership_request_map_.end()) {
-                MembershipRequestState state(UNSUBSCRIBE, instance_id);
-                routingtable_membership_request_map_.insert(
-                    make_pair(table->name(), state));
+            TableMembershipRequestState *tmr_state =
+                GetTableMembershipState(table->name());
+            if (!tmr_state) {
+                AddTableMembershipState(table->name(),
+                    TableMembershipRequestState(
+                        UNSUBSCRIBE, instance_id, no_ribout));
+                UnregisterTable(table);
             } else {
-                loc->second.instance_id = -1;
-                loc->second.pending_req = UNSUBSCRIBE;
-                continue;
+                tmr_state->instance_id = -1;
+                tmr_state->pending_req = UNSUBSCRIBE;
+                tmr_state->no_ribout = false;
             }
-            UnregisterTable(table);
         }
     }
 }
@@ -2552,7 +2606,8 @@ BgpXmppChannelManager::BgpXmppChannelManager(XmppServer *xmpp_server,
           boost::bind(&BgpXmppChannelManager::DeleteExecutor, this, _1)),
       id_(-1),
       asn_listener_id_(-1),
-      identifier_listener_id_(-1) {
+      identifier_listener_id_(-1),
+      dscp_listener_id_(-1) {
     // Initialize the gen id counter
     subscription_gen_id_ = 1;
     deleting_count_ = 0;
@@ -2575,6 +2630,9 @@ BgpXmppChannelManager::BgpXmppChannelManager(XmppServer *xmpp_server,
     identifier_listener_id_ =
         server->RegisterIdentifierUpdateCallback(boost::bind(
             &BgpXmppChannelManager::IdentifierUpdateCallback, this, _1));
+    dscp_listener_id_ =
+        server->RegisterDSCPUpdateCallback(boost::bind(
+            &BgpXmppChannelManager::DSCPUpdateCallback, this, _1));
 
     id_ = server->routing_instance_mgr()->RegisterInstanceOpCallback(
         boost::bind(&BgpXmppChannelManager::RoutingInstanceCallback,
@@ -2593,6 +2651,7 @@ BgpXmppChannelManager::~BgpXmppChannelManager() {
     bgp_server_->UnregisterAdminDownCallback(admin_down_listener_id_);
     bgp_server_->UnregisterASNUpdateCallback(asn_listener_id_);
     bgp_server_->routing_instance_mgr()->UnregisterInstanceOpCallback(id_);
+    bgp_server_->UnregisterDSCPUpdateCallback(dscp_listener_id_);
 }
 
 bool BgpXmppChannelManager::IsReadyForDeletion() {
@@ -2609,6 +2668,10 @@ size_t BgpXmppChannelManager::GetQueueSize() const {
 
 void BgpXmppChannelManager::AdminDownCallback() {
     xmpp_server_->ClearAllConnections();
+}
+
+void BgpXmppChannelManager::DSCPUpdateCallback(uint8_t dscp_value) {
+    xmpp_server_->SetDscpValue(dscp_value);
 }
 
 void BgpXmppChannelManager::ASNUpdateCallback(as_t old_asn,
@@ -2790,10 +2853,10 @@ bool BgpXmppChannelManager::CollectStats(BgpRouterState *state, bool first)
 }
 
 void BgpXmppChannel::Close() {
-    vrf_membership_request_map_.clear();
+    instance_membership_request_map_.clear();
     STLDeleteElements(&defer_q_);
 
-    if (routingtable_membership_request_map_.size()) {
+    if (table_membership_requests()) {
         BGP_LOG_PEER(Event, peer_.get(), SandeshLevel::SYS_INFO,
             BGP_LOG_FLAG_ALL, BGP_PEER_DIR_NA, "Close procedure deferred");
         defer_peer_close_ = true;

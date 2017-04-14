@@ -161,8 +161,14 @@ void BgpXmppMessage::EncodeNextHop(const BgpRoute *route,
                                    autogen::ItemType *item) {
     autogen::NextHopType item_nexthop;
 
-    item_nexthop.af = route->NexthopAfi();
-    item_nexthop.address = nexthop.address().to_v4().to_string();
+    const IpAddress &address = nexthop.address();
+    if (address.is_v4()) {
+        item_nexthop.af = BgpAf::IPv4;
+        item_nexthop.address = address.to_v4().to_string();
+    } else {
+        item_nexthop.af = BgpAf::IPv6;
+        item_nexthop.address = address.to_v6().to_string();
+    }
     item_nexthop.label = nexthop.label();
     item_nexthop.virtual_network = GetVirtualNetwork(nexthop);
 
@@ -273,6 +279,9 @@ void BgpXmppMessage::EncodeEnetNextHop(const BgpRoute *route,
     item_nexthop.af = BgpAf::IPv4;
     item_nexthop.address = nexthop.address().to_v4().to_string();
     item_nexthop.label = nexthop.label();
+    item_nexthop.l3_label = nexthop.l3_label();
+    if (!nexthop.mac().IsZero())
+        item_nexthop.mac = nexthop.mac().ToString();
 
     // If encap list is empty use mpls over gre as default encap.
     vector<string> &encap_list =

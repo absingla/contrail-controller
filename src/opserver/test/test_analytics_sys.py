@@ -29,9 +29,6 @@ from utils.stats_fixture import StatsFixture
 from mockcassandra import mockcassandra
 import logging
 import time
-import pycassa
-from pycassa.pool import ConnectionPool
-from pycassa.columnfamily import ColumnFamily
 from opserver.sandesh.viz.constants import *
 from sandesh_common.vns.ttypes import Module
 from sandesh_common.vns.constants import ModuleNames
@@ -619,6 +616,43 @@ class AnalyticsTest(testtools.TestCase, fixtures.TestWithFixtures):
         new_reads = analytics.get_db_read_stats_from_qe(analytics.query_engine, 'StatTestState:st',True)
         assert(new_reads > old_reads)
     # end test_14_verify_qe_stats_collection
+
+    #@unittest.skip('verify introspect ssl')
+    def test_15_verify_introspect_ssl(self):
+        '''
+        This test enables introspect ssl and starts all the analytics
+        generators in the AnalyticsFixture and verifies that the introspect
+        port is accessible with https.
+        '''
+        logging.info('%%% test_15_verify_introspect_ssl %%%')
+        sandesh_cfg = {
+            'sandesh_keyfile': builddir+'/opserver/test/data/ssl/server-privkey.pem',
+            'sandesh_certfile': builddir+'/opserver/test/data/ssl/server.pem',
+            'sandesh_ca_cert': builddir+'/opserver/test/data/ssl/ca-cert.pem',
+            'introspect_ssl_enable': 'True'
+        }
+        vizd_obj = self.useFixture(
+            AnalyticsFixture(logging, builddir,
+                             self.__class__.cassandra_port,
+                             sandesh_config=sandesh_cfg))
+        assert vizd_obj.verify_on_setup()
+        assert vizd_obj.verify_collector_obj_count()
+
+        # remove the config from vizd so that it tries to access introspect
+        # with http, it should fail
+        vizd_obj.set_sandesh_config(None)
+        assert not vizd_obj.verify_collector_gen(vizd_obj.collectors[0])
+
+        # start a python generator with introspect_ssl_enable = True
+        # and verify that its introspect page is accessible.
+        vizd_obj.set_sandesh_config(sandesh_cfg)
+        test_gen = self.useFixture(
+            GeneratorFixture("contrail-test-generator",
+                vizd_obj.get_collectors(), logging,
+                vizd_obj.get_opserver_port(), sandesh_config=sandesh_cfg))
+        assert test_gen.verify_on_setup()
+
+    # end test_15_verify_introspect_ssl
 
     @staticmethod
     def get_free_port():

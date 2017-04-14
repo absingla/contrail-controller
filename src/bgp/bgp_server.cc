@@ -54,7 +54,18 @@ public:
             this, _1, _2);
         obs.system= boost::bind(&ConfigUpdater::ProcessGlobalSystemConfig,
             this, _1, _2);
+        obs.qos = boost::bind(&ConfigUpdater::ProcessGlobalQosConfig,
+            this, _1, _2);
         server->config_manager()->RegisterObservers(obs);
+    }
+
+    void ProcessGlobalQosConfig(const BgpGlobalQosConfig *qos,
+        BgpConfigManager::EventType event) {
+        if (qos->control_dscp() != server_->global_qos()->control_dscp()) {
+            server_->global_qos()->set_control_dscp(qos->control_dscp());
+            server_->NotifyDSCPUpdate(qos->control_dscp());
+        }
+        server_->global_qos()->set_analytics_dscp(qos->analytics_dscp());
     }
 
     void ProcessGlobalSystemConfig(const BgpGlobalSystemConfig *system,
@@ -214,9 +225,11 @@ public:
         if (!rti)
             return;
 
-        PeerManager *peer_manager = rti->LocatePeerManager();
         if (event == BgpConfigManager::CFG_ADD ||
             event == BgpConfigManager::CFG_CHANGE) {
+            if (rti->deleted())
+                return;
+            PeerManager *peer_manager = rti->LocatePeerManager();
             BgpPeer *peer = peer_manager->PeerLocate(server_, neighbor_config);
             if (peer) {
                 server_->RemovePeer(peer->endpoint(), peer);
@@ -224,6 +237,9 @@ public:
                 server_->InsertPeer(peer->endpoint(), peer);
             }
         } else if (event == BgpConfigManager::CFG_DELETE) {
+            PeerManager *peer_manager = rti->peer_manager();
+            if (!peer_manager)
+                return;
             BgpPeer *peer = peer_manager->TriggerPeerDeletion(neighbor_config);
             if (peer) {
                 server_->RemovePeer(peer->endpoint(), peer);
@@ -376,6 +392,7 @@ BgpServer::BgpServer(EventManager *evm)
       inet6_service_chain_mgr_(
           BgpObjectFactory::Create<IServiceChainMgr, Address::INET6>(this)),
       global_config_(new BgpGlobalSystemConfig()),
+      global_qos_(new BgpGlobalQosConfig()),
       config_mgr_(BgpObjectFactory::Create<BgpConfigManager>(this)),
       updater_(new ConfigUpdater(this)) {
     bgp_count_ = 0;
@@ -479,35 +496,42 @@ BgpPeer *BgpServer::FindPeer(const string &name) {
     return (loc != peer_list_.end() ? loc->second : NULL);
 }
 
+BgpPeer *BgpServer::FindNextPeer(const string &name) {
+    BgpPeerList::iterator loc = peer_list_.upper_bound(name);
+    return (loc != peer_list_.end() ? loc->second : NULL);
+}
+
 void BgpServer::InsertPeer(TcpSession::Endpoint remote, BgpPeer *peer) {
     if (!remote.port() && remote.address().is_unspecified())
         return;
-
-    EndpointToBgpPeerList::iterator loc = endpoint_peer_list_.find(remote);
-    if (loc != endpoint_peer_list_.end()) {
-        loc->second->Clear(BgpProto::Notification::PeerDeconfigured);
-        endpoint_peer_list_.erase(loc);
-    }
     endpoint_peer_list_.insert(make_pair(remote, peer));
 }
 
 void BgpServer::RemovePeer(TcpSession::Endpoint remote, BgpPeer *peer) {
-    EndpointToBgpPeerList::iterator loc = endpoint_peer_list_.find(remote);
-    if (loc != endpoint_peer_list_.end() && loc->second == peer) {
-        endpoint_peer_list_.erase(loc);
+    EndpointPeerList::iterator loc = endpoint_peer_list_.lower_bound(remote);
+    while (loc != endpoint_peer_list_.end() && loc->first == remote) {
+        if (loc->second == peer) {
+            endpoint_peer_list_.erase(loc);
+            break;
+        }
+        ++loc;
     }
 }
 
 BgpPeer *BgpServer::FindPeer(TcpSession::Endpoint remote) const {
-    EndpointToBgpPeerList::const_iterator loc =
-        endpoint_peer_list_.find(remote);
+    EndpointPeerList::const_iterator loc = endpoint_peer_list_.find(remote);
     return (loc == endpoint_peer_list_.end() ? NULL : loc->second);
 }
 
-BgpPeer *BgpServer::FindNextPeer(TcpSession::Endpoint remote) const {
-    EndpointToBgpPeerList::const_iterator loc =
-        endpoint_peer_list_.upper_bound(remote);
-    return (loc == endpoint_peer_list_.end() ? NULL : loc->second);
+BgpPeer *BgpServer::FindExactPeer(const BgpPeer *peer) const {
+    EndpointPeerList::const_iterator loc =
+        endpoint_peer_list_.lower_bound(peer->endpoint());
+    while (loc != endpoint_peer_list_.end() && loc->first == peer->endpoint()) {
+        if (loc->second == peer)
+            return loc->second;
+        ++loc;
+    }
+    return NULL;
 }
 
 const string &BgpServer::localname() const {
@@ -693,6 +717,51 @@ void BgpServer::NotifyASNUpdate(as_t old_asn, as_t old_local_asn) {
         if (*iter != NULL) {
             ASNUpdateCb cb = *iter;
             (cb)(old_asn, old_local_asn);
+        }
+    }
+}
+
+int BgpServer::RegisterDSCPUpdateCallback(DSCPUpdateCb callback) {
+    tbb::spin_rw_mutex::scoped_lock write_lock(rw_mutex_, true);
+    size_t i = dscp_bmap_.find_first();
+    if (i == dscp_bmap_.npos) {
+        i = dscp_listeners_.size();
+        dscp_listeners_.push_back(callback);
+    } else {
+        dscp_bmap_.reset(i);
+        if (dscp_bmap_.none()) {
+            dscp_bmap_.clear();
+        }
+        dscp_listeners_[i] = callback;
+    }
+    return i;
+}
+
+void BgpServer::UnregisterDSCPUpdateCallback(int listener) {
+    tbb::spin_rw_mutex::scoped_lock write_lock(rw_mutex_, true);
+    dscp_listeners_[listener] = NULL;
+    if ((size_t) listener == dscp_listeners_.size() - 1) {
+        while (!dscp_listeners_.empty() && dscp_listeners_.back() == NULL) {
+            dscp_listeners_.pop_back();
+        }
+        if (dscp_bmap_.size() > dscp_listeners_.size()) {
+            dscp_bmap_.resize(dscp_listeners_.size());
+        }
+    } else {
+        if ((size_t) listener >= dscp_bmap_.size()) {
+            dscp_bmap_.resize(listener + 1);
+        }
+        dscp_bmap_.set(listener);
+    }
+}
+
+void BgpServer::NotifyDSCPUpdate(int new_dscp_value) {
+    tbb::spin_rw_mutex::scoped_lock read_lock(rw_mutex_, false);
+    for (DSCPUpdateListenersList::iterator iter = dscp_listeners_.begin();
+         iter != dscp_listeners_.end(); ++iter) {
+        if (*iter != NULL) {
+            DSCPUpdateCb cb = *iter;
+            (cb)(new_dscp_value);
         }
     }
 }

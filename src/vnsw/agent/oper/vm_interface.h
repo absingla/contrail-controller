@@ -105,6 +105,12 @@ public:
         LABEL_TYPE_MAX
     };
 
+    enum ProxyArpMode {
+        PROXY_ARP_NONE,
+        PROXY_ARP_UNRESTRICTED,
+        PROXY_ARP_INVALID
+    };
+
     struct ListEntry {
         ListEntry() : installed_(false), del_pending_(false) { }
         ListEntry(bool installed, bool del_pending) :
@@ -629,6 +635,10 @@ public:
     }
     bool admin_state() const { return admin_state_; }
     bool do_dhcp_relay() const { return do_dhcp_relay_; }
+    ProxyArpMode proxy_arp_mode() const { return proxy_arp_mode_; }
+    bool IsUnrestrictedProxyArp() const {
+        return proxy_arp_mode_ == PROXY_ARP_UNRESTRICTED;
+    }
     int vxlan_id() const { return vxlan_id_; }
     bool bridging() const { return bridging_; }
     bool layer3_forwarding() const { return layer3_forwarding_; }
@@ -752,7 +762,11 @@ public:
     void InsertHealthCheckInstance(HealthCheckInstance *hc_inst);
     void DeleteHealthCheckInstance(HealthCheckInstance *hc_inst);
     const HealthCheckInstanceSet &hc_instance_set() const;
-
+    bool IsHealthCheckEnabled() const;
+    const HealthCheckInstance *GetHealthCheckFromVmiFlow(const IpAddress &sip,
+                                                         const IpAddress &dip,
+                                                         uint8_t proto,
+                                                         uint16_t sport) const;
     size_t GetFloatingIpCount() const { return floating_ip_list_.list_.size(); }
     size_t GetAliasIpCount() const { return alias_ip_list_.list_.size(); }
     bool HasServiceVlan() const { return service_vlan_list_.list_.size() != 0; }
@@ -790,8 +804,6 @@ public:
     static void DeleteIfNameReq(InterfaceTable *table,
                                 const boost::uuids::uuid &uuid);
 
-    void AllocL2MplsLabel(bool force_update, bool policy_change);
-    void DeleteL2MplsLabel();
     const AclDBEntry* vrf_assign_acl() const { return vrf_assign_acl_.get();}
     bool WaitForTraffic() const;
     bool GetInterfaceDhcpOptions(
@@ -954,10 +966,7 @@ private:
     void UpdateL2(bool old_l2_active, bool policy_change);
     void DeleteL2(bool old_l2_active);
 
-    void AllocL3MplsLabel(bool force_update, bool policy_change,
-                          uint32_t new_label);
     void DeleteL3MplsLabel();
-    void UpdateL3TunnelId(bool force_update, bool policy_change);
     void DeleteL3TunnelId();
     void UpdateMacVmBinding();
     void UpdateL3NextHop();
@@ -1012,8 +1021,6 @@ private:
     void DeleteFatFlow();
     void UpdateBridgeDomain();
     void DeleteBridgeDomain();
-    void UpdateL2TunnelId(bool force_update, bool policy_change);
-    void DeleteL2TunnelId();
     void DeleteL2InterfaceRoute(bool old_bridging, VrfEntry *old_vrf,
                                 const Ip4Address &old_v4_addr,
                                 const Ip6Address &old_v6_addr,
@@ -1060,6 +1067,8 @@ private:
     bool dhcp_enable_;
     // true if IP is to be obtained from DHCP Relay and not learnt from fabric
     bool do_dhcp_relay_; 
+    // Proxy ARP mode for interface
+    ProxyArpMode proxy_arp_mode_;
     // VM-Name. Used by DNS
     std::string vm_name_;
     // project uuid of the vm to which the interface belongs
@@ -1261,6 +1270,7 @@ struct VmInterfaceConfigData : public VmInterfaceData {
     bool ecmp_;
     bool ecmp6_;
     bool dhcp_enable_; // is DHCP enabled for the interface (from subnet config)
+    VmInterface::ProxyArpMode proxy_arp_mode_;
     bool admin_state_;
     bool disable_policy_;
     std::string analyzer_name_;

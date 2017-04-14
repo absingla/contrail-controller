@@ -4,6 +4,7 @@
 
 #include <fstream>
 
+#include <boost/foreach.hpp>
 #include <boost/asio/ip/host_name.hpp>
 #include <boost/program_options.hpp>
 #include <boost/tokenizer.hpp>
@@ -33,7 +34,6 @@
 #include "generator.h"
 #include <base/misc_utils.h>
 #include <analytics/buildinfo.h>
-#include <discovery/client/discovery_client.h>
 #include "boost/python.hpp"
 
 using namespace std;
@@ -139,18 +139,8 @@ static void terminate(int param) {
     CollectorShutdown();
 }
 
-static void ShutdownDiscoveryClient(DiscoveryServiceClient *client) {
-    if (client) {
-        client->Shutdown();
-        delete client;
-    }
-}
-
 // Shutdown various objects used in the collector.
-static void ShutdownServers(VizCollector *viz_collector,
-        DiscoveryServiceClient *client) {
-    // Shutdown discovery client first
-    ShutdownDiscoveryClient(client);
+static void ShutdownServers(VizCollector *viz_collector) {
 
     Sandesh::Uninit();
 
@@ -259,18 +249,30 @@ int main(int argc, char *argv[])
     uint16_t structured_syslog_port(0);
     bool structured_syslog_server_enabled =
         options.collector_structured_syslog_port(&structured_syslog_port);
+    vector<string> structured_syslog_fwd;
     if (structured_syslog_server_enabled) {
         LOG(INFO, "COLLECTOR STRUCTURED SYSLOG LISTEN PORT: " << structured_syslog_port);
+        structured_syslog_fwd = options.collector_structured_syslog_forward_destination();
     }
     string kstr("");
     vector<string> kbl = options.kafka_broker_list();
     for (vector<string>::const_iterator st = kbl.begin();
-         st != kbl.end(); st++) {
-         if (st != kbl.begin()) {
-             kstr += string(",");
-         }
-         kstr += *st;
+            st != kbl.end(); st++) {
+        if (st != kbl.begin()) {
+            kstr += string(",");
+        }
+        kstr += *st;
     }
+    std::map<std::string, std::string> aggconf;
+    vector<string> upl = options.uve_proxy_list();
+    for (vector<string>::const_iterator st = upl.begin();
+            st != upl.end(); st++) {
+        size_t spos = st->find(':');
+        string key = st->substr(0, spos);
+        string val = st->substr(spos+1, string::npos);
+        aggconf[key] = val;
+    }
+
     LOG(INFO, "KAFKA BROKERS: " << kstr);
     std::string hostname;
     boost::system::error_code error;
@@ -283,14 +285,12 @@ int main(int argc, char *argv[])
     // 1. Collector client
     // 2. Redis From
     // 3. Redis To
-    // 4. Discovery Collector Publish
-    // 5. Database global
-    // 6. Kafka Pub
-    // 7. Database protobuf if enabled
+    // 4. Database global
+    // 5. Kafka Pub
+    // 6. Database protobuf if enabled
 
     std::vector<ConnectionTypeName> expected_connections; 
-    if (options.discovery_server().empty()) {
-        expected_connections = boost::assign::list_of
+    expected_connections = boost::assign::list_of
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
                              ConnectionType::COLLECTOR)->second, ""))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
@@ -302,26 +302,6 @@ int main(int argc, char *argv[])
                              hostname+":Global"))
          (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
                              ConnectionType::KAFKA_PUB)->second, kstr));
-    } else {
-        expected_connections = boost::assign::list_of
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::COLLECTOR)->second, ""))
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::REDIS_UVE)->second, "To"))
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::REDIS_UVE)->second, "From"))
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::DISCOVERY)->second,
-                             g_vns_constants.API_SERVER_DISCOVERY_SERVICE_NAME))
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::DISCOVERY)->second,
-                             g_vns_constants.COLLECTOR_DISCOVERY_SERVICE_NAME))
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::DATABASE)->second,
-                             hostname+":Global"))
-         (ConnectionTypeName(g_process_info_constants.ConnectionTypeNames.find(
-                             ConnectionType::KAFKA_PUB)->second, kstr));
-    }
 
     ConnectionStateManager::
         GetInstance()->Init(*a_evm->io_service(),
@@ -348,15 +328,42 @@ int main(int argc, char *argv[])
 
     std::string zookeeper_server_list(options.zookeeper_server_list());
     bool use_zookeeper = !zookeeper_server_list.empty();
+
+    ConfigDBConnection::ApiServerList api_server_list;
+    BOOST_FOREACH(const std::string &api_server, options.api_server_list()) {
+        typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
+        boost::char_separator<char> sep(":");
+        tokenizer tokens(api_server, sep);
+        tokenizer::iterator tit = tokens.begin();
+        string api_server_ip(*tit);
+        int api_server_port;
+        stringToInteger(*++tit, api_server_port);
+        api_server_list.push_back(std::make_pair(api_server_ip,
+                                                 api_server_port));
+    }
+    VncApiConfig api_config;
+    api_config.api_use_ssl = options.api_server_use_ssl();
+    api_config.ks_srv_ip = options.auth_host();
+    api_config.ks_srv_port = options.auth_port();
+    api_config.ks_protocol = options.auth_protocol();
+    api_config.ks_user = options.auth_user();
+    api_config.ks_password = options.auth_passwd();
+    api_config.ks_tenant = options.auth_tenant();
+    api_config.ks_keyfile = options.keystone_keyfile();
+    api_config.ks_certfile = options.keystone_certfile();
+    api_config.ks_cafile = options.keystone_cafile();
+
     VizCollector analytics(a_evm,
             options.collector_port(),
             protobuf_server_enabled,
             protobuf_port,
             structured_syslog_server_enabled,
             structured_syslog_port,
+            structured_syslog_fwd,
             string("127.0.0.1"),
             options.redis_port(),
             options.redis_password(),
+            aggconf,
             kstr,
             options.syslog_port(),
             options.sflow_port(),
@@ -368,7 +375,9 @@ int main(int argc, char *argv[])
             zookeeper_server_list,
             use_zookeeper,
             options.get_db_write_options(),
-            options.sandesh_config());
+            options.sandesh_config(),
+            api_server_list,
+            api_config);
 #if 0
     // initialize python/c++ API
     Py_InitializeEx(0);
@@ -395,7 +404,7 @@ int main(int argc, char *argv[])
             options.http_server_port(), &vsc, options.sandesh_config()));
     if (!success) {
         LOG(ERROR, "SANDESH: Initialization FAILED ... exiting");
-        ShutdownServers(&analytics, NULL);
+        ShutdownServers(&analytics);
         delete a_evm;
         exit(1);
     }
@@ -412,23 +421,6 @@ int main(int argc, char *argv[])
     // Get local ip address
     Collector::SetSelfIp(options.host_ip());
 
-    //Publish services to Discovery Service Servee
-    DiscoveryServiceClient *ds_client = NULL;
-    tcp::endpoint dss_ep;
-    if (DiscoveryServiceClient::ParseDiscoveryServerConfig(
-        options.discovery_server(), options.discovery_port(), &dss_ep)) {
-
-        string client_name =
-            g_vns_constants.ModuleNames.find(Module::COLLECTOR)->second;
-        ds_client = new DiscoveryServiceClient(a_evm, dss_ep, client_name);
-        ds_client->Init();
-        analytics.UpdateConfigDBConnection(&options, ds_client);
-    } else {
-        LOG (ERROR, "Invalid Discovery Server hostname or ip " <<
-                     options.discovery_server());
-    }
-    Collector::SetDiscoveryServiceClient(ds_client);
-
     collector_info_trigger =
         new TaskTrigger(boost::bind(&CollectorInfoLogger, vsc),
                     TaskScheduler::GetInstance()->GetTaskId("vizd::Stats"), 0);
@@ -439,7 +431,7 @@ int main(int argc, char *argv[])
     signal(SIGTERM, terminate);
     a_evm->Run();
 
-    ShutdownServers(&analytics, ds_client);
+    ShutdownServers(&analytics);
 
     delete a_evm;
 

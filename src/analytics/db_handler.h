@@ -11,6 +11,7 @@
 #include <boost/ptr_container/ptr_map.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/name_generator.hpp>
+#include <boost/bind.hpp>
 
 #if __GNUC_PREREQ(4, 6)
 #pragma GCC diagnostic push
@@ -39,8 +40,6 @@
 #include "options.h"
 
 class Options;
-class DiscoveryServiceClient;
-
 class DbHandler {
 public:
     static const int DefaultDbTTL = 0;
@@ -95,7 +94,9 @@ public:
         const std::string &zookeeper_server_list,
         bool use_zookeeper,
         bool use_db_write_options,
-        const DbWriteOptions &db_write_options);
+        const DbWriteOptions &db_write_options,
+        const ConfigDBConnection::ApiServerList &api_server_list,
+        const VncApiConfig &api_config);
     DbHandler(GenDb::GenDbIf *dbif, const TtlMap& ttl_map);
     virtual ~DbHandler();
 
@@ -141,9 +142,6 @@ public:
     void ResetDbQueueWaterMarkInfo();
     std::vector<boost::asio::ip::tcp::endpoint> GetEndpoints() const;
     std::string GetName() const;
-    void UpdateConfigDBConnection(Options *o, DiscoveryServiceClient *c) {
-        cfgdb_connection_->Update(o, c);
-    }
     boost::shared_ptr<ConfigDBConnection> GetConfigDBConnection() {
         return cfgdb_connection_;
     }
@@ -245,11 +243,8 @@ private:
     GenDb::DbTableStatistics stable_stats_;
     mutable tbb::mutex smutex_;
     TtlMap ttl_map_;
-    static uint32_t field_cache_t2_;
-    static std::set<std::string> field_cache_set_[2];
-    static uint32_t field_cache_old_t2_;
-    static uint8_t old_t2_index_;
-    static uint8_t new_t2_index_;
+    static uint32_t field_cache_index_;
+    static std::set<std::string> field_cache_set_;
     static tbb::mutex fmutex_;
     std::string tablespace_;
     std::string compaction_strategy_;
@@ -312,7 +307,9 @@ class DbHandlerInitializer {
         const Options::Cassandra &cassandra_options,
         const std::string &zookeeper_server_list,
         bool use_zookeeper,
-        const DbWriteOptions &db_write_options);
+        const DbWriteOptions &db_write_options,
+        const ConfigDBConnection::ApiServerList &api_server_list,
+        const VncApiConfig &api_config);
     DbHandlerInitializer(EventManager *evm,
         const std::string &db_name,
         const std::string &timer_task_name, InitializeDoneCb callback,

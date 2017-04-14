@@ -193,12 +193,6 @@ public:
     const std::vector<std::string> dns_server_list() const {
         return dns_server_list_;
     }
-    const Ip4Address &xmpp_server_1() const { return xmpp_server_1_; }
-    const Ip4Address &xmpp_server_2() const { return xmpp_server_2_; }
-    const Ip4Address &dns_server_1() const { return dns_server_1_; }
-    const Ip4Address &dns_server_2() const { return dns_server_2_; }
-    const uint16_t dns_port_1() const { return dns_port_1_; }
-    const uint16_t dns_port_2() const { return dns_port_2_; }
     const uint16_t dns_client_port() const {
         if (test_mode_)
             return 0;
@@ -211,9 +205,7 @@ public:
             return 0;
         return mirror_client_port_;
     }
-    const std::string &discovery_server() const { return dss_server_; }
     const Ip4Address &mgmt_ip() const { return mgmt_ip_; }
-    const int xmpp_instance_count() const { return xmpp_instance_count_; }
     const std::string &tunnel_type() const { return tunnel_type_; }
     const std::string &metadata_shared_secret() const { return metadata_shared_secret_; }
     uint16_t metadata_proxy_port() const {
@@ -281,7 +273,6 @@ public:
         return derived_stats_map_;
     }
     uint16_t http_server_port() const { return http_server_port_; }
-    uint32_t discovery_server_port() const { return dss_port_; }
     const std::string &host_name() const { return host_name_; }
     int agent_stats_interval() const { return agent_stats_interval_; }
     int flow_stats_interval() const { return flow_stats_interval_; }
@@ -433,12 +424,44 @@ public:
     }
     const LlgrParams &llgr_params() const {return llgr_params_;}
 
+    void set_mac_learning_thread_count(uint32_t threads) {
+        mac_learning_thread_count_ = threads;
+    }
+
+    uint32_t mac_learning_thread_count() const {
+        return mac_learning_thread_count_;
+    }
+
+    void set_mac_learning_add_tokens(uint32_t add_tokens) {
+        mac_learning_add_tokens_ = add_tokens;
+    }
+
+    uint32_t mac_learning_add_tokens() const {
+        return mac_learning_add_tokens_;
+    }
+
+    void set_mac_learning_update_tokens(uint32_t update_tokens) {
+        mac_learning_update_tokens_ = update_tokens;
+    }
+
+    uint32_t mac_learning_update_tokens() const {
+        return mac_learning_update_tokens_;
+    }
+
+    void set_mac_learning_delete_tokens(uint32_t delete_tokens) {
+        mac_learning_delete_tokens_ = delete_tokens;
+    }
+
+    uint32_t mac_learning_delete_tokens() {
+        return mac_learning_delete_tokens_;
+    }
+
 protected:
     void set_hypervisor_mode(HypervisorMode m) { hypervisor_mode_ = m; }
     virtual void InitFromSystem();
     virtual void InitFromConfig();
     virtual void ReInitFromConfig();
-    virtual void InitFromArguments();
+    virtual void ProcessArguments();
     boost::property_tree::ptree &tree() { return tree_; }
     template <typename ValueType>
     bool GetOptValue(const boost::program_options::variables_map &var_map, 
@@ -451,7 +474,7 @@ protected:
     bool GetOptValueImpl(const boost::program_options::variables_map &var_map,
                          ValueType &var, const std::string &val, ValueType*) {
         // Check if the value is present.
-        if (var_map.count(val) && !var_map[val].defaulted()) {
+        if (var_map.count(val)) {
             var = var_map[val].as<ValueType>();
             return true;
         }
@@ -494,40 +517,21 @@ private:
     void ComputeFlowLimits();
     static std::map<string, std::map<string, string> > ParseDerivedStats(
         const std::vector<std::string> &dsvec);
-    void ParseCollectorDS();
-    void ParseControllerServers();
-    void ParseDnsServers();
-    void ParseCollector();
-    void ParseVirtualHost();
-    void ParseDns();
-    void ParseDiscovery();
-    void ParseNetworks();
-    void ParseHypervisor();
-    void ParseDefaultSection();
-    void ParseTaskSection();
-    void ParseMetadataProxy();
-    void ParseFlows();
-    void ParseDhcpRelayMode();
-    void ParseSimulateEvpnTor();
-    void ParseServiceInstance();
-    void ParseAgentInfo();
-    void ParseNexthopServer();
-    void ParsePlatform();
-    void ParseServices();
-    void ParseSandesh();
     void ParseQueue();
-    void ParseRestart();
-    void ParseLlgr();
     void set_agent_mode(const std::string &mode);
     void set_gateway_mode(const std::string &mode);
 
     void ParseCollectorDSArguments
         (const boost::program_options::variables_map &v);
+    void ParseCollectorArguments
+        (const boost::program_options::variables_map &var_map);
+    void ParseControllerServersArguments
+        (const boost::program_options::variables_map &var_map);
+    void ParseDnsServersArguments
+        (const boost::program_options::variables_map &var_map);
     void ParseVirtualHostArguments
         (const boost::program_options::variables_map &v);
     void ParseDnsArguments
-        (const boost::program_options::variables_map &v);
-    void ParseDiscoveryArguments
         (const boost::program_options::variables_map &v);
     void ParseNetworksArguments
         (const boost::program_options::variables_map &v);
@@ -542,6 +546,8 @@ private:
     void ParseFlowArguments
         (const boost::program_options::variables_map &v);
     void ParseDhcpRelayModeArguments
+        (const boost::program_options::variables_map &var_map);
+    void ParseSimulateEvpnTorArguments
         (const boost::program_options::variables_map &var_map);
     void ParseServiceInstanceArguments
         (const boost::program_options::variables_map &v);
@@ -559,9 +565,12 @@ private:
         (const boost::program_options::variables_map &v);
     void ParseLlgrArguments
         (const boost::program_options::variables_map &v);
+    void ParseMacLearning
+        (const boost::program_options::variables_map &v);
 
     boost::program_options::variables_map var_map_;
     boost::program_options::options_description options_;
+    boost::program_options::options_description config_file_options_;
     bool enable_flow_options_;
     bool enable_vhost_options_;
     bool enable_hypervisor_options_;
@@ -579,21 +588,12 @@ private:
     std::string eth_port_;
     bool eth_port_no_arp_;
     std::string eth_port_encap_type_;
-    uint16_t xmpp_instance_count_;
     std::vector<std::string> controller_server_list_;
     std::vector<std::string> dns_server_list_;
-    Ip4Address xmpp_server_1_;
-    Ip4Address xmpp_server_2_;
-    Ip4Address dns_server_1_;
-    Ip4Address dns_server_2_;
-    uint16_t dns_port_1_;
-    uint16_t dns_port_2_;
     uint16_t dns_client_port_;
     uint32_t dns_timeout_;
     uint32_t dns_max_retries_;
     uint16_t mirror_client_port_;
-    std::string dss_server_;
-    uint32_t dss_port_;
     Ip4Address mgmt_ip_;
     HypervisorMode hypervisor_mode_;
     PortInfo xen_ll_;
@@ -614,7 +614,7 @@ private:
     uint32_t flow_ksync_tokens_;
     uint32_t flow_del_tokens_;
     uint32_t flow_update_tokens_;
-    int flow_netlink_pin_cpuid_;
+    uint32_t flow_netlink_pin_cpuid_;
     uint32_t stale_interface_cleanup_timeout_;
 
     // Parameters configured from command line arguments only (for now)
@@ -704,6 +704,10 @@ private:
     std::set<uint16_t> nic_queue_list_;
     uint16_t default_nic_queue_;
     LlgrParams llgr_params_;
+    uint32_t mac_learning_thread_count_;
+    uint32_t mac_learning_add_tokens_;
+    uint32_t mac_learning_update_tokens_;
+    uint32_t mac_learning_delete_tokens_;
     DISALLOW_COPY_AND_ASSIGN(AgentParam);
 };
 

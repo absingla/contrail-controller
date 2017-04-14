@@ -468,7 +468,7 @@ void TcpSession::AsyncReadHandler(TcpSessionPtr session) {
     if (IsSocketErrorHard(error)) {
         session->ReleaseBufferLocked(buffer);
         // eof is returned when the peer closed the socket, no need to log error
-        if (error != eof) {
+        if ((error != eof) && (strncmp(error.category().name(), "asio.ssl", 8) != 0)) {
             TCP_SESSION_LOG_ERROR(session, TCP_DIR_IN,
                     "Read failed due to error " << error.value()
                     << " : " << error.message());
@@ -528,6 +528,14 @@ int TcpSession::SetMd5SocketOption(uint32_t peer_ip,
 
 int TcpSession::ClearMd5SocketOption(uint32_t peer_ip) {
     return server()->SetMd5SocketOption(socket_->native_handle(), peer_ip, "");
+}
+
+int TcpSession::SetDscpSocketOption(uint8_t value) {
+    return server()->SetDscpSocketOption(socket()->native_handle(), value);
+}
+
+uint8_t TcpSession::GetDscpValue() const {
+    return server_->GetDscpValue(socket()->native_handle());
 }
 
 TcpMessageReader::TcpMessageReader(TcpSession *session,

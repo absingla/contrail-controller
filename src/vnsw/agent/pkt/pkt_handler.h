@@ -122,7 +122,7 @@ struct AgentHdr {
         TRAP_FLOW_MISS = AGENT_TRAP_FLOW_MISS,
         TRAP_L3_PROTOCOLS = AGENT_TRAP_L3_PROTOCOLS,
         TRAP_DIAG = AGENT_TRAP_DIAG,
-        TRAP_ECMP_RESOLVE = AGENT_TRAP_ECMP_RESOLVE,
+        TRAP_UNUSED_1,
         TRAP_SOURCE_MISMATCH = AGENT_TRAP_SOURCE_MISMATCH,
         TRAP_HANDLE_DF = AGENT_TRAP_HANDLE_DF,
         TRAP_TOR_CONTROL_PKT = AGENT_TRAP_TOR_CONTROL_PKT,
@@ -369,8 +369,6 @@ struct PktInfo {
 
     bool                tcp_ack;
     TunnelInfo          tunnel;
-    // Forwarding mode for packet - l3/l2
-    mutable bool        l3_forwarding;
     bool                l3_label;
     bool                multicast_label;
 

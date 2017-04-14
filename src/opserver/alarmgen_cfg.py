@@ -1,6 +1,12 @@
+#
+# Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
+#
+
 import argparse, os, ConfigParser, sys, re
 from pysandesh.sandesh_base import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
+from sandesh_common.vns.constants import SERVICE_ALARM_GENERATOR, \
+    ServicesDefaultConfigurationFiles
 
 class CfgParser(object):
 
@@ -19,8 +25,6 @@ class CfgParser(object):
                     --log_file <stdout>
                     --use_syslog
                     --syslog_facility LOG_USER
-                    --disc_server_ip 127.0.0.1
-                    --disc_server_port 5998
                     --worker_id 0
                     --partitions 5
                     --redis_password
@@ -37,7 +41,9 @@ class CfgParser(object):
         # Turn off help, so we print all options in response to -h
         conf_parser = argparse.ArgumentParser(add_help=False)
         conf_parser.add_argument("-c", "--conf_file", action="append",
-            help="Specify config file", metavar="FILE")
+            help="Specify config file", metavar="FILE",
+            default=ServicesDefaultConfigurationFiles.get(
+                SERVICE_ALARM_GENERATOR, None))
         args, remaining_argv = conf_parser.parse_known_args(self._argv.split())
 
         defaults = {
@@ -70,15 +76,15 @@ class CfgParser(object):
             'cluster_id'     :'',
         }
 
+        api_opts = {
+            'api_server_list' : ['127.0.0.1:8082'],
+            'api_server_use_ssl' : False
+        }
+
         redis_opts = {
             'redis_server_port'  : 6379,
             'redis_password'     : None,
             'redis_uve_list'    : ['127.0.0.1:6379'],
-        }
-
-        disc_opts = {
-            'disc_server_ip'     : None,
-            'disc_server_port'   : 5998,
         }
 
         keystone_opts = {
@@ -105,14 +111,20 @@ class CfgParser(object):
             config.read(args.conf_file)
             if 'DEFAULTS' in config.sections():
                 defaults.update(dict(config.items('DEFAULTS')))
+            if 'API_SERVER' in config.sections():
+                api_opts.update(dict(config.items('API_SERVER')))
             if 'REDIS' in config.sections():
                 redis_opts.update(dict(config.items('REDIS')))
-            if 'DISCOVERY' in config.sections():
-                disc_opts.update(dict(config.items('DISCOVERY')))
             if 'KEYSTONE' in config.sections():
                 keystone_opts.update(dict(config.items('KEYSTONE')))
             if 'SANDESH' in config.sections():
                 sandesh_opts.update(dict(config.items('SANDESH')))
+                if 'sandesh_ssl_enable' in config.options('SANDESH'):
+                    sandesh_opts['sandesh_ssl_enable'] = config.getboolean(
+                        'sandesh', 'sandesh_ssl_enable')
+                if 'introspect_ssl_enable' in config.options('SANDESH'):
+                    sandesh_opts['introspect_ssl_enable'] = config.getboolean(
+                        'sandesh', 'introspect_ssl_enable')
         # Override with CLI options
         # Don't surpress add_help here so it will handle -h
         parser = argparse.ArgumentParser(
@@ -121,11 +133,11 @@ class CfgParser(object):
             # print script description with -h/--help
             description=__doc__,
             # Don't mess with format of description
-            formatter_class=argparse.RawDescriptionHelpFormatter,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
 
+        defaults.update(api_opts)
         defaults.update(redis_opts)
-        defaults.update(disc_opts)
         defaults.update(keystone_opts)
         defaults.update(sandesh_opts)
         parser.set_defaults(**defaults)
@@ -156,11 +168,6 @@ class CfgParser(object):
             help="Worker Id")
         parser.add_argument("--partitions", type=int,
             help="Number of partitions for hashing UVE keys")
-        parser.add_argument("--disc_server_ip",
-            help="Discovery Server IP address")
-        parser.add_argument("--disc_server_port",
-            type=int,
-            help="Discovery Server port")
         parser.add_argument("--redis_server_port",
             type=int,
             help="Redis server port")
@@ -217,6 +224,11 @@ class CfgParser(object):
             help="Enable ssl for sandesh connection")
         parser.add_argument("--introspect_ssl_enable", action="store_true",
             help="Enable ssl for introspect connection")
+        parser.add_argument("--api_server_list",
+            help="List of api-servers in ip:port format separated by space",
+            nargs="+")
+        parser.add_argument("--api_server_use_ssl",
+            help="Use SSL to connect to api-server")
         self._args = parser.parse_args(remaining_argv)
         if type(self._args.collectors) is str:
             self._args.collectors = self._args.collectors.split()
@@ -228,6 +240,8 @@ class CfgParser(object):
             self._args.redis_uve_list = self._args.redis_uve_list.split()
         if type(self._args.alarmgen_list) is str:
             self._args.alarmgen_list = self._args.alarmgen_list.split()
+        if type(self._args.api_server_list) is str:
+            self._args.api_server_list = self._args.api_server_list.split()
         self._args.conf_file = args.conf_file
 
     def _pat(self):
@@ -244,10 +258,6 @@ class CfgParser(object):
     def alarmgen_list(self):
         return self._args.alarmgen_list
 
-    def discovery(self):
-        return {'server':self._args.disc_server_ip,
-            'port':self._args.disc_server_port }
-
     def collectors(self):
         return self._args.collectors
 
@@ -256,6 +266,12 @@ class CfgParser(object):
 
     def zk_list(self):
         return self._args.zk_list;
+
+    def api_server_config(self):
+        return {
+            'api_server_list': self._args.api_server_list,
+            'api_server_use_ssl': self._args.api_server_use_ssl
+        }
 
     def log_local(self):
         return self._args.log_local

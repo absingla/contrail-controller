@@ -18,6 +18,7 @@
 #include <base/string_util.h>
 #include <io/event_manager.h>
 #include <database/gendb_if.h>
+#include <database/gendb_constants.h>
 #include <database/cassandra/cql/cql_if.h>
 #include <database/cassandra/cql/cql_if_impl.h>
 #include <database/cassandra/cql/cql_lib_if.h>
@@ -39,7 +40,7 @@ SandeshTraceBufferPtr CqlTraceErrBuf(SandeshTraceBufferCreate(
          std::stringstream ss;                                            \
          ss << __func__ << ":" << __FILE__ << ":" <<                      \
              __LINE__ << ": " << _Msg;                                    \
-         CQL_DEBUG_TRACE(CqlTraceDebugBuf,ss.str());                      \
+         CQL_TRACE_TRACE(CqlTraceDebugBuf,ss.str());                      \
        } while (false)                                                    \
 
 #define CQLIF_INFO_TRACE(_Msg)                                            \
@@ -47,7 +48,7 @@ SandeshTraceBufferPtr CqlTraceErrBuf(SandeshTraceBufferCreate(
          std::stringstream ss;                                            \
          ss << __func__ << ":" << __FILE__ << ":" <<                      \
              __LINE__ << ": " << _Msg;                                    \
-         CQL_INFO_TRACE(CqlTraceInfoBuf,ss.str());                        \
+         CQL_TRACE_TRACE(CqlTraceInfoBuf,ss.str());                        \
        } while (false)                                                    \
 
 #define CQLIF_ERR_TRACE(_Msg)                                             \
@@ -55,17 +56,17 @@ SandeshTraceBufferPtr CqlTraceErrBuf(SandeshTraceBufferCreate(
          std::stringstream ss;                                            \
          ss << __func__ << ":" << __FILE__ << ":" <<                      \
              __LINE__ << ": " << _Msg;                                    \
-         CQL_ERR_TRACE(CqlTraceErrBuf,ss.str());                          \
+         CQL_TRACE_TRACE(CqlTraceErrBuf,ss.str());                          \
        } while (false)                                                    \
 
 #define CASS_LIB_TRACE(_Level, _Msg)                                      \
     do {                                                                  \
         if (_Level == log4cplus::ERROR_LOG_LEVEL) {                       \
-            CQL_ERR_TRACE(CqlTraceErrBuf, _Msg);                          \
+            CQL_TRACE_TRACE(CqlTraceErrBuf, _Msg);                          \
         }else if (_Level == log4cplus::DEBUG_LOG_LEVEL) {                 \
-            CQL_DEBUG_TRACE(CqlTraceDebugBuf, _Msg);                      \
+            CQL_TRACE_TRACE(CqlTraceDebugBuf, _Msg);                      \
         }else {                                                           \
-            CQL_INFO_TRACE(CqlTraceInfoBuf, _Msg);                        \
+            CQL_TRACE_TRACE(CqlTraceInfoBuf, _Msg);                        \
         }                                                                 \
     } while (false)                                                       \
 
@@ -414,6 +415,8 @@ static const char * kQCompactionStrategy(
     "compaction = {'class': "
     "'org.apache.cassandra.db.compaction.%s'}");
 static const std::string kQGCGraceSeconds("gc_grace_seconds = 0");
+static const std::string kQReadRepairChanceDTCS(
+             "read_repair_chance = 0.0");
 
 //
 // Cf2CassCreateTableIfNotExists
@@ -441,8 +444,21 @@ std::string StaticCf2CassCreateTableIfNotExists(const GenDb::NewCf &cf,
     int n(snprintf(cbuf, sizeof(cbuf), kQCompactionStrategy,
        compaction_strategy.c_str()));
     assert(!(n < 0 || n >= (int)sizeof(cbuf)));
-    query << ") WITH " << std::string(cbuf) << " AND " <<
-        kQGCGraceSeconds;
+
+    // The compaction strategy DateTieredCompactionStrategy precludes 
+    // using read repair, because of the way timestamps are checked for 
+    // DTCS compaction.In this case, you must set read_repair_chance to 
+    // zero. For other compaction strategies, read repair should be 
+    // enabled with a read_repair_chance value of 0.2 being typical
+    if (compaction_strategy == 
+        GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY) {
+        query << ") WITH " << std::string(cbuf) << " AND " <<
+            kQReadRepairChanceDTCS << " AND " << kQGCGraceSeconds;
+    } else {
+        query << ") WITH " << std::string(cbuf) << " AND " << 
+            kQGCGraceSeconds;
+    }
+
     return query.str();
 }
 
@@ -503,8 +519,20 @@ std::string DynamicCf2CassCreateTableIfNotExists(const GenDb::NewCf &cf,
     int n(snprintf(cbuf, sizeof(cbuf), kQCompactionStrategy,
        compaction_strategy.c_str()));
     assert(!(n < 0 || n >= (int)sizeof(cbuf)));
-    query << ")) WITH " << std::string(cbuf) << " AND " <<
-        kQGCGraceSeconds;
+
+    // The compaction strategy DateTieredCompactionStrategy precludes
+    // using read repair, because of the way timestamps are checked for
+    // DTCS compaction.In this case, you must set read_repair_chance to
+    // zero. For other compaction strategies, read repair should be
+    // enabled with a read_repair_chance value of 0.2 being typical
+    if (compaction_strategy == 
+        GenDb::g_gendb_constants.DATE_TIERED_COMPACTION_STRATEGY) {
+        query << ")) WITH " << std::string(cbuf) << " AND " <<
+            kQReadRepairChanceDTCS << " AND " << kQGCGraceSeconds;
+    } else {
+        query << ")) WITH " << std::string(cbuf) << " AND " <<
+            kQGCGraceSeconds;
+    }
     return query.str();
 }
 
@@ -768,7 +796,7 @@ bool DynamicCf2CassPrepareBind(interface::CassLibrary *cci,
 }
 
 static std::string CassSelectFromTableInternal(const std::string &table,
-    const GenDb::DbDataValueVec &rkeys,
+    const std::vector<GenDb::DbDataValueVec> &rkeys,
     const GenDb::ColumnNameRange &ck_range,
     const GenDb::FieldNamesToReadVec &read_vec) {
     std::ostringstream query;
@@ -788,22 +816,37 @@ static std::string CassSelectFromTableInternal(const std::string &table,
         query.seekp(-1, query.cur);
         query << " FROM " << table;
     }
-    int rk_size(rkeys.size());
-    CassQueryPrinter cprinter(query);
-    for (int i = 0; i < rk_size; i++) {
-        if (i) {
-            int key_num(i + 1);
-            query << " AND key" << key_num << "=";
-        } else {
-            query << " WHERE key=";
+    if (rkeys.size() == 1) {
+        GenDb::DbDataValueVec rkey = rkeys[0];
+        int rk_size(rkey.size());
+        CassQueryPrinter cprinter(query);
+        for (int i = 0; i < rk_size; i++) {
+            if (i) {
+                int key_num(i + 1);
+                query << " AND key" << key_num << "=";
+            } else {
+                query << " WHERE key=";
+            }
+            boost::apply_visitor(cprinter, rkey[i]);
         }
-        boost::apply_visitor(cprinter, rkeys[i]);
+
+    } else if (rkeys.size() > 1) {
+        query << " WHERE key IN (";
+        BOOST_FOREACH(GenDb::DbDataValueVec rkey, rkeys) {
+            int rk_size(rkey.size());
+            assert(rk_size == 1);
+            CassQueryPrinter cprinter(query);
+            boost::apply_visitor(cprinter, rkey[0]);
+            query << ",";
+        }
+        query.seekp(-1, query.cur);
+        query << ")";
     }
     if (!ck_range.IsEmpty()) {
         if (!ck_range.start_.empty()) {
             int ck_start_size(ck_range.start_.size());
             std::ostringstream start_ss;
-            start_ss << " >= (";
+            start_ss << " " << GenDb::Op::ToString(ck_range.start_op_) << " (";
             CassQueryPrinter start_vprinter(start_ss);
             query << " AND (";
             for (int i = 0; i < ck_start_size; i++) {
@@ -822,7 +865,8 @@ static std::string CassSelectFromTableInternal(const std::string &table,
         if (!ck_range.finish_.empty()) {
             int ck_finish_size(ck_range.finish_.size());
             std::ostringstream finish_ss;
-            finish_ss << " <= (";
+            finish_ss << " " << GenDb::Op::ToString(ck_range.finish_op_) <<
+                " (";
             CassQueryPrinter finish_vprinter(finish_ss);
             query << " AND (";
             for (int i = 0; i < ck_finish_size; i++) {
@@ -847,7 +891,9 @@ static std::string CassSelectFromTableInternal(const std::string &table,
 
 std::string PartitionKey2CassSelectFromTable(const std::string &table,
     const GenDb::DbDataValueVec &rkeys) {
-    return CassSelectFromTableInternal(table, rkeys, GenDb::ColumnNameRange(),
+    std::vector<GenDb::DbDataValueVec> rkey_vec;
+    rkey_vec.push_back(rkeys);
+    return CassSelectFromTableInternal(table, rkey_vec, GenDb::ColumnNameRange(),
                                        GenDb::FieldNamesToReadVec());
 }
 
@@ -855,11 +901,21 @@ std::string PartitionKeyAndClusteringKeyRange2CassSelectFromTable(
     const std::string &table, const GenDb::DbDataValueVec &rkeys,
     const GenDb::ColumnNameRange &ck_range,
     const GenDb::FieldNamesToReadVec &read_vec) {
+    std::vector<GenDb::DbDataValueVec> rkey_vec;
+    rkey_vec.push_back(rkeys);
+    return CassSelectFromTableInternal(table, rkey_vec, ck_range, read_vec);
+}
+
+std::string PartitionKeyAndClusteringKeyRange2CassSelectFromTable(
+    const std::string &table, const std::vector<GenDb::DbDataValueVec> &rkeys,
+    const GenDb::ColumnNameRange &ck_range,
+    const GenDb::FieldNamesToReadVec &read_vec) {
     return CassSelectFromTableInternal(table, rkeys, ck_range, read_vec);
 }
 
 std::string CassSelectFromTable(const std::string &table) {
-    return CassSelectFromTableInternal(table, GenDb::DbDataValueVec(),
+    std::vector<GenDb::DbDataValueVec> rkey_vec;
+    return CassSelectFromTableInternal(table, rkey_vec,
         GenDb::ColumnNameRange(), GenDb::FieldNamesToReadVec());
 }
 
@@ -1068,6 +1124,69 @@ static void DynamicCfGetResult(interface::CassLibrary *cci,
         }
         GenDb::NewCol *column(new GenDb::NewCol(cnames, values, 0, timestamps));
         v_columns->push_back(column);
+    }
+}
+
+static void DynamicCfGetResult(interface::CassLibrary *cci,
+    CassResultPtr *result, const GenDb::FieldNamesToReadVec &read_vec,
+    GenDb::ColListVec *v_col_list) {
+    std::auto_ptr<GenDb::ColList> col_list;
+    // Row iterator
+    CassIteratorPtr riterator(cci->CassIteratorFromResult(result->get()), cci);
+    while (cci->CassIteratorNext(riterator.get())) {
+        const CassRow *row(cci->CassIteratorGetRow(riterator.get()));
+        GenDb::DbDataValueVec rkey;
+        GenDb::DbDataValueVec *cnames(new GenDb::DbDataValueVec);
+        GenDb::DbDataValueVec *values(new GenDb::DbDataValueVec);
+        GenDb::DbDataValueVec *timestamps(new GenDb::DbDataValueVec);
+        int i = 0;
+        for (GenDb::FieldNamesToReadVec::const_iterator it = read_vec.begin();
+             it != read_vec.end(); it++) {
+            bool row_key = it->get<1>();
+            bool row_column = it->get<2>();
+            bool read_timestamp = it->get<3>();
+            if (row_key) {
+                // Partiiton key
+                const CassValue *cvalue(cci->CassRowGetColumn(row, i));
+                assert(cvalue);
+                GenDb::DbDataValue db_value(CassValue2DbDataValue(cci, cvalue));
+                rkey.push_back(db_value);
+                i++;
+                continue;
+            }
+            const CassValue *cvalue(cci->CassRowGetColumn(row, i));
+            assert(cvalue);
+            GenDb::DbDataValue db_value(CassValue2DbDataValue(cci, cvalue));
+            if (row_column) {
+                cnames->push_back(db_value);
+            } else {
+                values->push_back(db_value);
+                if (read_timestamp) {
+                    i++;
+                    const CassValue *ctimestamp(cci->CassRowGetColumn(row, i));
+                    assert(ctimestamp);
+                    GenDb::DbDataValue time_value(CassValue2DbDataValue(cci, ctimestamp));
+                    timestamps->push_back(time_value);
+                }
+            }
+            i++;
+        }
+        GenDb::NewCol *column(new GenDb::NewCol(cnames, values, 0, timestamps));
+        // Do we need a new ColList?
+        if (!col_list.get()) {
+            col_list.reset(new GenDb::ColList);
+            col_list->rowkey_ = rkey;
+        }
+        if (rkey != col_list->rowkey_) {
+            v_col_list->push_back(col_list.release());
+            col_list.reset(new GenDb::ColList);
+            col_list->rowkey_ = rkey;
+        }
+        GenDb::NewColVec *v_columns(&col_list->columns_);
+        v_columns->push_back(column);
+    }
+    if (col_list.get()) {
+        v_col_list->push_back(col_list.release());
     }
 }
 
@@ -1317,6 +1436,20 @@ static bool DynamicCfGetResultSync(interface::CassLibrary *cci,
     CassSession *session, const char *query,
     const GenDb::FieldNamesToReadVec &read_vec,
     CassConsistency consistency, GenDb::NewColVec *v_columns) {
+    CassResultPtr result(NULL, cci);
+    bool success(ExecuteQueryResultSync(cci, session, query, &result,
+        consistency));
+    if (!success) {
+        return success;
+    }
+    DynamicCfGetResult(cci, &result, read_vec, v_columns);
+    return success;
+}
+
+static bool DynamicCfGetResultSync(interface::CassLibrary *cci,
+    CassSession *session, const char *query,
+    const GenDb::FieldNamesToReadVec &read_vec,
+    CassConsistency consistency, GenDb::ColListVec *v_columns) {
     CassResultPtr result(NULL, cci);
     bool success(ExecuteQueryResultSync(cci, session, query, &result,
         consistency));
@@ -1853,6 +1986,23 @@ bool CqlIfImpl::SelectFromTableClusteringKeyRangeFieldNamesSync(const std::strin
     return impl::DynamicCfGetResultSync(cci_, session_.get(),
         query.c_str(), read_vec, consistency, out);
 }
+
+bool CqlIfImpl::SelectFromTableClusteringKeyRangeFieldNamesSync(const std::string &cfname,
+    const std::vector<GenDb::DbDataValueVec> &rkeys,
+    const GenDb::ColumnNameRange &ck_range, CassConsistency consistency,
+    const GenDb::FieldNamesToReadVec &read_vec,
+    GenDb::ColListVec *out) {
+    if (session_state_ != SessionState::CONNECTED) {
+        return false;
+    }
+    std::string query(
+        impl::PartitionKeyAndClusteringKeyRange2CassSelectFromTable(cfname,
+        rkeys, ck_range, read_vec));
+    assert(IsTableDynamic(cfname));
+    return impl::DynamicCfGetResultSync(cci_, session_.get(),
+        query.c_str(), read_vec, consistency, out);
+}
+
 
 bool CqlIfImpl::SelectFromTableClusteringKeyRangeSync(const std::string &cfname,
     const GenDb::DbDataValueVec &rkey,
@@ -2456,6 +2606,21 @@ bool CqlIf::Db_GetMultiRow(GenDb::ColListVec *out, const std::string &cfname,
             return false;
         }
         out->push_back(v_columns.release());
+    }
+    IncrementTableReadStats(cfname, v_rowkey.size());
+    return true;
+}
+
+bool CqlIf::Db_GetMultiRow(GenDb::ColListVec *out, const std::string &cfname,
+    const std::vector<GenDb::DbDataValueVec> &v_rowkey,
+    const GenDb::ColumnNameRange &crange,
+    const GenDb::FieldNamesToReadVec &read_vec) {
+    bool success(impl_->SelectFromTableClusteringKeyRangeFieldNamesSync(cfname,
+        v_rowkey, crange, CASS_CONSISTENCY_ONE, read_vec, out));
+    if (!success) {
+        IncrementTableReadFailStats(cfname);
+        IncrementErrors(GenDb::IfErrors::ERR_READ_COLUMN);
+        return false;
     }
     IncrementTableReadStats(cfname, v_rowkey.size());
     return true;

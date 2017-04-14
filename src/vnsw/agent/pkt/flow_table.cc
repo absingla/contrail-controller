@@ -422,26 +422,6 @@ void FlowTable::DeleteAll() {
     }
 }
 
-bool FlowTable::ValidFlowMove(const FlowEntry *new_flow,
-                              const FlowEntry *old_flow) const {
-    if (!new_flow || !old_flow) {
-        return false;
-    }
-
-    if (new_flow->is_flags_set(FlowEntry::EcmpFlow) == false) {
-        return false;
-    }
-
-    if (new_flow->data().flow_source_vrf == old_flow->data().flow_source_vrf &&
-        new_flow->key().src_addr == old_flow->key().src_addr &&
-        new_flow->data().source_plen == old_flow->data().source_plen) {
-        //Check if both flow originate from same source route
-        return true;
-    }
-
-    return false;
-}
-
 void FlowTable::UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow) {
     FlowEntry *flow_rev = flow->reverse_flow_entry();
     FlowEntry *rflow_rev = NULL;
@@ -466,16 +446,10 @@ void FlowTable::UpdateReverseFlow(FlowEntry *flow, FlowEntry *rflow) {
 
     if (flow_rev && (flow_rev->reverse_flow_entry() == NULL)) {
         flow_rev->MakeShortFlow(FlowEntry::SHORT_NO_REVERSE_FLOW);
-        if (ValidFlowMove(rflow, flow_rev)== false) {
-            flow->MakeShortFlow(FlowEntry::SHORT_REVERSE_FLOW_CHANGE);
-        }
     }
 
     if (rflow_rev && (rflow_rev->reverse_flow_entry() == NULL)) {
         rflow_rev->MakeShortFlow(FlowEntry::SHORT_NO_REVERSE_FLOW);
-        if (ValidFlowMove(flow, rflow_rev) == false) {
-            flow->MakeShortFlow(FlowEntry::SHORT_REVERSE_FLOW_CHANGE);
-        }
     }
 
     if (flow->reverse_flow_entry() == NULL) {
@@ -525,7 +499,8 @@ void FlowTable::RecomputeFlow(FlowEntry *flow) {
         flow = flow->reverse_flow_entry();
     }
 
-    agent_->pkt()->get_flow_proto()->MessageRequest(flow);
+    if (flow != NULL)
+        agent_->pkt()->get_flow_proto()->MessageRequest(flow);
 }
 
 // Handle deletion of a Route. Flow management module has identified that route
@@ -572,7 +547,7 @@ void FlowTable::HandleRevaluateDBEntry(const DBEntry *entry, FlowEntry *flow,
     if (flow->vn_entry() && flow->vn_entry()->IsDeleted())
         return;
 
-    if (flow->nh() && flow->nh()->IsDeleted())
+    if (flow->rpf_nh() && flow->rpf_nh()->IsDeleted())
         return;
 
     if (flow->intf_entry() && flow->intf_entry()->IsDeleted())
@@ -597,6 +572,11 @@ void FlowTable::HandleRevaluateDBEntry(const DBEntry *entry, FlowEntry *flow,
     // as forward flow resync will try to update reverse flow
     rflow->ResyncFlow();
     flow->ResyncFlow();
+
+    // RPF computation can be done only after policy processing.
+    // Do RPF computation now
+    flow->RpfUpdate();
+    rflow->RpfUpdate();
 
     // the SG action could potentially have changed
     // due to reflexive nature. Update KSync for reverse flow first

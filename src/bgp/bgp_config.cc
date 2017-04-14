@@ -9,12 +9,12 @@
 
 #include "base/string_util.h"
 #include "base/time_util.h"
-#include "base/util.h"
 
 using std::copy;
 using std::endl;
 using std::ostringstream;
 using std::ostream_iterator;
+using std::sort;
 using std::string;
 using std::swap;
 using std::vector;
@@ -239,6 +239,7 @@ BgpNeighborConfig::GetAddressFamilies() const {
         family_attributes_list_) {
         family_list.push_back(family_config.family);
     }
+    sort(family_list.begin(), family_list.end());
     return family_list;
 }
 
@@ -491,6 +492,17 @@ void BgpConfigManager::Notify<BgpGlobalSystemConfig>(
     BOOST_FOREACH(Observers obs, obs_) {
         if (obs.system) {
             (obs.system)(config, event);
+        }
+    }
+}
+
+template<>
+void BgpConfigManager::Notify<BgpGlobalQosConfig>(
+        const BgpGlobalQosConfig *config, EventType event) {
+    config->set_last_change_at(UTCTimestampUsec());
+    BOOST_FOREACH(Observers obs, obs_) {
+        if (obs.qos) {
+            (obs.qos)(config, event);
         }
     }
 }

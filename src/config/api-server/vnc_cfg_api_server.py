@@ -34,10 +34,10 @@ import uuid
 import copy
 from pprint import pformat
 from cStringIO import StringIO
-from lxml import etree
 # import GreenletProfiler
 
 from cfgm_common import vnc_cgitb
+from cfgm_common import has_role
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +69,13 @@ import vnc_cfg_types
 from vnc_db import VncDbClient
 
 import cfgm_common
-from cfgm_common import ignore_exceptions, imid
+from cfgm_common import ignore_exceptions
 from cfgm_common.uve.vnc_api.ttypes import VncApiCommon, VncApiConfigLog,\
     VncApiDebug, VncApiInfo, VncApiNotice, VncApiError
 from cfgm_common import illegal_xml_chars_RE
 from sandesh_common.vns.ttypes import Module
 from sandesh_common.vns.constants import ModuleNames, Module2NodeType,\
-    NodeTypeNames, INSTANCE_ID_DEFAULT, API_SERVER_DISCOVERY_SERVICE_NAME,\
-    IFMAP_SERVER_DISCOVERY_SERVICE_NAME
+    NodeTypeNames, INSTANCE_ID_DEFAULT
 
 from provision_defaults import Provision
 from vnc_quota import *
@@ -100,18 +99,15 @@ from cfgm_common.vnc_api_stats import log_api_stats
 
 from pysandesh.sandesh_base import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
-import discoveryclient.client as client
 # from gen_py.vnc_api.ttypes import *
 import netifaces
 from pysandesh.connection_info import ConnectionState
 from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, \
     NodeStatus
 
-from sandesh.discovery_client_stats import ttypes as sandesh
 from sandesh.traces.ttypes import RestApiTrace
 from vnc_bottle import get_bottle_server
 from cfgm_common.vnc_greenlets import VncGreenlet
-from vnc_ifmap import VncIfmapServer
 
 _ACTION_RESOURCES = [
     {'uri': '/prop-collection-get', 'link_name': 'prop-collection-get',
@@ -126,9 +122,6 @@ _ACTION_RESOURCES = [
      'method': 'POST', 'method_name': 'fq_name_to_id_http_post'},
     {'uri': '/id-to-fqname', 'link_name': 'id-to-name',
      'method': 'POST', 'method_name': 'id_to_fq_name_http_post'},
-    # ifmap-to-id only for ifmap subcribers using rest for publish
-    {'uri': '/ifmap-to-id', 'link_name': 'ifmap-to-id',
-     'method': 'POST', 'method_name': 'ifmap_to_id_http_post'},
     {'uri': '/useragent-kv', 'link_name': 'useragent-keyvalue',
      'method': 'POST', 'method_name': 'useragent_kv_http_post'},
     {'uri': '/db-check', 'link_name': 'database-check',
@@ -514,7 +507,6 @@ class VncApiServer(object):
 
         # State modification starts from here. Ensure that cleanup is done for all state changes
         cleanup_on_failure = []
-        obj_ids = {}
 
         def stateful_create():
             # Alloc and Store id-mappings before creating entry on pubsub store.
@@ -525,8 +517,7 @@ class VncApiServer(object):
                 return (ok, result)
             get_context().push_undo(db_conn.dbe_release, obj_type, fq_name)
 
-            obj_ids.update(result)
-
+            obj_id = result
             env = get_request().headers.environ
             tenant_name = env.get(hdr_server_tenant()) or 'default-project'
 
@@ -558,7 +549,7 @@ class VncApiServer(object):
                         ret['ok'] = ok
                         ret['result'] = result
                         return
-                    (_ok, _result) = db_conn.dbe_create(obj_type, obj_ids,
+                    (_ok, _result) = db_conn.dbe_create(obj_type, obj_id,
                                                         obj_dict)
                     ret['ok'] = _ok
                     ret['result'] = _result
@@ -569,8 +560,7 @@ class VncApiServer(object):
                     return ret['ok'], ret['result']
             else:
                 #normal execution
-                (ok, result) = db_conn.dbe_create(obj_type, obj_ids,
-                                                  obj_dict)
+                (ok, result) = db_conn.dbe_create(obj_type, obj_id, obj_dict)
                 if not ok:
                     return (ok, result)
 
@@ -581,14 +571,14 @@ class VncApiServer(object):
             except Exception as e:
                 ok = False
                 err_msg = '%s:%s post_dbe_create had an exception: %s' %(
-                    obj_type, obj_ids['uuid'], str(e))
+                    obj_type, obj_id, str(e))
                 err_msg += cfgm_common.utils.detailed_traceback()
 
             if not ok:
                 # Create is done, log to system, no point in informing user
                 self.config_log(err_msg, level=SandeshLevel.SYS_ERR)
 
-            return True, ''
+            return True, obj_id
         # end stateful_create
 
         try:
@@ -606,8 +596,8 @@ class VncApiServer(object):
         rsp_body = {}
         rsp_body['name'] = name
         rsp_body['fq_name'] = fq_name
-        rsp_body['uuid'] = obj_ids['uuid']
-        rsp_body['href'] = self.generate_url(resource_type, obj_ids['uuid'])
+        rsp_body['uuid'] = result
+        rsp_body['href'] = self.generate_url(resource_type, result)
         if parent_class:
             # non config-root child, send back parent uuid/href
             rsp_body['parent_uuid'] = parent_uuid
@@ -659,8 +649,7 @@ class VncApiServer(object):
 
         db_conn = self._db_conn
         if etag:
-            obj_ids = {'uuid': id}
-            (ok, result) = db_conn.dbe_is_latest(obj_ids, etag.strip('"'))
+            (ok, result) = db_conn.dbe_is_latest(id, etag.strip('"'))
             if not ok:
                 # Not present in DB
                 self.config_object_error(
@@ -672,9 +661,7 @@ class VncApiServer(object):
                 # send Not-Modified, caches use this for read optimization
                 bottle.response.status = 304
                 return
-        #end if etag
-
-        obj_ids = {'uuid': id}
+        # end if etag
 
         # Generate field list for db layer
         obj_fields = r_class.prop_fields | r_class.ref_fields
@@ -686,13 +673,13 @@ class VncApiServer(object):
             if 'exclude_children' not in get_request().query:
                 obj_fields |= r_class.children_fields
 
-        (ok, result) = r_class.pre_dbe_read(obj_ids['uuid'], db_conn)
+        (ok, result) = r_class.pre_dbe_read(id, db_conn)
         if not ok:
             (code, msg) = result
             raise cfgm_common.exceptions.HttpError(code, msg)
 
         try:
-            (ok, result) = db_conn.dbe_read(obj_type, obj_ids,
+            (ok, result) = db_conn.dbe_read(obj_type, id,
                 list(obj_fields), ret_readonly=True)
             if not ok:
                 self.config_object_error(id, None, obj_type, 'http_get', result)
@@ -739,8 +726,7 @@ class VncApiServer(object):
         ret_obj_dict = {}
         ret_obj_dict.update(obj_dict)
         r_class = self.get_resource_class(resource_type)
-        obj_links = (r_class.ref_fields | r_class.backref_fields | r_class.children_fields) \
-                     & set(obj_dict.keys())
+        obj_links = r_class.obj_links & set(obj_dict.keys())
         obj_uuids = [ref['uuid'] for link in obj_links for ref in list(obj_dict[link])]
         obj_dicts = self._db_conn._object_db.object_raw_read(obj_uuids, ["perms2"])
         uuid_to_perms2 = dict((o['uuid'], o['perms2']) for o in obj_dicts)
@@ -784,8 +770,7 @@ class VncApiServer(object):
             if req_obj_type != obj_type:
                 raise cfgm_common.exceptions.HttpError(
                     404, 'No %s object found for id %s' %(resource_type, id))
-            obj_ids = {'uuid': id}
-            (read_ok, read_result) = db_conn.dbe_read(obj_type, obj_ids)
+            (read_ok, read_result) = db_conn.dbe_read(obj_type, id)
             if not read_ok:
                 bottle.abort(
                     404, 'No %s object found for id %s' %(resource_type, id))
@@ -830,9 +815,7 @@ class VncApiServer(object):
 
         # State modification starts from here. Ensure that cleanup is done for all state changes
         cleanup_on_failure = []
-        obj_ids = {'uuid': id}
-        if 'uuid' not in obj_dict:
-            obj_dict['uuid'] = id
+        obj_dict['uuid'] = id
 
         def stateful_update():
             get_context().set_state('PRE_DBE_UPDATE')
@@ -843,8 +826,7 @@ class VncApiServer(object):
                 return (ok, result)
 
             get_context().set_state('DBE_UPDATE')
-            (ok, result) = db_conn.dbe_update(obj_type, obj_ids,
-                                              obj_dict)
+            (ok, result) = db_conn.dbe_update(obj_type, id, obj_dict)
             if not ok:
                 return (ok, result)
 
@@ -916,9 +898,8 @@ class VncApiServer(object):
             self.config_log(err_msg, level=SandeshLevel.SYS_NOTICE)
 
         # read in obj from db (accepting error) to get details of it
-        obj_ids = {'uuid': id}
         try:
-            (read_ok, read_result) = db_conn.dbe_read(obj_type, obj_ids)
+            (read_ok, read_result) = db_conn.dbe_read(obj_type, id)
         except NoIdError as e:
             raise cfgm_common.exceptions.HttpError(404, str(e))
         if not read_ok:
@@ -934,22 +915,15 @@ class VncApiServer(object):
             raise cfgm_common.exceptions.HttpError(404, result)
 
         # common handling for all resource delete
-        parent_obj_type = read_result.get('parent_type')
+        parent_uuid = read_result.get('parent_uuid')
         (ok, del_result) = self._delete_common(
-            get_request(), obj_type, id, parent_obj_type)
+            get_request(), obj_type, id, parent_uuid)
         if not ok:
             (code, msg) = del_result
             self.config_object_error(id, None, obj_type, 'http_delete', msg)
             raise cfgm_common.exceptions.HttpError(code, msg)
 
         fq_name = read_result['fq_name']
-        ifmap_id = imid.get_ifmap_id_from_fq_name(resource_type, fq_name)
-        obj_ids['imid'] = ifmap_id
-        if parent_obj_type:
-            parent_res_type, _ = self._validate_resource_type(parent_obj_type)
-            parent_imid = cfgm_common.imid.get_ifmap_id_from_fq_name(
-                parent_res_type, fq_name[:-1])
-            obj_ids['parent_imid'] = parent_imid
 
         # fail if non-default children or non-derived backrefs exist
         default_names = {}
@@ -1011,8 +985,7 @@ class VncApiServer(object):
                 cleanup_on_failure.append((callable, [id, read_result, db_conn]))
 
             get_context().set_state('DBE_DELETE')
-            (ok, del_result) = db_conn.dbe_delete(
-                obj_type, obj_ids, read_result)
+            (ok, del_result) = db_conn.dbe_delete(obj_type, id, read_result)
             if not ok:
                 return (ok, del_result)
 
@@ -1240,14 +1213,14 @@ class VncApiServer(object):
             (ok, result) = self._db_conn.dbe_alloc(child_obj_type, child_dict)
             if not ok:
                 return (ok, result)
-            obj_ids = result
+            obj_id = result
 
             # For virtual networks, allocate an ID
             if child_obj_type == 'virtual_network':
-                child_dict['virtual_network_network_id'] =\
-                    self.alloc_vn_id(child_obj.get_fq_name_str())
+                child_dict['virtual_network_network_id'] = self.alloc_vn_id(
+                    child_obj.get_fq_name_str())
 
-            (ok, result) = self._db_conn.dbe_create(child_obj_type, obj_ids,
+            (ok, result) = self._db_conn.dbe_create(child_obj_type, obj_id,
                                                     child_dict)
             if not ok:
                 # DB Create failed, log and stop further child creation.
@@ -1446,22 +1419,12 @@ class VncApiServer(object):
             self._random_collectors = random.sample(self._args.collectors, \
                                                     len(self._args.collectors))
 
-        # Initialize discovery client
-        self._disc = None
-        if self._args.disc_server_ip and self._args.disc_server_port:
-            self._disc = client.DiscoveryClient(self._args.disc_server_ip,
-                                                self._args.disc_server_port,
-                                                ModuleNames[Module.API_SERVER])
-
         # sandesh init
         self._sandesh = Sandesh()
         # Reset the sandesh send rate limit  value
         if self._args.sandesh_send_rate_limit is not None:
             SandeshSystem.set_sandesh_send_rate_limit(
                 self._args.sandesh_send_rate_limit)
-        sandesh.DiscoveryClientStatsReq.handle_request = self.sandesh_disc_client_stats_handle_request
-        sandesh.DiscoveryClientSubscribeInfoReq.handle_request = self.sandesh_disc_client_subinfo_handle_request
-        sandesh.DiscoveryClientPublishInfoReq.handle_request = self.sandesh_disc_client_pubinfo_handle_request
         module = Module.API_SERVER
         module_name = ModuleNames[Module.API_SERVER]
         node_type = Module2NodeType[module]
@@ -1477,7 +1440,7 @@ class VncApiServer(object):
                                      self._random_collectors,
                                      'vnc_api_server_context',
                                      int(self._args.http_server_port),
-                                     ['cfgm_common', 'vnc_cfg_api_server.sandesh'], self._disc,
+                                     ['cfgm_common', 'vnc_cfg_api_server.sandesh'],
                                      logger_class=self._args.logger_class,
                                      logger_config_file=self._args.logging_conf,
                                      config=self._args.sandesh_config)
@@ -1487,7 +1450,6 @@ class VncApiServer(object):
         self._sandesh.trace_buffer_create(name="DBUVERequestTraceBuf", size=1000)
         self._sandesh.trace_buffer_create(name="MessageBusNotifyTraceBuf",
                                           size=1000)
-        self._sandesh.trace_buffer_create(name="IfmapTraceBuf", size=1000)
 
         self._sandesh.set_logging_params(
             enable_local_log=self._args.log_local,
@@ -1514,18 +1476,14 @@ class VncApiServer(object):
             self._db_connect(self._args.reset_config)
             self._db_init_entries()
 
-        if (self._args.ifmap_listen_ip is not None and
-                self._args.ifmap_listen_port is not None):
-            # As DB are synced, we can serve the custom IF-MAP server
-            self._vnc_ifmap_server = VncIfmapServer(self, self._args)
-            gevent.spawn(self._vnc_ifmap_server.run_server)
-
         # API/Permissions check
         # after db init (uses db_conn)
         self._rbac = vnc_rbac.VncRbac(self, self._db_conn)
         self._permissions = vnc_perms.VncPermissions(self, self._args)
         if self.is_rbac_enabled():
             self._create_default_rbac_rule()
+        if self.is_multi_tenancy_set():
+            self._generate_obj_view_links()
 
         if os.path.exists('/usr/bin/contrail-version'):
             cfgm_cpu_uve = ModuleCpuState()
@@ -1578,66 +1536,6 @@ class VncApiServer(object):
             '^/$',              # allow discovery
         ]
     # end __init__
-
-    def sandesh_disc_client_subinfo_handle_request(self, req):
-        stats = self._disc.get_stats()
-        resp = sandesh.DiscoveryClientSubscribeInfoResp(Subscribe=[])
-
-        for sub in stats['subs']:
-            info = sandesh.SubscribeInfo(service_type=sub['service_type'])
-            info.instances   = sub['instances']
-            info.ttl         = sub['ttl']
-            info.blob        = sub['blob']
-            resp.Subscribe.append(info)
-
-        resp.response(req.context())
-    # end
-
-    def sandesh_disc_client_pubinfo_handle_request(self, req):
-        stats = self._disc.get_stats()
-        resp = sandesh.DiscoveryClientPublishInfoResp(Publish=[])
-
-        for service_type, pub in stats['pubs'].items():
-            info = sandesh.PublishInfo(service_type=service_type)
-            info.blob        = pub['blob']
-            resp.Publish.append(info)
-
-        resp.response(req.context())
-    # end
-
-    # Return discovery client stats
-    def sandesh_disc_client_stats_handle_request(self, req):
-        stats = self._disc.get_stats()
-        resp = sandesh.DiscoveryClientStatsResp(Subscribe=[], Publish=[])
-
-        # pub stats
-        for service_type, pub in stats['pubs'].items():
-            pub_stats = sandesh.PublisherStats(service_type=service_type)
-            pub_stats.Request     = pub['request']
-            pub_stats.Response     = pub['response']
-            pub_stats.ConnError   = pub['conn_error']
-            pub_stats.Timeout   = pub['timeout']
-            pub_stats.unknown_exceptions = pub['exc_unknown']
-            pub_stats.exception_info    = pub['exc_info']
-            xxx = ['%s:%d' % (k[3:], v) for k, v in pub.items() if 'sc_' in k]
-            pub_stats.HttpError = ", ".join(xxx)
-            resp.Publish.append(pub_stats)
-
-        # sub stats
-        for sub in stats['subs']:
-            sub_stats = sandesh.SubscriberStats(service_type=sub['service_type'])
-            sub_stats.Request   = sub['request']
-            sub_stats.Response   = sub['response']
-            sub_stats.ConnError   = sub['conn_error']
-            sub_stats.Timeout   = sub['timeout']
-            sub_stats.unknown_exceptions = sub['exc_unknown']
-            sub_stats.exception_info    = sub['exc_info']
-            xxx = ['%s:%d' % (k[3:], v) for k, v in sub.items() if 'sc_' in k]
-            sub_stats.HttpError = ", ".join(xxx)
-            resp.Subscribe.append(sub_stats)
-
-        resp.response(req.context())
-    # end sandesh_disc_client_stats_handle_request
 
     def _extensions_transform_request(self, request):
         extensions = self._extension_mgrs.get('resourceApi')
@@ -1769,10 +1667,6 @@ class VncApiServer(object):
         return self._pipe_start_app
     # end get_pipe_start_app
 
-    def get_ifmap_health_check_interval(self):
-        return float(self._args.ifmap_health_check_interval)
-    # end get_ifmap_health_check_interval
-
     def get_rabbit_health_check_interval(self):
         return float(self._args.rabbit_health_check_interval)
     # end get_rabbit_health_check_interval
@@ -1788,7 +1682,7 @@ class VncApiServer(object):
         for field in ('HTTP_X_API_ROLE', 'HTTP_X_ROLE'):
             if field in env:
                 roles = env[field].split(',')
-                return self.cloud_admin_role in [x.lower() for x in roles]
+                return has_role(self.cloud_admin_role, roles)
         return False
 
     def get_auth_headers_from_token(self, request, token):
@@ -1797,6 +1691,11 @@ class VncApiServer(object):
 
         return self._auth_svc.get_auth_headers_from_token(request, token)
     # end get_auth_headers_from_token
+
+    def _generate_obj_view_links(self):
+        for object_type, resource_type in all_resource_type_tuples:
+            r_class = self.get_resource_class(resource_type)
+            r_class.obj_links = (r_class.ref_fields | r_class.backref_fields | r_class.children_fields)
 
     # Check for the system created VN. Disallow such VN delete
     def virtual_network_http_delete(self, id):
@@ -1862,6 +1761,9 @@ class VncApiServer(object):
             raise cfgm_common.exceptions.HttpError(
                 400, 'User token needed for validation')
         user_token = get_request().environ['HTTP_X_USER_TOKEN'].encode("ascii")
+        obj_uuid = None
+        if 'uuid' in get_request().query:
+            obj_uuid = get_request().query.uuid
 
         # get permissions in internal context
         try:
@@ -1877,29 +1779,28 @@ class VncApiServer(object):
                 b_req.url, b_req.urlparts, b_req.environ, b_req.headers, None, None)
             set_context(context.ApiContext(internal_req=i_req))
             token_info = self._auth_svc.validate_user_token(get_request())
+
+            # roles in result['token_info']['access']['user']['roles']
+            if token_info:
+                result = {'token_info' : token_info}
+                # Handle v2 and v3 responses
+                roles_list = []
+                if 'access' in token_info:
+                    roles_list = [roles['name'] for roles in \
+                        token_info['access']['user']['roles']]
+                elif 'token' in token_info:
+                    roles_list = [roles['name'] for roles in \
+                        token_info['token']['roles']]
+                result['is_cloud_admin_role'] = has_role(self.cloud_admin_role, roles_list)
+                result['is_global_read_only_role'] = has_role(self.global_read_only_role, roles_list)
+                if obj_uuid:
+                    result['permissions'] = self._permissions.obj_perms(get_request(), obj_uuid)
+            else:
+                raise cfgm_common.exceptions.HttpError(403, " Permission denied")
         finally:
             set_context(orig_context)
-
-        # roles in result['token_info']['access']['user']['roles']
-        if token_info:
-            result = {'token_info' : token_info}
-            # Handle v2 and v3 responses
-            roles_list = []
-            if 'access' in token_info:
-                roles_list = [roles['name'] for roles in \
-                    token_info['access']['user']['roles']]
-            elif 'token' in token_info:
-                roles_list = [roles['name'] for roles in \
-                    token_info['token']['roles']]
-            result['is_cloud_admin_role'] = self.cloud_admin_role in roles_list
-            result['is_global_read_only_role'] = self.global_read_only_role in roles_list
-            if 'uuid' in get_request().query:
-                obj_uuid = get_request().query.uuid
-                result['permissions'] = self._permissions.obj_perms(get_request(), obj_uuid)
-        else:
-            raise cfgm_common.exceptions.HttpError(403, " Permission denied")
         return result
-    #end check_obj_perms_http_get
+    #end obj_perms_http_get
 
     def invalid_uuid(self, uuid):
         return self.re_uuid.match(uuid) == None
@@ -1931,10 +1832,10 @@ class VncApiServer(object):
         if not 'RW' in perms:
             raise cfgm_common.exceptions.HttpError(403, " Permission denied")
 
-        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid':obj_uuid},
-                             obj_fields=['perms2'])
+        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, obj_uuid,
+                                                obj_fields=['perms2'])
         obj_dict['perms2']['owner'] = owner
-        self._db_conn.dbe_update(obj_type, {'uuid': obj_uuid}, obj_dict)
+        self._db_conn.dbe_update(obj_type, obj_uuid, obj_dict)
 
         msg = "chown: %s owner set to %s" % (obj_uuid, owner)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
@@ -1970,7 +1871,7 @@ class VncApiServer(object):
         owner_access  = request_params.get('owner_access')
         global_access = request_params.get('global_access')
 
-        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid':obj_uuid},
+        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, obj_uuid,
                              obj_fields=['perms2', 'is_shared'])
         obj_perms = obj_dict['perms2']
         old_perms = '%s/%d %d %s' % (obj_perms['owner'],
@@ -2012,12 +1913,12 @@ class VncApiServer(object):
             obj_perms['owner_access'], obj_perms['global_access'],
             ['%s:%d' % (item['tenant'], item['tenant_access']) for item in obj_perms['share']])
 
-        self._db_conn.dbe_update(obj_type, {'uuid': obj_uuid}, obj_dict)
+        self._db_conn.dbe_update(obj_type, obj_uuid, obj_dict)
         msg = "chmod: %s perms old=%s, new=%s" % (obj_uuid, old_perms, new_perms)
         self.config_log(msg, level=SandeshLevel.SYS_NOTICE)
 
         return {}
-    #end obj_chmod_http_post
+    # end obj_chmod_http_post
 
     def prop_collection_http_get(self):
         if 'uuid' not in get_request().query:
@@ -2157,8 +2058,7 @@ class VncApiServer(object):
         # Validations over. Invoke type specific hook and extension manager
         try:
             fq_name = self._db_conn.uuid_to_fq_name(obj_uuid)
-            (read_ok, read_result) = self._db_conn.dbe_read(
-                                         obj_type, {'uuid':obj_uuid})
+            (read_ok, read_result) = self._db_conn.dbe_read(obj_type, obj_uuid)
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
                 404, 'Object Not Found: '+obj_uuid)
@@ -2296,7 +2196,7 @@ class VncApiServer(object):
         if operation == 'ADD':
             try:
                 (read_ok, read_result) = self._db_conn.dbe_read(
-                    ref_obj_type, {'uuid': ref_uuid}, obj_fields=['fq_name'])
+                    ref_obj_type, ref_uuid, obj_fields=['fq_name'])
             except NoIdError:
                 raise cfgm_common.exceptions.HttpError(
                     404, 'Object Not Found: ' + ref_uuid)
@@ -2307,7 +2207,7 @@ class VncApiServer(object):
         # To invoke type specific hook and extension manager
         try:
             (read_ok, read_result) = self._db_conn.dbe_read(
-                                         obj_type, get_request().json)
+                                         obj_type, get_request().json['uuid'])
         except NoIdError:
             raise cfgm_common.exceptions.HttpError(
                 404, 'Object Not Found: '+obj_uuid)
@@ -2486,20 +2386,23 @@ class VncApiServer(object):
         return {'fq_name': fq_name, 'type': res_type}
     # end id_to_fq_name_http_post
 
-    def ifmap_to_id_http_post(self):
-        self._post_common(get_request(), None, None)
-        uuid = self._db_conn.ifmap_id_to_uuid(get_request().json['ifmap_id'])
-        return {'uuid': uuid}
-    # end ifmap_to_id_http_post
-
     # Enables a user-agent to store and retrieve key-val pair
     # TODO this should be done only for special/quantum plugin
     def useragent_kv_http_post(self):
         self._post_common(get_request(), None, None)
 
-        oper = get_request().json['operation']
-        key = get_request().json['key']
-        val = get_request().json.get('value', '')
+        request_params = get_request().json
+        oper = request_params.get('operation')
+        if oper is None:
+            err_msg = ("Error: Key/value store API needs 'operation' "
+                       "parameter")
+            raise cfgm_common.exceptions.HttpError(400, err_msg)
+        if 'key' not in request_params:
+            err_msg = ("Error: Key/value store API needs 'key' parameter")
+            raise cfgm_common.exceptions.HttpError(400, err_msg)
+        key = request_params.get('key')
+        val = request_params.get('value', '')
+
 
         # TODO move values to common
         if oper == 'STORE':
@@ -2622,11 +2525,7 @@ class VncApiServer(object):
     # Private Methods
     def _parse_args(self, args_str):
         '''
-        Eg. python vnc_cfg_api_server.py --ifmap_server_ip 192.168.1.17
-                                         --ifmap_server_port 8443
-                                         --ifmap_username test
-                                         --ifmap_password test
-                                         --cassandra_server_list
+        Eg. python vnc_cfg_api_server.py --cassandra_server_list
                                              10.1.2.3:9160 10.1.2.4:9160
                                          --redis_server_ip 127.0.0.1
                                          --redis_server_port 6382
@@ -2645,20 +2544,14 @@ class VncApiServer(object):
                                          --trace_file /var/log/contrail/vnc_openstack.err
                                          --use_syslog
                                          --syslog_facility LOG_USER
-                                         --disc_server_ip 127.0.0.1
-                                         --disc_server_port 5998
                                          --worker_id 1
                                          --rabbit_max_pending_updates 4096
                                          --rabbit_health_check_interval 120.0
                                          --cluster_id <testbed-name>
                                          [--auth keystone]
                                          [--default_encoding ascii ]
-                                         --ifmap_health_check_interval 60
                                          --object_cache_size 10000
                                          --object_cache_exclude_types ''
-                                         --ifmap_listen_ip 0.0.0.0
-                                         --ifmap_listen_port 8443
-                                         --ifmap_credentials control:secret
         '''
         self._args, _ = utils.parse_args(args_str)
     # end _parse_args
@@ -2718,10 +2611,6 @@ class VncApiServer(object):
     # end _load_extensions
 
     def _db_connect(self, reset_config):
-        ifmap_ip = self._args.ifmap_server_ip
-        ifmap_port = self._args.ifmap_server_port
-        user = self._args.ifmap_username
-        passwd = self._args.ifmap_password
         cass_server_list = self._args.cassandra_server_list
         redis_server_ip = self._args.redis_server_ip
         redis_server_port = self._args.redis_server_port
@@ -2760,13 +2649,10 @@ class VncApiServer(object):
                 cred = {'username': rdbms_user,'password': rdbms_password}
 
         self._db_conn = VncDbClient(
-            self, ifmap_ip, ifmap_port, user, passwd, db_server_list,
-            rabbit_servers, rabbit_port, rabbit_user, rabbit_password,
-            rabbit_vhost, rabbit_ha_mode, reset_config, zk_server,
-            self._args.cluster_id,
-            db_credential=cred,
-            db_engine=db_engine,
-            rabbit_use_ssl=self._args.rabbit_use_ssl,
+            self, db_server_list, rabbit_servers, rabbit_port, rabbit_user,
+            rabbit_password, rabbit_vhost, rabbit_ha_mode, reset_config,
+            zk_server, self._args.cluster_id, db_credential=cred,
+            db_engine=db_engine, rabbit_use_ssl=self._args.rabbit_use_ssl,
             kombu_ssl_version=self._args.kombu_ssl_version,
             kombu_ssl_keyfile= self._args.kombu_ssl_keyfile,
             kombu_ssl_certfile=self._args.kombu_ssl_certfile,
@@ -2935,10 +2821,10 @@ class VncApiServer(object):
         obj_type = 'network_ipam'
         fq_name = ['default-domain', 'default-project', 'default-network-ipam']
         obj_uuid = self._db_conn.fq_name_to_uuid(obj_type, fq_name)
-        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, {'uuid':obj_uuid},
-                              obj_fields=['perms2'])
+        (ok, obj_dict) = self._db_conn.dbe_read(obj_type, obj_uuid,
+                                                obj_fields=['perms2'])
         obj_dict['perms2']['global_access'] = PERMS_RX
-        self._db_conn.dbe_update(obj_type, {'uuid': obj_uuid}, obj_dict)
+        self._db_conn.dbe_update(obj_type, obj_uuid, obj_dict)
     # end _db_init_entries
 
     # generate default rbac group rule
@@ -3033,12 +2919,12 @@ class VncApiServer(object):
             obj_dict['id_perms'] = self._get_default_id_perms()
             obj_dict['perms2'] = self._get_default_perms2()
             (ok, result) = self._db_conn.dbe_alloc(obj_type, obj_dict)
-            obj_ids = result
+            obj_id = result
             # For virtual networks, allocate an ID
             if obj_type == 'virtual_network':
                 vn_id = self.alloc_vn_id(s_obj.get_fq_name_str())
                 obj_dict['virtual_network_network_id'] = vn_id
-            self._db_conn.dbe_create(obj_type, obj_ids, obj_dict)
+            self._db_conn.dbe_create(obj_type, obj_id, obj_dict)
             self.create_default_children(obj_type, s_obj)
 
         return s_obj
@@ -3050,9 +2936,15 @@ class VncApiServer(object):
                          req_fields=None, include_shared=False,
                          exclude_hrefs=False):
         resource_type, r_class = self._validate_resource_type(obj_type)
+        is_admin = self.is_admin_request()
+        if is_admin:
+            field_names = req_fields
+        else:
+            field_names = [u'id_perms'] + (req_fields or [])
+
         (ok, result) = self._db_conn.dbe_list(obj_type,
                              parent_uuids, back_ref_uuids, obj_uuids, is_count,
-                             filters, is_detail=is_detail, field_names=req_fields,
+                             filters, is_detail=is_detail, field_names=field_names,
                              include_shared=include_shared)
         if not ok:
             self.config_object_error(None, None, '%ss' %(obj_type),
@@ -3063,12 +2955,9 @@ class VncApiServer(object):
         if is_count:
             return {'%ss' %(resource_type): {'count': result}}
 
-        allowed_fields = ['uuid', 'href', 'fq_name']
-        if req_fields:
-            allowed_fields.extend(req_fields)
-
+        allowed_fields = ['uuid', 'href', 'fq_name'] + (req_fields or [])
         obj_dicts = []
-        if self.is_admin_request():
+        if is_admin:
             for obj_result in result:
                 if not exclude_hrefs:
                     obj_result['href'] = self.generate_url(
@@ -3314,7 +3203,7 @@ class VncApiServer(object):
 
     # parent_type needed for perms check. None for derived objects (eg.
     # routing-instance)
-    def _http_delete_common(self, request, obj_type, uuid, parent_type):
+    def _http_delete_common(self, request, obj_type, uuid, parent_uuid):
         # If not connected to zookeeper do not allow operations that
         # causes the state change
         if not self._db_conn._zk_db.is_connected():
@@ -3339,22 +3228,15 @@ class VncApiServer(object):
         log.send(sandesh=self._sandesh)
 
         # TODO check api + resource perms etc.
-        if not self.is_multi_tenancy_set() or not parent_type:
+        if not self.is_multi_tenancy_set() or not parent_uuid:
             return (True, '')
 
         """
         Validate parent allows write access. Implicitly trust
         parent info in the object since coming from our DB.
         """
-        parent_fq_name = fq_name[:-1]
-        try:
-            parent_uuid = self._db_conn.fq_name_to_uuid(
-                parent_type, parent_fq_name)
-        except NoIdError:
-            # parent uuid could be null for derived resources such as
-            # routing-instance
-            return (True, '')
-        return self._permissions.check_perms_delete(request, obj_type, uuid, parent_uuid)
+        return self._permissions.check_perms_delete(request, obj_type, uuid,
+                                                    parent_uuid)
     # end _http_delete_common
 
     def _http_post_validate(self, obj_type=None, obj_dict=None):
@@ -3518,7 +3400,7 @@ class VncApiServer(object):
         # expected format {"subnet_list" : ["2.1.1.0/24", "1.1.1.0/24"]
         req_dict = get_request().json
         try:
-            (ok, result) = self._db_conn.dbe_read('virtual_network', {'uuid': id})
+            (ok, result) = self._db_conn.dbe_read('virtual_network', id)
         except NoIdError as e:
             raise cfgm_common.exceptions.HttpError(404, str(e))
         except Exception as e:
@@ -3620,61 +3502,6 @@ class VncApiServer(object):
             pass
         return k_v
 
-    def publish_self_to_discovery(self):
-        # publish API server
-        data = {
-            'ip-address': self._args.ifmap_server_ip,
-            'port': self._args.listen_port,
-        }
-        if self._disc:
-            self.api_server_task = self._disc.publish(
-                API_SERVER_DISCOVERY_SERVICE_NAME, data)
-
-    def publish_ifmap_to_discovery(self, state = 'up', msg = ''):
-        # publish ifmap server
-        if (self._args.ifmap_listen_ip is not None and
-                self._args.ifmap_listen_port is not None):
-            data = {
-                'ip-address': self._args.ifmap_listen_ip,
-                'port': self._args.ifmap_listen_port,
-            }
-        else:
-            data = {
-                'ip-address': self._args.ifmap_server_ip,
-                'port': self._args.ifmap_server_port,
-            }
-        if self._disc:
-            self.ifmap_task = self._disc.publish(
-                                  IFMAP_SERVER_DISCOVERY_SERVICE_NAME,
-                                  data, state, msg)
-    # end publish_ifmap_to_discovery
-
-    def un_publish_self_to_discovery(self):
-        # un publish api server
-        data = {
-            'ip-address': self._args.ifmap_server_ip,
-            'port': self._args.listen_port,
-        }
-        if self._disc:
-            self._disc.un_publish(API_SERVER_DISCOVERY_SERVICE_NAME, data)
-
-    def un_publish_ifmap_to_discovery(self):
-        # un publish ifmap server
-        if (self._args.ifmap_listen_ip is not None and
-                self._args.ifmap_listen_port is not None):
-            data = {
-                'ip-address': self._args.ifmap_listen_ip,
-                'port': self._args.ifmap_listen_port,
-            }
-        else:
-            data = {
-                'ip-address': self._args.ifmap_server_ip,
-                'port': self._args.ifmap_server_port,
-            }
-        if self._disc:
-            self._disc.un_publish(IFMAP_SERVER_DISCOVERY_SERVICE_NAME, data)
-    # end un_publish_ifmap_to_discovery
-
 # end class VncApiServer
 
 def main(args_str=None, server=None):
@@ -3683,12 +3510,6 @@ def main(args_str=None, server=None):
     pipe_start_app = vnc_api_server.get_pipe_start_app()
     server_ip = vnc_api_server.get_listen_ip()
     server_port = vnc_api_server.get_server_port()
-
-    # Advertise services
-    if (vnc_api_server._args.disc_server_ip and
-            vnc_api_server._args.disc_server_port and
-            vnc_api_server.get_worker_id() == 0):
-        vnc_api_server.publish_self_to_discovery()
 
     """ @sigchld
     Disable handling of SIG_CHLD for now as every keystone request to validate

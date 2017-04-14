@@ -65,7 +65,6 @@ env.Append(LIBPATH = MapBuildDir([
     'base',
     'bgp',
     'db',
-    'discovery/client',
     'dns/bind',
     'http/client',
     'ifmap',
@@ -112,7 +111,6 @@ env.Prepend(LIBS = [
     'xmpp_enet',
     'xmpp_unicast',
     'xml2',
-    'ds',
     'xml',
     'pugixml',
     'curl',
@@ -356,13 +354,14 @@ AgentCommonDocFiles += AgentEnv.SandeshGenDoc('oper/multicast.sandesh')
 AgentCommonDocFiles += AgentEnv.SandeshGenDoc('oper/agent.sandesh')
 AgentCommonDocFiles += AgentEnv.SandeshGenDoc('services/services.sandesh')
 AgentCommonDocFiles += AgentEnv.SandeshGenDoc('pkt/pkt.sandesh')
+AgentCommonDocFiles += AgentEnv.SandeshGenDoc('mac_learning/mac_learning.sandesh')
+AgentCommonDocFiles += AgentEnv.SandeshGenDoc('oper/agent_profile.sandesh')
 AgentCommonDocFiles += AgentEnv['BASE_DOC_FILES']
 AgentCommonDocFiles += AgentEnv['IO_DOC_FILES']
 AgentCommonDocFiles += AgentEnv['DB_DOC_FILES']
 AgentCommonDocFiles += AgentEnv['IFMAP_CLIENT_DOC_FILES']
 AgentCommonDocFiles += AgentEnv['XMPP_DOC_FILES']
 AgentCommonDocFiles += AgentEnv['SANDESH_DOC_FILES']
-AgentCommonDocFiles += AgentEnv['DISCOVERY_CLIENT_DOC_FILES']
 AgentEnv['AGENT_COMMON_DOC_FILES'] = AgentCommonDocFiles
 
 AgentOvsDocFiles = []

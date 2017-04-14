@@ -14,7 +14,6 @@ import socket
 import time
 import subprocess
 from subprocess import Popen, PIPE
-import supervisor.xmlrpc
 import xmlrpclib
 import platform
 import random
@@ -26,8 +25,14 @@ try:
 except:
     pydbus_present = False
 
+try:
+    import supervisor.xmlrpc
+    from supervisor import childutils
+    supervisor_event_listener_cls_type = childutils.EventListenerProtocol
+except:
+    supervisor_event_listener_cls_type = object
+
 from functools import partial
-from supervisor import childutils
 from nodemgr.common.process_stat import ProcessStat
 from nodemgr.common.sandesh.nodeinfo.ttypes import *
 from nodemgr.common.sandesh.nodeinfo.cpuinfo.ttypes import *
@@ -39,7 +44,6 @@ from nodemgr.common.cpuinfo import MemCpuUsageData
 from sandesh_common.vns.constants import INSTANCE_ID_DEFAULT, \
     ServiceHttpPortMap, ModuleNames, Module2NodeType, NodeTypeNames, \
     UVENodeTypeNames
-import discoveryclient.client as client
 from buildinfo import build_info
 from pysandesh.sandesh_base import Sandesh
 from pysandesh.sandesh_logger import SandeshLogger
@@ -47,7 +51,7 @@ from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.connection_info import ConnectionState
 from nodemgr.utils import NodeMgrUtils
 
-class SupervisorEventListener(childutils.EventListenerProtocol):
+class SupervisorEventListener(supervisor_event_listener_cls_type):
     def wait(self, stdin=sys.stdin, stdout=sys.stdout):
         self.ready(stdout)
         while 1:
@@ -293,8 +297,8 @@ class EventManager(object):
     FAIL_STATUS_NTP_SYNC = 0x8
     FAIL_STATUS_DISK_SPACE_NA = 0x10
 
-    def __init__(self, type_info, rule_file, discovery_server,
-                 discovery_port, collector_addr, sandesh_instance,
+    def __init__(self, type_info, rule_file,
+                 collector_addr, sandesh_instance,
                  sandesh_config, update_process_list = False):
         self.type_info = type_info
         self.stdin = sys.stdin
@@ -311,8 +315,6 @@ class EventManager(object):
         self.fail_status_bits = 0
         self.prev_fail_status_bits = 1
         self.instance_id = INSTANCE_ID_DEFAULT
-        self.discovery_server = discovery_server
-        self.discovery_port = discovery_port
         self.collector_addr = collector_addr
         self.sandesh_instance = sandesh_instance
         self.curr_build_info = None
@@ -337,19 +339,18 @@ class EventManager(object):
             self.process_info_manager = SupervisorProcessInfoManager(
                 self.stdin, self.stdout, self.type_info._supervisor_serverurl,
                 event_handlers, update_process_list)
-        _disc = self.get_discovery_client()
+        ConnectionState.init(self.sandesh_instance, socket.gethostname(),
+            self.type_info._module_name, self.instance_id,
+            staticmethod(ConnectionState.get_process_state_cb),
+            NodeStatusUVE, NodeStatus, self.type_info._object_table)
         self.sandesh_instance.init_generator(
             self.type_info._module_name, socket.gethostname(),
             self.type_info._node_type_name, self.instance_id,
             self.collector_addr, self.type_info._module_name,
             ServiceHttpPortMap[self.type_info._module_name],
             ['nodemgr.common.sandesh'] + self.type_info._sandesh_packages,
-            _disc, config = sandesh_config)
+            config = sandesh_config)
         self.sandesh_instance.set_logging_params(enable_local_log=True)
-        ConnectionState.init(self.sandesh_instance, socket.gethostname(),
-            self.type_info._module_name, self.instance_id,
-            staticmethod(ConnectionState.get_process_state_cb),
-            NodeStatusUVE, NodeStatus, self.type_info._object_table)
         self.add_current_process()
         self.send_init_info()
         self.third_party_process_dict = self.type_info._third_party_processes
@@ -431,11 +432,6 @@ class EventManager(object):
         group_val = self.process_state_db[added_process].group
         self.send_process_state_db([group_val])
     # end add_process_handler
-
-    def get_discovery_client(self):
-        _disc = client.DiscoveryClient(
-            self.discovery_server, self.discovery_port, self.type_info._module_name)
-        return _disc
 
     def check_ntp_status(self):
         ntp_status_cmd = 'ntpq -n -c pe | grep "^*"'

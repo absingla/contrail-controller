@@ -10,6 +10,9 @@ import eventlet
 import json
 import requests
 
+from cStringIO import StringIO
+from cfgm_common.utils import cgitb_hook
+
 class KubeMonitor(object):
 
     def __init__(self, args=None, logger=None, q=None, db=None,
@@ -126,8 +129,14 @@ class KubeMonitor(object):
                     event = {'object':resp.json(), 'type':'ADDED'}
                     self.process_event(event)
                 except ValueError:
-                    self.logger.error("Invalid data read from kube api server :"
+                    self.logger.error("Invalid data read from kube api server:"
                                       " %s" % (entry))
+                except Exception as e:
+                    string_buf = StringIO()
+                    cgitb_hook(file=string_buf, format="text")
+                    err_msg = string_buf.getvalue()
+                    self.logger.error("%s - %s" %(self.name, err_msg))
+
                 resp.close()
 
     def register_monitor(self):
@@ -194,7 +203,7 @@ class KubeMonitor(object):
             url = "%s/namespaces/%s/%s/%s" % (base_url, namespace,
                                               resource_type, resource_name)
 
-        headers = {'Accept': 'application/json/', \
+        headers = {'Accept': 'application/json', \
                    'Content-Type': 'application/strategic-merge-patch+json'}
         headers.update(self.headers)
 
@@ -230,13 +239,18 @@ class KubeMonitor(object):
         except StopIteration:
             return
         except requests.exceptions.ChunkedEncodingError as e:
-            self.logger.error("%s - %s" % (self.name, e))
+            self.logger.error("%s - %s" %(self.name, e))
             return
 
         try:
             self.process_event(json.loads(line))
         except ValueError:
             self.logger.error("Invalid JSON data from response stream:%s" % line)
+        except Exception as e:
+            string_buf = StringIO()
+            cgitb_hook(file=string_buf, format="text")
+            err_msg = string_buf.getvalue()
+            self.logger.error("%s - %s" %(self.name, err_msg))
 
     def process_event(self, event):
         """Process an event."""

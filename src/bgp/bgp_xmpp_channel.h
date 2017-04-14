@@ -121,7 +121,7 @@ public:
     void set_peer_closed(bool flag);
     bool peer_deleted() const;
     uint64_t peer_closed_at() const;
-    bool routingtable_membership_request_map_empty() const;
+    bool table_membership_request_map_empty() const;
     size_t GetMembershipRequestQueueSize() const;
 
     const XmppSession *GetSession() const;
@@ -149,7 +149,7 @@ public:
     bool MembershipResponseHandler(std::string table_name);
     Timer *eor_send_timer() const { return eor_send_timer_; }
     bool eor_sent() const { return eor_sent_; }
-    size_t membership_requests() const;
+    size_t table_membership_requests() const;
     void ClearEndOfRibState();
     PeerCloseManager *close_manager() { return close_manager_.get(); }
 
@@ -181,6 +181,16 @@ public:
     void ProcessPendingSubscriptions();
 
 protected:
+    struct InstanceMembershipRequestState {
+        InstanceMembershipRequestState(int instance_id = -1,
+            bool no_ribout = false)
+            : instance_id(instance_id), no_ribout(no_ribout) {
+        };
+
+        int instance_id;
+        bool no_ribout;
+    };
+
     XmppChannel *channel_;
 
 private:
@@ -201,13 +211,18 @@ private:
         SUBSCRIBE,
         UNSUBSCRIBE,
     };
-    struct MembershipRequestState {
-        MembershipRequestState(RequestType current, int id)
-            : current_req(current), instance_id(id), pending_req(current) {
+    struct TableMembershipRequestState {
+        TableMembershipRequestState(RequestType current, int id,
+            bool no_ribout = false)
+            : current_req(current),
+              instance_id(id),
+              pending_req(current),
+              no_ribout(no_ribout) {
         }
         RequestType current_req;
         int instance_id;
         RequestType pending_req;
+        bool no_ribout;
     };
 
     // Map of routing instances to which this BgpXmppChannel is subscribed.
@@ -217,6 +232,8 @@ private:
             GR_STALE = 1 << 0,
             LLGR_STALE = 1 << 1
         };
+
+        SubscriptionState() : index(-1), state(NONE) { }
         SubscriptionState(const RoutingInstance::RouteTargetList &targets,
                           int index)
                 : targets(targets), index(index), state(NONE) { }
@@ -233,17 +250,20 @@ private:
         int index;
         uint32_t state;
     };
+
     typedef std::map<RoutingInstance *, SubscriptionState>
         SubscribedRoutingInstanceList;
 
-    // map of routing-instance table name to XMPP subscription request state
-    typedef std::map<std::string, MembershipRequestState>
-                                            RoutingTableMembershipRequestMap;
+    // Map of table name to subscription request state.
+    typedef std::map<std::string,
+        TableMembershipRequestState> TableMembershipRequestMap;
 
-    // map of routing-instance name to XMPP subscription request state
-    // This map maintains list of requests that are rxed for subscription
-    // before routing instance is actually created
-    typedef std::map<std::string, int> VrfMembershipRequestMap;
+    // Map of routing-instance name to subscription request state. This map
+    // maintains list of requests that are received for subscription before
+    // routing instance is created or recreated (in case the instance is in
+    // the process of being deleted).
+    typedef std::map<std::string,
+        InstanceMembershipRequestState> InstanceMembershipRequestMap;
 
     // The code assumes that multimap preserves insertion order for duplicate
     // values of same key.
@@ -254,11 +274,23 @@ private:
 
     virtual bool GetMembershipInfo(BgpTable *table,
         int *instance_id, uint64_t *subscribed_at, RequestType *req_type);
-    virtual bool GetMembershipInfo(const std::string &vrf_name,
-        int *instance_id);
     bool VerifyMembership(const std::string &vrf_name, Address::Family family,
         BgpTable **table, int *instance_id, uint64_t *subscribed_at,
         bool *subscribe_pending, bool add_change);
+
+    void AddTableMembershipState(const std::string &table_name,
+        TableMembershipRequestState tmr_state);
+    bool DeleteTableMembershipState(const std::string &table_name);
+    TableMembershipRequestState *GetTableMembershipState(
+        const std::string &table_name);
+    const TableMembershipRequestState *GetTableMembershipState(
+        const std::string &table_name) const;
+
+    void AddInstanceMembershipState(const std::string &instance,
+        InstanceMembershipRequestState imr_state);
+    bool DeleteInstanceMembershipState(const std::string &instance);
+    virtual const InstanceMembershipRequestState *GetInstanceMembershipState(
+        const std::string &instance) const;
 
     bool ProcessItem(std::string vrf_name, const pugi::xml_node &node,
                      bool add_change);
@@ -272,8 +304,13 @@ private:
                                     const XmppStanza::XmppMessageIq *iq,
                                     bool add_change);
     void AddSubscriptionState(RoutingInstance *rt_instance, int index);
+    void DeleteSubscriptionState(RoutingInstance *rt_instance);
+    SubscriptionState *GetSubscriptionState(RoutingInstance *rt_instance);
+    const SubscriptionState *GetSubscriptionState(
+        RoutingInstance *rt_instance) const;
 
-    void RegisterTable(int line, BgpTable *table, int instance_id);
+    void RegisterTable(int line, BgpTable *table,
+        const TableMembershipRequestState *tmr_state);
     void UnregisterTable(int line, BgpTable *table);
     void MembershipRequestCallback(BgpTable *table);
     void DequeueRequest(const std::string &table_name, DBRequest *request);
@@ -283,11 +320,11 @@ private:
     void FlushDeferQ(std::string vrf_name);
     void FlushDeferQ(std::string vrf_name, std::string table_name);
     void ProcessDeferredSubscribeRequest(RoutingInstance *rt_instance,
-                                         int instance_id);
+        const InstanceMembershipRequestState &imr_state);
     void ClearStaledSubscription(RoutingInstance *rt_instance,
                                  SubscriptionState *sub_state);
     bool ProcessMembershipResponse(std::string table_name,
-             RoutingTableMembershipRequestMap::iterator loc);
+                                   TableMembershipRequestState *tmr_state);
     bool EndOfRibReceiveTimerExpired();
     void EndOfRibTimerErrorHandler(std::string error_name,
                                    std::string error_message);
@@ -305,8 +342,8 @@ private:
     // DB Requests pending membership request response.
     DeferQ defer_q_;
 
-    RoutingTableMembershipRequestMap routingtable_membership_request_map_;
-    VrfMembershipRequestMap vrf_membership_request_map_;
+    TableMembershipRequestMap table_membership_request_map_;
+    InstanceMembershipRequestMap instance_membership_request_map_;
     BgpXmppChannelManager *manager_;
     bool delete_in_progress_;
     bool deleted_;
@@ -372,6 +409,7 @@ public:
     void ASNUpdateCallback(as_t old_asn, as_t old_local_asn);
     void IdentifierUpdateCallback(Ip4Address old_identifier);
     void RoutingInstanceCallback(std::string vrf_name, int op);
+    void DSCPUpdateCallback(uint8_t value);
 
     uint32_t count() const {
         tbb::mutex::scoped_lock lock(mutex_);
@@ -416,6 +454,7 @@ private:
     int admin_down_listener_id_;
     int asn_listener_id_;
     int identifier_listener_id_;
+    int dscp_listener_id_;
     tbb::atomic<int32_t> deleting_count_;
     // Generation number for subscription tracking
     tbb::atomic<uint64_t> subscription_gen_id_;

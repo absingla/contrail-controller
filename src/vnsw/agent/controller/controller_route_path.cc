@@ -60,7 +60,8 @@ bool ControllerEcmpRoute::AddChangePathExtended(Agent *agent, AgentPath *path,
                                                  path_preference_,
                                                  tunnel_bmap_,
                                                  ecmp_load_balance_,
-                                                 nh_req_, agent, path);
+                                                 nh_req_, agent, path, "",
+                                                 false);
 }
 
 ControllerVmRoute *ControllerVmRoute::MakeControllerVmRoute(

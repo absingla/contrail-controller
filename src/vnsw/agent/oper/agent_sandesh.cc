@@ -368,27 +368,28 @@ bool AgentMplsSandesh::Filter(const DBEntryBase *entry) {
     const MplsLabel *mplsl = dynamic_cast<const MplsLabel *>(entry);
     assert(mplsl);
 
-    if (type_.empty() == false) {
-        MplsLabel::Type mpls_type = mplsl->GetType();
-        if (type_ == "invalid" &&
-             (mpls_type != MplsLabel::INVALID))
-           return false;
-        if (type_ == "interface" &&
-             (mpls_type != MplsLabel::VPORT_NH))
-           return false;
-        if (type_ == "multicast" &&
-             (mpls_type != MplsLabel::MCAST_NH))
-           return false;
-
-    }
-
     if (label_.empty() == false) {
         if (((mplsl->label()) == boost::lexical_cast<uint32_t>(label_)) == false)
            return false;
+        NextHop::Type nh_type = mplsl->nexthop()->GetType();
+        if (type_ == "invalid" &&
+             (nh_type != NextHop::INVALID))
+           return false;
+        if (type_ == "interface" &&
+             (nh_type != NextHop::INTERFACE))
+           return false;
+        if (type_ == "vlan" &&
+             (nh_type != NextHop::VLAN))
+           return false;
+        if (type_ == "vrf" &&
+             (nh_type != NextHop::VRF))
+           return false;
+        if (type_ == "composite" &&
+             (nh_type != NextHop::COMPOSITE))
+           return false;
     }
     return true;
-
-    }
+}
 
 bool AgentMplsSandesh::FilterToArgs(AgentSandeshArguments *args) {
     args->Add("type", type_);
@@ -1222,7 +1223,7 @@ bool QosQueueSandesh::FilterToArgs(AgentSandeshArguments *args) {
 BridgeDomainSandesh::BridgeDomainSandesh(const std::string &context,
                                          const std::string &u,
                                          const std::string &name) :
-    AgentSandesh(context, ""), name_(name) {
+    AgentSandesh(context, ""), uuid_str_(u), name_(name) {
     boost::system::error_code ec;
     uuid_ = StringToUuid(u);
 }

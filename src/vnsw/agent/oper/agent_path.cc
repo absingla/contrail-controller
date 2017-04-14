@@ -105,15 +105,13 @@ bool AgentPath::ChangeNH(Agent *agent, NextHop *nh) {
 
     if (peer_ && (peer_->GetType() == Peer::MULTICAST_PEER) &&
         (label_ != MplsTable::kInvalidLabel)) {
-        MplsLabelKey key(MplsLabel::MCAST_NH, label_);
+        MplsLabelKey key(label_);
         MplsLabel *mpls = static_cast<MplsLabel *>(agent->mpls_table()->
                                                    FindActiveEntry(&key));
-        if (agent->mpls_table()->ChangeNH(mpls, nh))
+        if (mpls->ChangeNH(nh))
             ret = true;
-        if (mpls) {
-            //Send notify of change
-            mpls->get_table_partition()->Notify(mpls);
-        }
+        //Send notify of change
+        mpls->get_table_partition()->Notify(mpls);
     }
 
     return ret;
@@ -477,6 +475,8 @@ bool EvpnDerivedPathData::AddChangePathExtended(Agent *agent, AgentPath *path,
         ret = true;
     }
 
+    path->set_unresolved(false);
+
     return ret;
 }
 
@@ -826,6 +826,7 @@ bool PBBRoute::AddChangePathExtended(Agent *agent, AgentPath *path,
         ret = true;
     }
 
+    path->set_unresolved(false);
     return ret;
 }
 
@@ -1295,8 +1296,18 @@ void AgentPath::SetSandeshData(PathSandeshData &pdata) const {
     pdata.set_communities(communities());
     pdata.set_vxlan_id(vxlan_id());
     pdata.set_label(label());
-    pdata.set_active_tunnel_type(
+    if (nh != NULL && nh->GetType() == NextHop::PBB) {
+        const PBBNH *pbb_nh = static_cast<const PBBNH *>(nh);
+        if (pbb_nh->child_nh() != NULL) {
+            const TunnelNH *tun_nh = dynamic_cast<const TunnelNH *>(pbb_nh->child_nh());
+            if (tun_nh != NULL) {
+                pdata.set_active_tunnel_type((tun_nh->GetTunnelType()).ToString());
+            }
+        }
+    } else {
+        pdata.set_active_tunnel_type(
             TunnelType(tunnel_type()).ToString());
+    }
     pdata.set_supported_tunnel_type(
             TunnelType::GetString(tunnel_bmap()));
     PathPreferenceSandeshData path_preference_data;

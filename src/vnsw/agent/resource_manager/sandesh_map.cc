@@ -3,7 +3,13 @@
  */
 
 #include <fstream>
+#include <dirent.h>
+#include <cctype>
+#include <stdlib.h>
 #include <cmn/agent.h>
+#include <boost/filesystem.hpp>
+#include <boost/functional/hash.hpp>
+#include <boost/algorithm/string.hpp>
 #include "init/agent_param.h"
 #include <base/timer.h>
 #include <sandesh/sandesh_types.h>
@@ -13,17 +19,21 @@
 #include "resource_manager/sandesh_map.h"
 #include "resource_manager/resource_manager.h"
 #include "resource_manager/mpls_index.h"
-#include <boost/filesystem.hpp>
+#include <oper/nexthop.h>
+
 BackUpResourceTable::BackUpResourceTable(ResourceBackupManager *manager,
-                                         const std::string &name) :
+                                         const std::string &name,
+                                         const std::string &file_name) :
     backup_manager_(manager), agent_(manager->agent()), name_(name),
     last_modified_time_(UTCTimestampUsec()) {
     backup_dir_ = agent_->params()->restart_backup_dir();
     backup_idle_timeout_ = agent_->params()
         ->restart_backup_idle_timeout();
+    file_name_str_ = backup_dir_ + "/" + file_name;
+    file_name_prefix_ = file_name + "-";
     boost::filesystem::path dir(backup_dir_.c_str());
-    if (!boost::filesystem::exists(dir))
-        boost::filesystem::create_directory(dir);
+    if (!boost::filesystem::exists(backup_dir_))
+        boost::filesystem::create_directory(backup_dir_);
     timer_ = TimerManager::CreateTimer(*(agent_->event_manager()->io_service()),
                                        name,
                                        agent_->task_scheduler()->
@@ -53,7 +63,6 @@ void BackUpResourceTable::StartTimer() {
                   boost::bind(&BackUpResourceTable::TimerExpiry, this));
 }
 
-
 // Don't Update the file if there is any activity seen with in
 // backup_idle_timeout_ and start the fallback count so that
 // after 6th itteration file can be updated.
@@ -80,17 +89,12 @@ void BackUpResourceTable::EnqueueRestore(ResourceManager::KeyPtr key,
     backup_manager()->resource_manager()->EnqueueRestore(key, data);
 }
 
-const std::string
-BackUpResourceTable::FilePath(const std::string &file_name) {
-    std::stringstream file_stream;
-    file_stream << backup_dir_ << file_name;
-    return file_stream.str();
-}
-
+// Write the content to file temprory file and rename the file
 static const std::string TempFilePath(const std::string &file_name) {
     std::stringstream temp_file_stream;
     temp_file_stream << file_name << ".tmp";
     std::ofstream output;
+    // Trunctate the file as it is a fresh write for the modified Map
     output.open(temp_file_stream.str().c_str(),
             std::ofstream::binary | std::ofstream::trunc);
     if (!output.good()) {
@@ -103,6 +107,7 @@ static const std::string TempFilePath(const std::string &file_name) {
     return temp_file_stream.str();
 }
 
+// Rename the Temp file
 static bool RenameFile(const std::string &file_tmp_name,
                      const std::string &file_name) {
     boost::system::error_code ec;
@@ -115,16 +120,36 @@ static bool RenameFile(const std::string &file_tmp_name,
     }
     return true;
 }
+
+// Calulate the Hash value for the stored file
+// This hash sum will be validated while reading the content.
+bool BackUpResourceTable::CalculateHashSum(const std::string &file_name,
+                                           uint32_t *hashsum) {
+    std::auto_ptr<uint8_t> buffer;
+    uint32_t size = ResourceBackupManager::ReadResourceDataFromFile(file_name,
+                                                                    &(buffer));
+    if (size && buffer.get()) {
+        *hashsum = (uint32_t)boost::hash_range(buffer.get(),
+                                               buffer.get()+size);
+        return true;
+    }
+    return false;
+}
+
 // Type T1 is Final output sandesh structure writes in to file
 // Type T2 index map for the specific table
+// Write the Map to file
+// Calculate the hashsum and append that to file name
+// so that validated while reading file
 template <typename T1, typename T2>
-static bool WriteMapToFile(T1* sandesh_data, const T2& index_map,
-                           const std::string &file_name) {
+bool BackUpResourceTable::WriteMapToFile(T1* sandesh_data,
+                                         const T2& index_map) {
     uint32_t write_buff_size = 0;
     int error = 0;
 
-    const std::string temp_file = TempFilePath(file_name);
+    const std::string temp_file = TempFilePath(file_name_str());
     if (temp_file.empty()) {
+        LOG(ERROR, "Temp file is not created");
         return false;
     }
 
@@ -136,13 +161,114 @@ static bool WriteMapToFile(T1* sandesh_data, const T2& index_map,
         return false;
     }
 
-    return RenameFile(temp_file, file_name);
+    uint32_t hashsum;
+    if (CalculateHashSum(temp_file, &hashsum)) {
+        // remove the file  with existing hashsum extention.
+        std::string file = FindFile(backup_dir(), file_name_prefix());
+        if (!file.empty()) {
+            std::string file_path = backup_dir_ + "/" + file;
+            std::remove(file_path.c_str());
+        }
+        // rename the tmp file to new file by appending hashsum
+        std::stringstream file_path;
+        file_path << file_name_str() << "-" << hashsum;
+        return RenameFile(temp_file, file_path.str());
+    }
+
+    return false;
+}
+
+// TODO final file format needs to be defined along with 3rd backup file.
+// function needs to be enhanced with 3rd backup file.
+// Find the file with the prefix.
+const std::string
+BackUpResourceTable::FindFile(const std::string &root,
+                              const std::string & file_prefix) {
+    DIR *dir_path;
+    struct dirent *dir;
+    if ((dir_path = opendir(root.c_str())) == NULL) {
+        return std::string();
+    }
+    while ((dir = readdir(dir_path)) != NULL) {
+        std::string file_name = dir->d_name;
+        // Match with the file prefix name if is not there return empty string
+        // Check Start of the file_name matches with prefix name.
+        if (!file_name.find(file_prefix)) {
+            // check for file format filename-hashvalue(digits)
+            // example name contrail_interface_resource-12345678
+            std::string tmpstr(file_name.c_str());
+            std::vector<string> tokens;
+            boost::split(tokens, tmpstr, boost::is_any_of("-"));
+            // split the string check after file prefix hashsum is number.
+            std::string token;
+            if (tokens.size()) {
+                // TODO file format changes this needs to be revisited.
+                token = tokens[tokens.size() - 1];
+            }
+
+            bool found = true;
+            for (int i =0; token[i] != '\0'; i++) {
+                if (!isdigit(token[i])) {
+                    found = false;
+                    break;
+                }
+            }
+
+            if (found) {
+                closedir(dir_path);
+                return file_name;
+            }
+        }
+    }
+    closedir(dir_path);
+    return std::string();
+}
+
+// Read Map from the file.
+// First read the file to a buffer
+// verify that hash sum matches
+template <typename T>
+void BackUpResourceTable::ReadMapFromFile(T* sandesh_data,
+                                          const std::string &root) {
+    // Find the File with prefix name
+    const std::string file_name = FindFile(root, file_name_prefix());
+    int error = 0;
+    if (file_name.empty()) {
+        LOG(DEBUG, "File name with prefix not found ");
+        return;
+    }
+    // Make the complete file path with hash value
+    std::stringstream file_path;
+    file_path << root << "/"<< file_name;
+    if (!boost::filesystem::exists( file_path.str().c_str())) {
+        LOG(DEBUG, "File path not found " << file_path.str());
+        return;
+    }
+    std::auto_ptr<uint8_t> buffer;
+    uint32_t size = ResourceBackupManager::ReadResourceDataFromFile(file_path.str(),
+                                                                    &(buffer));
+    if (buffer.get()) {
+        if (size) {
+            uint32_t hashsum = (uint32_t)boost::hash_range(buffer.get(),
+                                                           buffer.get()+size);
+            std::stringstream hash_value;
+            hash_value << hashsum;
+            // Check for hashsum present.
+            if (std::string::npos !=
+                    file_name.find(hash_value.str())) {
+                sandesh_data->ReadBinary(buffer.get(), size, &error);
+                if (error != 0) {
+                    LOG(ERROR, "Sandesh Read Binary failed ");
+                }
+            }
+        }
+    }
 }
 
 VrfMplsBackUpResourceTable::VrfMplsBackUpResourceTable
 (ResourceBackupManager *manager) :
-    BackUpResourceTable(manager, "VrfMplsBackUpResourceTable"),
-    vrf_file_name_str_(FilePath("/contrail_vrf_resource")) {
+    BackUpResourceTable(manager, "VrfMplsBackUpResourceTable",
+                        "contrail_vrf_resource") {
 }
 
 VrfMplsBackUpResourceTable::~VrfMplsBackUpResourceTable() {
@@ -150,81 +276,89 @@ VrfMplsBackUpResourceTable::~VrfMplsBackUpResourceTable() {
 
 bool VrfMplsBackUpResourceTable::WriteToFile() {
     VrfMplsResourceMapSandesh sandesh_data;
-    return WriteMapToFile<VrfMplsResourceMapSandesh, Map>
-        (&sandesh_data, map_, vrf_file_name_str_);
+    return WriteMapToFile<VrfMplsResourceMapSandesh, Map> (&sandesh_data, map_);
 }
 
 void VrfMplsBackUpResourceTable::ReadFromFile() {
-    uint32_t size = 0;
-    int error = 0;
-    uint8_t *vrf_read_buf = NULL;
-    size = backup_manager()->ReadResourceDataFromFile(vrf_file_name_str_,
-                                 &(vrf_read_buf));
-    if (vrf_read_buf) {
-        if (size) {
-            VrfMplsResourceMapSandesh map;
-            map.ReadBinary(vrf_read_buf, size, &error);
-            if (error != 0) {
-                LOG(ERROR, "Sandesh Read Binary failed ");
-                delete vrf_read_buf;
-                return;
-            }
-            map_ = map.get_index_map();
-        }
-        delete vrf_read_buf;
-    }
+    VrfMplsResourceMapSandesh sandesh_data;
+    ReadMapFromFile<VrfMplsResourceMapSandesh>(&sandesh_data,
+                                               backup_dir());
+    map_ = sandesh_data.get_index_map();
 }
 
 void VrfMplsBackUpResourceTable::RestoreResource() {
     for (MapIter it = map_.begin(); it != map_.end(); it++) {
         uint32_t index = it->first;
         VrfMplsResource sandesh_key = it->second;
-        ResourceManager::KeyPtr key(new VrfMplsResourceKey
-                                    (backup_manager()->resource_manager(),
-                                     sandesh_key.get_name()));
+        VrfNHKey *vrf_nh_key = new VrfNHKey(sandesh_key.get_name(), false,
+                                            sandesh_key.get_vxlan_nh());
+        ResourceManager::KeyPtr key(new NexthopIndexResourceKey(
+                                    backup_manager()->resource_manager(),
+                                    vrf_nh_key));
         ResourceManager::DataPtr data(new IndexResourceData
                                       (backup_manager()->resource_manager(),
                                        index));
         EnqueueRestore(key, data);
     }
+}
 
+VlanMplsBackUpResourceTable::VlanMplsBackUpResourceTable
+(ResourceBackupManager *manager) :
+    BackUpResourceTable(manager, "VlanMplsBackUpResourceTable",
+                        "contrail_vlan_resource") {
+}
+
+VlanMplsBackUpResourceTable::~VlanMplsBackUpResourceTable() {
+}
+
+bool VlanMplsBackUpResourceTable::WriteToFile() {
+    VlanMplsResourceMapSandesh sandesh_data;
+    return WriteMapToFile<VlanMplsResourceMapSandesh, Map>
+               (&sandesh_data, map_);
+}
+
+void VlanMplsBackUpResourceTable::ReadFromFile() {
+    VlanMplsResourceMapSandesh sandesh_data;
+    ReadMapFromFile<VlanMplsResourceMapSandesh>(&sandesh_data,
+                                               backup_dir());
+    map_ = sandesh_data.get_index_map();
+}
+
+void VlanMplsBackUpResourceTable::RestoreResource() {
+    for (MapIter it = map_.begin(); it != map_.end(); it++) {
+        uint32_t index = it->first;
+        VlanMplsResource sandesh_key = it->second;
+        VlanNHKey *vlan_nh_key = new VlanNHKey(
+                                         StringToUuid(sandesh_key.get_uuid()),
+                                         sandesh_key.get_tag());
+        ResourceManager::KeyPtr key(new NexthopIndexResourceKey(
+                                    backup_manager()->resource_manager(),
+                                    vlan_nh_key));
+        ResourceManager::DataPtr data(new IndexResourceData
+                                      (backup_manager()->resource_manager(),
+                                       index));
+        EnqueueRestore(key, data);
+    }
 }
 
 RouteMplsBackUpResourceTable::RouteMplsBackUpResourceTable
 (ResourceBackupManager *manager) :
-    BackUpResourceTable(manager, "RouteMplsBackUpResourceTable"),
-    route_file_name_str_(FilePath("/contrail_route_resource")){
+    BackUpResourceTable(manager, "RouteMplsBackUpResourceTable",
+                        "contrail_route_resource") {
 }
 
 RouteMplsBackUpResourceTable::~RouteMplsBackUpResourceTable() {
 }
 
-bool  RouteMplsBackUpResourceTable::WriteToFile() {
+bool RouteMplsBackUpResourceTable::WriteToFile() {
     RouteMplsResourceMapSandesh sandesh_data;
-    return WriteMapToFile<RouteMplsResourceMapSandesh, Map>
-        (&sandesh_data, map_, route_file_name_str_);
+    return WriteMapToFile<RouteMplsResourceMapSandesh, Map> (&sandesh_data, map_);
 }
 
 void RouteMplsBackUpResourceTable::ReadFromFile() {
-    uint32_t size = 0;
-    int error = 0;
-    uint8_t *route_read_buf = NULL;
-    size = backup_manager()->
-        ReadResourceDataFromFile(route_file_name_str_,
-                                 &(route_read_buf));
-    if (route_read_buf) {
-        if (size) {
-            RouteMplsResourceMapSandesh map;
-            map.ReadBinary(route_read_buf, size, &error);
-            if (error != 0) {
-                LOG(ERROR, "Sandesh Read Binary failed ");
-                delete route_read_buf;
-                return;
-            }
-            map_ = map.get_index_map();
-        }
-        delete route_read_buf;
-    }
+    RouteMplsResourceMapSandesh sandesh_data;
+    ReadMapFromFile<RouteMplsResourceMapSandesh>(&sandesh_data, backup_dir());
+    map_ = sandesh_data.get_index_map();
 }
 
 void RouteMplsBackUpResourceTable::RestoreResource() {
@@ -244,8 +378,8 @@ void RouteMplsBackUpResourceTable::RestoreResource() {
 
 InterfaceMplsBackUpResourceTable::InterfaceMplsBackUpResourceTable
 (ResourceBackupManager *manager) :
-    BackUpResourceTable(manager, "InterfaceMplsBackUpResourceTable"),
-    interface_file_name_str_(FilePath("/contrail_interface_resource")) {
+    BackUpResourceTable(manager, "InterfaceMplsBackUpResourceTable",
+                        "contrail_interface_resource") {
 }
 
 InterfaceMplsBackUpResourceTable::~InterfaceMplsBackUpResourceTable() {
@@ -254,30 +388,14 @@ InterfaceMplsBackUpResourceTable::~InterfaceMplsBackUpResourceTable() {
 bool InterfaceMplsBackUpResourceTable::WriteToFile() {
     InterfaceIndexResourceMapSandesh sandesh_data;
     return WriteMapToFile<InterfaceIndexResourceMapSandesh, Map>
-        (&sandesh_data, map_, interface_file_name_str_);
+        (&sandesh_data, map_);
 }
 
 void InterfaceMplsBackUpResourceTable::ReadFromFile() {
-    uint32_t size = 0;
-    int error = 0;
-    uint8_t *interface_read_buf = NULL;
-    size = backup_manager()->
-        ReadResourceDataFromFile(interface_file_name_str_,
-                                 &(interface_read_buf));
-    if (interface_read_buf) {
-        if (size) {
-            InterfaceIndexResourceMapSandesh map;
-            map.ReadBinary(interface_read_buf, size, &error);
-            if (error != 0) {
-                LOG(ERROR, "Sandesh Read Binary failed ");
-                delete interface_read_buf;
-                return;
-            }
-            map_ = map.get_index_map();
-        }
-        delete interface_read_buf;
-    }
-
+    InterfaceIndexResourceMapSandesh sandesh_data;
+    ReadMapFromFile<InterfaceIndexResourceMapSandesh>
+        (&sandesh_data, backup_dir());
+    map_ = sandesh_data.get_index_map();
 }
 
 void InterfaceMplsBackUpResourceTable::RestoreResource() {
@@ -285,12 +403,23 @@ void InterfaceMplsBackUpResourceTable::RestoreResource() {
         uint32_t index = it->first;
         InterfaceIndexResource sandesh_key = it->second;
         MacAddress mac = MacAddress::FromString(sandesh_key.get_mac());
-        ResourceManager::KeyPtr key(new InterfaceIndexResourceKey
-                                    (backup_manager()->resource_manager(),
-                                     StringToUuid(sandesh_key.get_uuid()),
-                                     mac, sandesh_key.get_policy(),
-                                     sandesh_key.get_type(),
-                                     sandesh_key.get_vlan_tag()));
+        std::string type = sandesh_key.get_type();
+        InterfaceNHKey *itf_nh_key = NULL;
+        InterfaceKey *itf_key = NULL;
+        if (type == "vmi") {
+            //Vm interface
+            itf_key = new VmInterfaceKey(AgentKey::ADD_DEL_CHANGE,
+                                         StringToUuid(sandesh_key.get_uuid()),
+                                         sandesh_key.get_name());
+        } else {
+            //Inet interface
+            itf_key = new InetInterfaceKey(sandesh_key.get_name());
+        }
+        itf_nh_key = new InterfaceNHKey(itf_key, sandesh_key.get_policy(),
+                                        sandesh_key.get_flags(), mac);
+        ResourceManager::KeyPtr key(new NexthopIndexResourceKey(
+                                    backup_manager()->resource_manager(),
+                                    itf_nh_key));
         ResourceManager::DataPtr data(new IndexResourceData
                                       (backup_manager()->resource_manager(),
                                        index));
@@ -299,9 +428,9 @@ void InterfaceMplsBackUpResourceTable::RestoreResource() {
 }
 
 ResourceSandeshMaps::ResourceSandeshMaps(ResourceBackupManager *manager) :
-    backup_manager_(manager), agent_(manager->agent()), 
+    backup_manager_(manager), agent_(manager->agent()),
     interface_mpls_index_table_(manager), vrf_mpls_index_table_(manager),
-    route_mpls_index_table_(manager) {
+    vlan_mpls_index_table_(manager), route_mpls_index_table_(manager) {
 }
 
 ResourceSandeshMaps::~ResourceSandeshMaps() {
@@ -310,6 +439,7 @@ ResourceSandeshMaps::~ResourceSandeshMaps() {
 void ResourceSandeshMaps::ReadFromFile() {
     interface_mpls_index_table_.ReadFromFile();
     vrf_mpls_index_table_.ReadFromFile();
+    vlan_mpls_index_table_.ReadFromFile();
     route_mpls_index_table_.ReadFromFile();
 }
 
@@ -323,6 +453,7 @@ void ResourceSandeshMaps::EndOfBackup() {
 void ResourceSandeshMaps::RestoreResource() {
     interface_mpls_index_table_.RestoreResource();
     vrf_mpls_index_table_.RestoreResource();
+    vlan_mpls_index_table_.RestoreResource();
     route_mpls_index_table_.RestoreResource();
     EndOfBackup();
 }
@@ -332,6 +463,10 @@ void InterfaceIndexResourceMapSandesh::Process(SandeshContext*) {
 }
 
 void VrfMplsResourceMapSandesh::Process(SandeshContext*) {
+
+}
+
+void VlanMplsResourceMapSandesh::Process(SandeshContext*) {
 
 }
 
@@ -355,6 +490,15 @@ void ResourceSandeshMaps::AddVrfMplsResourceEntry(uint32_t index,
 
 void ResourceSandeshMaps::DeleteVrfMplsResourceEntry(uint32_t index) {
     vrf_mpls_index_table_.map().erase(index);
+}
+
+void ResourceSandeshMaps::AddVlanMplsResourceEntry(uint32_t index,
+                                                   VlanMplsResource data) {
+    vlan_mpls_index_table_.map().insert(VlanMplsResourcePair(index, data));
+}
+
+void ResourceSandeshMaps::DeleteVlanMplsResourceEntry(uint32_t index) {
+    vlan_mpls_index_table_.map().erase(index);
 }
 
 void ResourceSandeshMaps::AddRouteMplsResourceEntry(uint32_t index,

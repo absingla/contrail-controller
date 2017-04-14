@@ -20,6 +20,7 @@ import requests
 import ConfigParser
 import signal
 import random
+import time
 import hashlib
 import argparse
 
@@ -32,8 +33,6 @@ from pysandesh.sandesh_logger import *
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from cfgm_common.uve.virtual_network.ttypes import *
 from sandesh_common.vns.ttypes import Module
-from sandesh_common.vns.constants import ModuleNames
-import discoveryclient.client as client
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
@@ -50,7 +49,7 @@ _zookeeper_client = None
 
 class SchemaTransformer(object):
 
-    _REACTION_MAP = {
+    REACTION_MAP = {
         'routing_instance': {
             'self': ['virtual_network'],
         },
@@ -60,7 +59,8 @@ class SchemaTransformer(object):
             'virtual_network': ['virtual_machine', 'port_tuple',
                                 'bgp_as_a_service'],
             'logical_router': ['virtual_network'],
-            'instance_ip': ['virtual_machine', 'port_tuple', 'bgp_as_a_service', 'virtual_network'],
+            'instance_ip': ['virtual_machine', 'port_tuple',
+                            'bgp_as_a_service', 'virtual_network'],
             'floating_ip': ['virtual_machine', 'port_tuple'],
             'alias_ip': ['virtual_machine', 'port_tuple'],
             'virtual_machine': ['virtual_network'],
@@ -149,25 +149,23 @@ class SchemaTransformer(object):
         },
     }
 
-    def __init__(self, args=None):
+    _schema_transformer = None
+
+    def __init__(self, st_logger=None, args=None):
         self._args = args
         self._fabric_rt_inst_obj = None
 
-        # Initialize discovery client
-        self._disc = None
-        if self._args.disc_server_ip and self._args.disc_server_port:
-            self._disc = client.DiscoveryClient(
-                self._args.disc_server_ip,
-                self._args.disc_server_port,
-                ModuleNames[Module.SCHEMA_TRANSFORMER])
-
-        # Initialize logger
-        self.logger = SchemaTransformerLogger(self._disc, args)
+        if st_logger is not None:
+            self.logger = st_logger
+        else:
+            # Initialize logger
+            self.logger = SchemaTransformerLogger(args)
 
         # Initialize amqp
-        self._vnc_amqp = STAmqpHandle(self.logger,
-                self._REACTION_MAP, self._args)
+        self._vnc_amqp = STAmqpHandle(self.logger, self.REACTION_MAP,
+                                      self._args)
         self._vnc_amqp.establish()
+        SchemaTransformer._schema_transformer = self
         try:
             # Initialize cassandra
             self._object_db = SchemaTransformerDB(self, _zookeeper_client)
@@ -180,8 +178,9 @@ class SchemaTransformer(object):
         except Exception as e:
             # If any of the above tasks like CassandraDB read fails, cleanup
             # the RMQ constructs created earlier and then give up.
-            self._vnc_amqp.close()
-            raise e
+            SchemaTransformer.destroy_instance()
+            SchemaTransformer._schema_transformer = None
+            raise
     # end __init__
 
     # Clean up stale objects
@@ -190,6 +189,24 @@ class SchemaTransformer(object):
         BgpRouterST.reinit()
         BgpvpnST.reinit()
         LogicalRouterST.reinit()
+        gevent.sleep(0.001)
+        for si in ServiceInstanceST.list_vnc_obj():
+            try:
+                si_st = ServiceInstanceST.locate(si.get_fq_name_str(), si)
+                if si_st is None:
+                    continue
+                for ref in si.get_virtual_machine_back_refs() or []:
+                    vm_name = ':'.join(ref['to'])
+                    vm = VirtualMachineST.locate(vm_name)
+                    si_st.virtual_machines.add(vm_name)
+                props = si.get_service_instance_properties()
+                if not props.auto_policy:
+                    continue
+                si_st.add_properties(props)
+            except Exception as e:
+                self.logger.error("Error in reinit service instance %s: %s" % (
+                    si.get_fq_name_str(), str(e)))
+
         vn_list = list(VirtualNetworkST.list_vnc_obj())
         vn_id_list = set([vn.uuid for vn in vn_list])
         ri_dict = {}
@@ -201,17 +218,22 @@ class SchemaTransformer(object):
                 delete = True
                 ri_deleted.setdefault(ri.parent_uuid, []).append(ri.uuid)
             else:
-                # if the RI was for a service chain and service chain no
-                # longer exists, delete the RI
-                sc_id = RoutingInstanceST._get_service_id_from_ri(
-                    ri.get_fq_name_str())
-                if sc_id:
-                    if sc_id not in ServiceChain:
-                        delete = True
+                try:
+                    # if the RI was for a service chain and service chain no
+                    # longer exists, delete the RI
+                    sc_id = RoutingInstanceST._get_service_id_from_ri(
+                        ri.get_fq_name_str())
+                    if sc_id:
+                        if sc_id not in ServiceChain:
+                            delete = True
+                        else:
+                            service_ri_dict[ri.get_fq_name_str()] = ri
                     else:
-                        service_ri_dict[ri.get_fq_name_str()] = ri
-                else:
-                    ri_dict[ri.get_fq_name_str()] = ri
+                        ri_dict[ri.get_fq_name_str()] = ri
+                except Exception as e:
+                    self.logger.error(
+                        "Error while reinitializing routing instance %s: %s"%(
+                        ri.get_fq_name_str(), str(e)))
             if delete:
                 try:
                     ri_obj = RoutingInstanceST(ri.get_fq_name_str(), ri)
@@ -220,9 +242,8 @@ class SchemaTransformer(object):
                     pass
                 except Exception as e:
                     self.logger.error(
-                            "Error while deleting routing instance %s: %s"%(
-                            ri.get_fq_name_str(), str(e)))
-
+                        "Error while deleting routing instance %s: %s"%(
+                        ri.get_fq_name_str(), str(e)))
         # end for ri
 
         sg_list = list(SecurityGroupST.list_vnc_obj())
@@ -250,19 +271,26 @@ class SchemaTransformer(object):
                 except NoIdError:
                     pass
                 except Exception as e:
-                    self.logger.error(
-                            "Error while deleting acl %s: %s"%(
+                    self.logger.error("Error while deleting acl %s: %s"%(
                             acl.uuid, str(e)))
         # end for acl
 
         gevent.sleep(0.001)
         for sg in sg_list:
-            SecurityGroupST.locate(sg.get_fq_name_str(), sg, sg_acl_dict)
+            try:
+                SecurityGroupST.locate(sg.get_fq_name_str(), sg, sg_acl_dict)
+            except Exception as e:
+                self.logger.error("Error in reinit security-group %s: %s" % (
+                    sg.get_fq_name_str(), str(e)))
 
         # update sg rules after all SG objects are initialized to avoid
         # rewriting of ACLs multiple times
         for sg in SecurityGroupST.values():
-            sg.update_policy_entries()
+            try:
+                sg.update_policy_entries()
+            except Exception as e:
+                self.logger.error("Error in updating SG policies %s: %s" % (
+                    sg.name, str(e)))
 
         gevent.sleep(0.001)
         RouteTargetST.reinit()
@@ -272,12 +300,24 @@ class SchemaTransformer(object):
                 new_vn_ri_list = [vn_ri for vn_ri in vn_ri_list
                                   if vn_ri['uuid'] not in ri_deleted[vn.uuid]]
                 vn.routing_instances = new_vn_ri_list
-            VirtualNetworkST.locate(vn.get_fq_name_str(), vn, vn_acl_dict)
+            try:
+                VirtualNetworkST.locate(vn.get_fq_name_str(), vn, vn_acl_dict)
+            except Exception as e:
+                self.logger.error("Error in reinit virtual network %s: %s" % (
+                    vn.get_fq_name_str(), str(e)))
         for ri_name, ri_obj in ri_dict.items():
-            RoutingInstanceST.locate(ri_name, ri_obj)
+            try:
+                RoutingInstanceST.locate(ri_name, ri_obj)
+            except Exception as e:
+                self.logger.error("Error in reinit routing instance %s: %s" % (
+                    ri_name, str(e)))
         # Initialize service instance RI's after Primary RI's
         for si_ri_name, si_ri_obj in service_ri_dict.items():
-            RoutingInstanceST.locate(si_ri_name, si_ri_obj)
+            try:
+                RoutingInstanceST.locate(si_ri_name, si_ri_obj)
+            except Exception as e:
+                self.logger.error("Error in reinit routing instance %s: %s" % (
+                    si_ri_name, str(e)))
 
         NetworkPolicyST.reinit()
         gevent.sleep(0.001)
@@ -288,20 +328,6 @@ class SchemaTransformer(object):
         gevent.sleep(0.001)
         FloatingIpST.reinit()
         AliasIpST.reinit()
-
-        gevent.sleep(0.001)
-        for si in ServiceInstanceST.list_vnc_obj():
-            si_st = ServiceInstanceST.locate(si.get_fq_name_str(), si)
-            if si_st is None:
-                continue
-            for ref in si.get_virtual_machine_back_refs() or []:
-                vm_name = ':'.join(ref['to'])
-                vm = VirtualMachineST.locate(vm_name)
-                si_st.virtual_machines.add(vm_name)
-            props = si.get_service_instance_properties()
-            if not props.auto_policy:
-                continue
-            si_st.add_properties(props)
 
         gevent.sleep(0.001)
         RoutingPolicyST.reinit()
@@ -315,12 +341,20 @@ class SchemaTransformer(object):
         # evaluate virtual network objects first because other objects,
         # e.g. vmi, depend on it.
         for vn_obj in VirtualNetworkST.values():
-            vn_obj.evaluate()
+            try:
+                vn_obj.evaluate()
+            except Exception as e:
+                self.logger.error("Error in reinit evaluate virtual network %s: %s" % (
+                    vn_obj.name, str(e)))
         for cls in DBBaseST.get_obj_type_map().values():
             if cls is VirtualNetworkST:
                 continue
             for obj in cls.values():
-                obj.evaluate()
+                try:
+                    obj.evaluate()
+                except Exception as e:
+                    self.logger.error("Error in reinit evaluate %s %s: %s" % (
+                        cls.obj_type, obj.name, str(e)))
         self.process_stale_objects()
     # end reinit
 
@@ -341,11 +375,19 @@ class SchemaTransformer(object):
                             rt_del=rinst.stale_route_targets)
     # end process_stale_objects
 
-    def reset(self):
-        for cls in DBBaseST.get_obj_type_map().values():
-            cls.reset()
-        self._vnc_amqp.close()
-    # end reset
+    @classmethod
+    def get_instance(cls):
+        return cls._schema_transformer
+
+    @classmethod
+    def destroy_instance(cls):
+        inst = cls.get_instance()
+        inst._vnc_amqp.close()
+        for obj_cls in DBBaseST.get_obj_type_map().values():
+            obj_cls.reset()
+        DBBase.clear()
+        inst._object_db = None
+        cls._schema_transformer = None
 
     def sighup_handler(self):
         if self._conf_file:
@@ -390,8 +432,6 @@ def parse_args(args_str):
         'zk_server_ip': '127.0.0.1',
         'zk_server_port': '2181',
         'collectors': None,
-        'disc_server_ip': None,
-        'disc_server_port': None,
         'http_server_port': '8087',
         'log_local': False,
         'log_level': SandeshLevel.SYS_DEBUG,
@@ -454,6 +494,12 @@ def parse_args(args_str):
                 cassandraopts.update(dict(config.items('CASSANDRA')))
         if 'SANDESH' in config.sections():
             sandeshopts.update(dict(config.items('SANDESH')))
+            if 'sandesh_ssl_enable' in config.options('SANDESH'):
+                sandeshopts['sandesh_ssl_enable'] = config.getboolean(
+                    'SANDESH', 'sandesh_ssl_enable')
+            if 'introspect_ssl_enable' in config.options('SANDESH'):
+                sandeshopts['introspect_ssl_enable'] = config.getboolean(
+                    'SANDESH', 'introspect_ssl_enable')
 
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
@@ -494,10 +540,6 @@ def parse_args(args_str):
     parser.add_argument("--collectors",
                         help="List of VNC collectors in ip:port format",
                         nargs="+")
-    parser.add_argument("--disc_server_ip",
-                        help="IP address of the discovery server")
-    parser.add_argument("--disc_server_port",
-                        help="Port of the discovery server")
     parser.add_argument("--http_server_port",
                         help="Port of local HTTP server")
     parser.add_argument("--log_local", action="store_true",
@@ -566,12 +608,13 @@ def parse_args(args_str):
 # end parse_args
 
 
-
 transformer = None
 
 
-def run_schema_transformer(args):
+def run_schema_transformer(st_logger, args):
     global _vnc_lib
+
+    st_logger.notice("Elected master Schema Transformer node. Initializing...")
 
     def connection_state_update(status, message=None):
         ConnectionState.update(
@@ -600,13 +643,8 @@ def run_schema_transformer(args):
             # auth failure or haproxy throws 503
             time.sleep(3)
 
-    #randomize collector list
-    args.random_collectors = args.collectors
-    if args.collectors:
-        args.random_collectors = random.sample(args.collectors, len(args.collectors))
-
     global transformer
-    transformer = SchemaTransformer(args)
+    transformer = SchemaTransformer(st_logger, args)
     transformer._conf_file = args.conf_file
     transformer._chksum = ""
     # checksum of collector list
@@ -618,15 +656,19 @@ def run_schema_transformer(args):
     """
     gevent.signal(signal.SIGHUP, transformer.sighup_handler)
 
-    gevent.joinall(transformer._vnc_amqp._vnc_kombu.greenlets())
+    try:
+        gevent.joinall(transformer._vnc_amqp._vnc_kombu.greenlets())
+    except KeyboardInterrupt:
+        SchemaTransformer.destroy_instance()
+        raise
 # end run_schema_transformer
 
 
 def main(args_str=None):
     global _zookeeper_client
+
     if not args_str:
         args_str = ' '.join(sys.argv[1:])
-
     args = parse_args(args_str)
     args._args_list = args_str
     if args.cluster_id:
@@ -635,11 +677,30 @@ def main(args_str=None):
     else:
         client_pfx = ''
         zk_path_pfx = ''
+
+    # randomize collector list
+    args.random_collectors = args.collectors
+    if args.collectors:
+        args.random_collectors = random.sample(args.collectors,
+                                               len(args.collectors))
+
+    # Initialize logger
+    st_logger = SchemaTransformerLogger(args)
+
+    # Initialize AMQP handler then close it to be sure remain queue of a
+    # precedent run is cleaned
+    vnc_amqp = STAmqpHandle(st_logger, SchemaTransformer.REACTION_MAP, args)
+    vnc_amqp.establish()
+    vnc_amqp.close()
+    st_logger.debug("Removed remained AMQP queue")
+
+    # Waiting to be elected as master node
     _zookeeper_client = ZookeeperClient(client_pfx+"schema", args.zk_server_ip,
-                                        zk_timeout =args.zk_timeout)
+                                        zk_timeout=args.zk_timeout)
+    st_logger.notice("Waiting to be elected as master...")
     _zookeeper_client.master_election(zk_path_pfx + "/schema-transformer",
                                       os.getpid(), run_schema_transformer,
-                                      args)
+                                      st_logger, args)
 # end main
 
 

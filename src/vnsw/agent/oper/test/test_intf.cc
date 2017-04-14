@@ -3463,7 +3463,7 @@ TEST_F(IntfTest, Layer2Mode_2) {
     EXPECT_TRUE(evpn_rt != NULL);
     EXPECT_FALSE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == false);
     uint32_t label = vm_intf->l2_label();
-    MplsLabel *mpls_label = GetActiveLabel(MplsLabel::VPORT_NH, label);
+    MplsLabel *mpls_label = GetActiveLabel(label);
     EXPECT_FALSE(mpls_label->nexthop()->PolicyEnabled() == false);
     evpn_rt = EvpnRouteGet("vrf1", mac, ip, vm_intf->ethernet_tag());
     EXPECT_TRUE(evpn_rt == NULL);
@@ -3480,7 +3480,7 @@ TEST_F(IntfTest, Layer2Mode_2) {
     EXPECT_TRUE(evpn_rt != NULL);
     EXPECT_TRUE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == true);
     label = vm_intf->l2_label();
-    mpls_label = GetActiveLabel(MplsLabel::VPORT_NH, label);
+    mpls_label = GetActiveLabel(label);
     EXPECT_TRUE(mpls_label->nexthop()->PolicyEnabled() == true);
     evpn_rt = EvpnRouteGet("vrf1", mac, ip, vm_intf->ethernet_tag());
     EXPECT_TRUE(evpn_rt != NULL);
@@ -3782,7 +3782,7 @@ TEST_F(IntfTest, MultipleIp2) {
     EXPECT_TRUE(evpn_rt != NULL);
     EXPECT_FALSE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == false);
     uint32_t label = vm_intf->l2_label();
-    MplsLabel *mpls_label = GetActiveLabel(MplsLabel::VPORT_NH, label);
+    MplsLabel *mpls_label = GetActiveLabel(label);
     EXPECT_FALSE(mpls_label->nexthop()->PolicyEnabled() == false);
 
     //VN is on l2 only mode, verify ip + mac evpn route is deleted
@@ -3808,7 +3808,7 @@ TEST_F(IntfTest, MultipleIp2) {
     EXPECT_TRUE(evpn_rt != NULL);
     EXPECT_TRUE(evpn_rt->GetActiveNextHop()->PolicyEnabled() == true);
     label = vm_intf->l2_label();
-    mpls_label = GetActiveLabel(MplsLabel::VPORT_NH, label);
+    mpls_label = GetActiveLabel(label);
     EXPECT_TRUE(mpls_label->nexthop()->PolicyEnabled() == true);
 
     //Verify primary route is found
@@ -4330,6 +4330,97 @@ TEST_F(IntfTest, BridgeDomain_2) {
     DelIPAM("vn1");
     client->WaitForIdle();
     EXPECT_FALSE(VmPortFind(1));
+    client->Reset();
+}
+
+TEST_F(IntfTest, intf_label) {
+    struct PortInfo input1[] = {
+        {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
+    };
+
+    client->Reset();
+    CreateVmportEnv(input1, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input1, 0));
+    EXPECT_TRUE(VmPortFind(8));
+    client->Reset();
+
+    // 4 interface nh, 1 vrf nh and 1 for bridge route
+    EXPECT_TRUE(Agent::GetInstance()->mpls_table()->Size() == 6);
+    DeleteVmportEnv(input1, 1, true);
+    client->WaitForIdle();
+    EXPECT_FALSE(VmPortFind(8));
+    EXPECT_TRUE(Agent::GetInstance()->mpls_table()->Size() == 0);
+    VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
+    WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key, true)
+                == NULL));
+    client->Reset();
+}
+
+//Add and delete of floating-ip dependent on secondary IP
+TEST_F(IntfTest, FloatingIpFixedIpAddChange_1) {
+    struct PortInfo input1[] = {
+        {"vnet8", 8, "8.1.1.1", "00:00:00:01:01:01", 1, 1}
+    };
+
+    client->Reset();
+    CreateVmportEnv(input1, 1, 1);
+    client->WaitForIdle();
+    EXPECT_TRUE(VmPortActive(input1, 0));
+    client->Reset();
+
+    AddVn("default-project:vn2", 2);
+    AddVrf("default-project:vn2:vn2", 2);
+    AddLink("virtual-network", "default-project:vn2", "routing-instance",
+            "default-project:vn2:vn2");
+    //Add floating IP for vnet1
+    AddFloatingIpPool("fip-pool1", 1);
+    AddFloatingIp("fip1", 1, "2.1.1.100", "1.1.1.10");
+    AddLink("floating-ip", "fip1", "floating-ip-pool", "fip-pool1");
+    AddLink("floating-ip-pool", "fip-pool1", "virtual-network",
+            "default-project:vn2");
+    client->WaitForIdle();
+    AddLink("virtual-machine-interface", "vnet8", "floating-ip", "fip1");
+    client->WaitForIdle();
+
+    //Verify that FloatingIP is associated with VMI
+    EXPECT_TRUE(VmPortFloatingIpCount(8, 1));
+
+    DelLink("virtual-machine-interface", "vnet8", "floating-ip", "fip1");
+    client->WaitForIdle();
+
+    //Verify that FloatingIP count of VMI is 0 after disassociation
+    EXPECT_TRUE(VmPortFloatingIpCount(8, 0));
+
+    //Use IPv6 fixed-ip with IPv4 FloatingIP
+    AddFloatingIp("fip1", 1, "2.1.1.100", "fd11::10");
+    AddLink("virtual-machine-interface", "vnet8", "floating-ip", "fip1");
+    client->WaitForIdle();
+
+    //Verify that FloatingIP is NOT associated with VMI
+    EXPECT_TRUE(VmPortFloatingIpCount(8, 0));
+
+
+    //Clean up
+    DelLink("virtual-network", "default-project:vn2", "routing-instance",
+            "default-project:vn2:vn2");
+    DelLink("floating-ip", "fip1", "floating-ip-pool", "fip-pool1");
+    DelLink("floating-ip-pool", "fip-pool1",
+            "virtual-network", "default-project:vn2");
+    DelLink("virtual-machine-interface", "vnet8", "floating-ip", "fip1");
+    DelVrf("default-project:vn2:vn2");
+    DelVn("default-project:vn2");
+    DelFloatingIp("fip1");
+    DelFloatingIpPool("fip-pool1");
+    client->WaitForIdle();
+
+    DeleteVmportEnv(input1, 1, true, 1);
+    client->WaitForIdle();
+    EXPECT_FALSE(VmPortFind(8));
+    VmInterfaceKey key(AgentKey::ADD_DEL_CHANGE, MakeUuid(8), "");
+    WAIT_FOR(100, 1000, (Agent::GetInstance()->interface_table()->Find(&key,
+                                                                       true)
+                == NULL));
     client->Reset();
 }
 

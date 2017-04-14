@@ -34,7 +34,6 @@
 #include "net/tunnel_encap_type.h"
 #include <assert.h>
 #include <controller/controller_route_path.h>
-#include <cfg/discovery_agent.h>
 
 using namespace boost::asio;
 using namespace autogen;
@@ -661,6 +660,16 @@ void AgentXmppChannel::AddEcmpRoute(string vrf_name, IpAddress prefix_addr,
             CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name,
                              "Non IPv4 address not supported as nexthop");
             continue;
+        }
+
+        if (comp_nh_list.size() >= maximum_ecmp_paths) {
+            std::stringstream msg;
+            msg << "Nexthop paths for prefix "
+                << prefix_addr.to_string() << "/" << prefix_len
+                << " (" << item->entry.next_hops.next_hop.size()
+                << ") exceed the maximum supported, ignoring them";
+            CONTROLLER_TRACE(Trace, GetBgpPeerName(), vrf_name, msg.str());
+            break;
         }
 
         uint32_t label = item->entry.next_hops.next_hop[i].label;
@@ -1472,21 +1481,7 @@ void AgentXmppChannel::NotReady() {
 void AgentXmppChannel::TimedOut() {
     CONTROLLER_TRACE(Session, GetXmppServer(), "TIMEDOUT",
                      "NULL", "Connection to Xmpp Server, Timed out");
-    DiscoveryServiceClient *dsc = agent_->discovery_service_client();
-    if (dsc) {
-        std::vector<DSResponse> resp = agent_->GetDiscoveryServerResponseList();
-        std::vector<DSResponse>::iterator iter;
-        for (iter = resp.begin(); iter != resp.end(); iter++) {
-            DSResponse dr = *iter;
-            if (GetXmppServer().compare(dr.ep.address().to_string()) == 0) {
-                // Add the TIMEDOUT server to the end.
-                if (iter+1 == resp.end()) break;
-                std::rotate(iter, iter+1, resp.end());
-                agent_->controller()->ApplyDiscoveryXmppServices(resp);
-                break;
-            }
-        }
-    } else {
+    {
         bool update_list = false;
         std::vector<string>::iterator iter = agent_->GetControllerlist().begin();
         std::vector<string>::iterator end = agent_->GetControllerlist().end();
@@ -1660,7 +1655,7 @@ bool AgentXmppChannel::ControllerSendSubscribe(AgentXmppChannel *peer,
     pugi->AddAttribute("node", vrf->GetName());
     pugi->AddChildNode("options", "" );
     stringstream vrf_id;
-    vrf_id << vrf->vrf_id();
+    vrf_id << vrf->RDInstanceId();
     pugi->AddChildNode("instance-id", vrf_id.str());
 
     datalen_ = XmppProto::EncodeMessage(impl.get(), data_, sizeof(data_));
@@ -2508,20 +2503,10 @@ void AgentXmppChannel::UpdateConnectionInfo(xmps::PeerState state) {
         agent_->connection_state()->Update(ConnectionType::XMPP, name,
                                            ConnectionStatus::UP, ep,
                                            last_state_name);
-        if (agent_->discovery_service_client()) {
-            agent_->discovery_service_client()->AddSubscribeInUseServiceList(
-                g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME, ep);
-        }
     } else {
         agent_->connection_state()->Update(ConnectionType::XMPP, name,
                                            ConnectionStatus::DOWN, ep,
                                            last_state_name);
-        if (state == xmps::TIMEDOUT) {
-            if (agent_->discovery_service_client()) {
-                agent_->discovery_service_client()->DeleteSubscribeInUseServiceList(
-                    g_vns_constants.XMPP_SERVER_DISCOVERY_SERVICE_NAME, ep);
-            }
-        }
     }
 }
 

@@ -34,12 +34,11 @@ def MapBuildDir(list):
     return map(lambda x: '#/' + Dir('.').path + '/../' + x, list)
 
 AnalyticsEnv.Prepend(LIBS=['cpuinfo',
-        'ds',
         'io',
+        'vncapi',
         'sandesh',
         'httpc',
         'http',
-        'vncapi',
         'http_parser',
         'curl',
         'ruleparser',
@@ -78,7 +77,6 @@ if sys.platform != 'darwin':
 
 libs = MapBuildDir(['sandesh',
         'analytics/ruleparser',
-        'discovery/client',
         'http/client',
         'xml',
 	'database',
@@ -87,7 +85,8 @@ libs = MapBuildDir(['sandesh',
 	'net'])
 AnalyticsEnv.Append(LIBPATH=libs)
 
-includes = MapBuildDir(['http/client', 'discovery/client', 'analytics'])
+includes = MapBuildDir(['http/client', 'analytics'])
+
 AnalyticsEnv.Append(CPPPATH = [
                                includes,
                                AnalyticsEnv['TOP'],
@@ -103,6 +102,8 @@ SandeshGenPyFiles  += AnalyticsEnv.SandeshGenPy('collector_uve.sandesh')
 AnalyticsVizSandeshGenFiles = AnalyticsEnv.SandeshGenOnlyCpp('viz.sandesh')
 AnalyticsSandeshGenFiles  = AnalyticsEnv.SandeshGenCpp('collector_uve.sandesh')
 AnalyticsSandeshGenFiles += AnalyticsEnv.SandeshGenCpp('analytics.sandesh')
+AnalyticsSandeshGenFiles += AnalyticsEnv.SandeshGenCpp('uve_aggregator.sandesh')
+AnalyticsSandeshGenFiles += AnalyticsEnv.SandeshGenCpp('kafka.sandesh')
 AnalyticsSandeshGenFiles += AnalyticsEnv.SandeshGenCpp('redis.sandesh')
 AnalyticsSandeshGenFiles += AnalyticsEnv.SandeshGenCpp('uflow.sandesh')
 AnalyticsSandeshGenFiles += AnalyticsEnv.SandeshGenCpp('sflow.sandesh')
@@ -115,6 +116,7 @@ AnalyticsEnv['ANALYTICS_VIZ_SANDESH_GEN_OBJS'] = AnalyticsEnv.Object(AnalyticsVi
 
 OpServerProxy_obj = AnalyticsEnv.Object('OpServerProxy.o', 'OpServerProxy.cc')
 db_handler_obj = AnalyticsEnv_excep.Object('db_handler.o', 'db_handler.cc')
+structured_syslog_config_obj = AnalyticsEnv_excep.Object('structured_syslog_config.o', 'structured_syslog_config.cc')
 main_obj = AnalyticsEnv_excep.Object('main.o', 'main.cc')
 AnalyticsEnv_excep.Depends(main_obj, 'buildinfo.cc')
 
@@ -150,14 +152,16 @@ parser_util_obj = AnalyticsEnv_boost_no_unreach.Object('parser_util.o', 'parser_
 vizd_sources = ['viz_collector.cc', 'ruleeng.cc', 'collector.cc',
                 'vizd_table_desc.cc', 'viz_message.cc','generator.cc',
                 'redis_connection.cc', 'redis_processor_vizd.cc',
-                'options.cc', 'stat_walker.cc', 'protobuf_collector.cc',
-                'protobuf_server.cc',
+                'options.cc', 'stat_walker.cc', 'sandesh_request.cc',
+                'protobuf_collector.cc', 'protobuf_server.cc',
                 'structured_syslog_collector.cc', 'structured_syslog_server.cc',
-                'structured_syslog_config.cc', 'configdb_connection.cc',
+                'configdb_connection.cc',
                 'sflow.cc',
                 'sflow_generator.cc', 'sflow_collector.cc',
                 'usrdef_counters.cc',
-                'sflow_parser.cc', 'ipfix_collector.cc']
+                'sflow_parser.cc', 'ipfix_collector.cc',
+                'kafka_processor.cc',
+                'uve_aggregator.cc']
 
 RedisLuaBuild(AnalyticsEnv, 'seqnum')
 RedisLuaBuild(AnalyticsEnv, 'delrequest')
@@ -175,6 +179,7 @@ AnalyticsEnv.GenerateBuildInfoCode(
     source = AnalyticsSandeshGenSrcs + vizd_sources + ProtobufGenSrcs +
     ['OpServerProxy.cc',
      'db_handler.cc',
+     'structured_syslog_config.cc',
      parser_util_obj,
      'main.cc'],
     path=str(Dir('.').abspath))
@@ -185,6 +190,7 @@ vizd = AnalyticsEnv.Program(target = 'vizd',
         [main_obj,
         'buildinfo.cc',
         db_handler_obj,
+        structured_syslog_config_obj,
         OpServerProxy_obj,
         syslog_collector_obj,
         parser_util_obj,
@@ -241,7 +247,6 @@ CollectorDocFiles = []
 CollectorDocFiles += AnalyticsEnv['BASE_DOC_FILES']
 CollectorDocFiles += AnalyticsEnv['IO_DOC_FILES']
 CollectorDocFiles += AnalyticsEnv['SANDESH_DOC_FILES']
-CollectorDocFiles += AnalyticsEnv['DISCOVERY_CLIENT_DOC_FILES']
 CollectorDocFiles += AnalyticsEnv['ANALYTICS_DOC_FILES']
 CollectorDocFiles += AnalyticsEnv.SandeshGenDoc('collector_uve.sandesh')
 CollectorDocFiles += AnalyticsEnv.SandeshGenDoc('uflow.sandesh')

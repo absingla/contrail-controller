@@ -123,7 +123,7 @@ bool BridgeDomainEntry::Change(const BridgeDomainTable *table,
         ret = true;
     }
 
-    if (data->isid_ && isid_ != data->isid_) {
+    if (isid_ != data->isid_) {
         isid_ = data->isid_;
         update_vrf = true;
         ret = true;
@@ -165,6 +165,10 @@ bool BridgeDomainEntry::Change(const BridgeDomainTable *table,
         ret = true;
     }
 
+    if (vrf_ == NULL) {
+        update_vrf = true;
+    }
+
     if (vn_ && data->bmac_vrf_name_ != Agent::NullString() && update_vrf) {
         OPER_TRACE_ENTRY(BridgeDomain, table, "Creating C-VRF",
                          UuidToString(uuid_), isid_);
@@ -181,6 +185,7 @@ void BridgeDomainEntry::Delete() {
     if (vrf_.get()) {
         table_->agent()->vrf_table()->DeleteVrf(vrf_->GetName(),
                                                 VrfData::PbbVrf);
+        vrf_.reset();
     }
 }
 

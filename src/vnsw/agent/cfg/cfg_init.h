@@ -14,7 +14,6 @@ using namespace boost::uuids;
 class CfgFilter;
 class CfgListener;
 class InterfaceCfgClient;
-class DiscoveryAgentClient;
 class MirrorCfgTable;
 class IntfMirrorCfgTable;
 
@@ -107,14 +106,15 @@ public:
         return cfg_vm_port_bridge_domain_table_;
     }
 
+    IFMapAgentTable *cfg_health_check_table() const {
+        return cfg_health_check_table_;
+    }
+
     Agent *agent() const { return agent_; }
     CfgFilter *cfg_filter() const { return cfg_filter_.get(); }
     IFMapAgentParser *cfg_parser() const { return cfg_parser_.get(); }
     DBGraph *cfg_graph() const { return cfg_graph_.get(); }
     MirrorCfgTable *cfg_mirror_table() const { return cfg_mirror_table_.get(); }
-    DiscoveryAgentClient *discovery_client() const {
-        return discovery_client_.get();
-    }
     InterfaceCfgClient *cfg_interface_client() const {
         return cfg_interface_client_.get();
     }
@@ -126,7 +126,6 @@ public:
     void RegisterDBClients(DB *db);
     void Register(const char *node_name, AgentDBTable *table,
                   int need_property_id);
-    void InitDiscovery();
     void Init();
     void InitDone();
     void Shutdown();
@@ -136,7 +135,6 @@ private:
     std::auto_ptr<IFMapAgentParser> cfg_parser_; 
     std::auto_ptr<DBGraph> cfg_graph_;
     std::auto_ptr<InterfaceCfgClient> cfg_interface_client_;
-    std::auto_ptr<DiscoveryAgentClient> discovery_client_;
     std::auto_ptr<MirrorCfgTable> cfg_mirror_table_;
     std::auto_ptr<IntfMirrorCfgTable> cfg_intf_mirror_table_;
 
@@ -165,6 +163,7 @@ private:
     IFMapAgentTable *cfg_service_instance_table_;
     IFMapAgentTable *cfg_security_group_table_;
     IFMapAgentTable *cfg_physical_device_table_;
+    IFMapAgentTable *cfg_health_check_table_;
     IFMapAgentTable *cfg_qos_table_;
     IFMapAgentTable *cfg_global_qos_table_;
     IFMapAgentTable *cfg_qos_queue_table_;

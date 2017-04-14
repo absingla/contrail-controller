@@ -253,6 +253,7 @@ static bool ProcessEvent(FlowMgmtRequest *req, FlowMgmtKey *key,
         break;
 
     case FlowMgmtRequest::DELETE_DBENTRY:
+    case FlowMgmtRequest::IMPLICIT_ROUTE_DELETE:
         tree->OperEntryDelete(req, key);
         break;
 
@@ -430,16 +431,14 @@ bool FlowMgmtManager::RequestHandler(FlowMgmtRequestPtr req) {
     switch (req->event()) {
     case FlowMgmtRequest::UPDATE_FLOW: {
         FlowEntry *flow = req->flow().get();
-        {
-            // Before processing event, set the request pointer in flow to
-            // NULL. This ensures flow-entry enqueues new request from now
-            // onwards
-            tbb::mutex::scoped_lock mutex(flow->mutex());
-            flow->set_flow_mgmt_request(NULL);
-        }
+        // Before processing event, set the request pointer in flow to
+        // NULL. This ensures flow-entry enqueues new request from now
+        // onwards
+        tbb::mutex::scoped_lock mutex(flow->mutex());
+        flow->set_flow_mgmt_request(NULL);
 
         // Update flow-mgmt information based on flow-state
-        if (req->flow()->deleted() == false) {
+        if (flow->deleted() == false) {
             FlowMgmtRequestPtr log_req(new FlowMgmtRequest
                                        (FlowMgmtRequest::ADD_FLOW,
                                         req->flow().get()));
@@ -553,7 +552,6 @@ void FlowMgmtManager::LogFlowUnlocked(FlowEntry *flow, const std::string &op) {
 // Extract all the FlowMgmtKey for a flow
 void FlowMgmtManager::MakeFlowMgmtKeyTree(FlowEntry *flow,
                                           FlowMgmtKeyTree *tree) {
-    tbb::mutex::scoped_lock mutex(flow->mutex());
     acl_flow_mgmt_tree_.ExtractKeys(flow, tree);
     interface_flow_mgmt_tree_.ExtractKeys(flow, tree);
     vn_flow_mgmt_tree_.ExtractKeys(flow, tree);
@@ -1127,8 +1125,14 @@ bool FlowMgmtEntry::OperEntryChange(FlowMgmtManager *mgr,
 bool FlowMgmtEntry::OperEntryDelete(FlowMgmtManager *mgr,
                                     const FlowMgmtRequest *req,
                                     FlowMgmtKey *key) {
-    oper_state_ = OPER_DEL_SEEN;
-    gen_id_ = req->gen_id();
+    if (req->event() != FlowMgmtRequest::IMPLICIT_ROUTE_DELETE) {
+        //If the delete is implicit there is no DB entry
+        //and hence no free notify should be sent, hence
+        //dont update the state to DEL SEEN
+        oper_state_ = OPER_DEL_SEEN;
+        gen_id_ = req->gen_id();
+    }
+
     FlowEvent::Event event = req->GetResponseEvent();
     if (event == FlowEvent::INVALID)
         return false;
@@ -1458,9 +1462,9 @@ FlowMgmtEntry *InterfaceFlowMgmtTree::Allocate(const FlowMgmtKey *key) {
 // Nh Flow Management
 /////////////////////////////////////////////////////////////////////////////
 void NhFlowMgmtTree::ExtractKeys(FlowEntry *flow, FlowMgmtKeyTree *tree) {
-    if (flow->nh() == NULL)
+    if (flow->rpf_nh() == NULL)
         return;
-    NhFlowMgmtKey *key = new NhFlowMgmtKey(flow->nh());
+    NhFlowMgmtKey *key = new NhFlowMgmtKey(flow->rpf_nh());
     AddFlowMgmtKey(tree, key);
 }
 
@@ -1483,6 +1487,10 @@ void RouteFlowMgmtTree::SetDBEntry(const FlowMgmtRequest *req,
                                    FlowMgmtKey *key) {
     Tree::iterator it = tree_.find(key);
     if (it == tree_.end()) {
+        return;
+    }
+
+    if (req->db_entry() == NULL) {
         return;
     }
 
@@ -1549,10 +1557,12 @@ void InetRouteFlowMgmtTree::ExtractKeys(FlowEntry *flow, FlowMgmtKeyTree *tree,
 
 void InetRouteFlowMgmtTree::ExtractKeys(FlowEntry *flow,
                                         FlowMgmtKeyTree *tree) {
+
     if (flow->l3_flow() == false) {
-        if (flow->data().flow_source_vrf != VrfEntry::kInvalidIndex) {
-            ExtractKeys(flow, tree, flow->data().flow_source_vrf,
-                        flow->key().src_addr, flow->data().l2_rpf_plen);
+        // For l2-flows Track INET route for RPF only
+        if (flow->data().rpf_vrf != VrfEntry::kInvalidIndex) {
+            ExtractKeys(flow, tree, flow->data().rpf_vrf,
+                        flow->key().src_addr, flow->data().rpf_plen);
         }
         return;
     }
@@ -1714,7 +1724,7 @@ void BridgeRouteFlowMgmtTree::ExtractKeys(FlowEntry *flow,
 }
 
 FlowMgmtEntry *BridgeRouteFlowMgmtTree::Allocate(const FlowMgmtKey *key) {
-    return new BgpAsAServiceFlowMgmtEntry();
+    return new BridgeRouteFlowMgmtEntry();
 }
 
 bool BridgeRouteFlowMgmtTree::HasVrfFlows(uint32_t vrf,
@@ -1797,6 +1807,40 @@ bool VrfFlowMgmtEntry::CanDelete() const {
 
     return (vrf_tree_->mgr()->HasVrfFlows(vrf_id_) == false);
 }
+
+void VrfFlowMgmtTree::DeleteDefaultRoute(const VrfEntry *vrf) {
+    //If VMI is associated to FIP, then all non floating-ip
+    //traffic would also be dependent FIP VRF route. This is
+    //to ensure that if more specific route gets added preference
+    //would be given to floating-ip
+    //
+    //Assume a sceanrio where traffic is not NATed, then flow would
+    //add a dependency on default route(assume no default route is
+    //present in FIP VRF). Now if FIP VRF is deleted there is no explicit
+    //trigger to delete this dependencyi and hence delay in releasing VRF
+    //reference, hence if default route DB entry is not present
+    //impliticly delete the default route so that flow could get
+    InetRouteFlowMgmtKey key(vrf->vrf_id(), Ip4Address(0), 0);
+    FlowMgmtEntry *route_entry = mgr_->ip4_route_flow_mgmt_tree()->Find(&key);
+    if (route_entry == NULL ||
+        route_entry->oper_state() != FlowMgmtEntry::OPER_NOT_SEEN) {
+        //If entry is not present on it has corresponding DB entry
+        //no need for implicit delete
+        return;
+    }
+
+    FlowMgmtRequest route_req(FlowMgmtRequest::IMPLICIT_ROUTE_DELETE);
+    ProcessEvent(&route_req, &key, mgr_->ip4_route_flow_mgmt_tree());
+}
+
+bool VrfFlowMgmtTree::OperEntryDelete(const FlowMgmtRequest *req,
+                                      FlowMgmtKey *key) {
+    const VrfEntry* vrf = static_cast<const VrfEntry *>(req->db_entry());
+    DeleteDefaultRoute(vrf);
+
+    return FlowMgmtTree::OperEntryDelete(req, key);
+}
+
 
 VrfFlowMgmtEntry::Data::Data(VrfFlowMgmtEntry *vrf_mgmt_entry,
                              const VrfEntry *vrf, AgentRouteTable *table) :

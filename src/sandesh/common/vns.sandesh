@@ -179,26 +179,38 @@ const list<string> BackupImplementedServices = [
     SERVICE_DEVICE_MANAGER,
 ]
 
-const map<string, string> ServicesDefaultConfigurationFile = {
-    SERVICE_VROUTER_AGENT : '/etc/contrail/contrail-vrouter-agent.conf',
-    SERVICE_CONTROL_NODE : '/etc/contrail/contrail-control.conf',
-    SERVICE_COLLECTOR : '/etc/contrail/contrail-collector.conf',
-    SERVICE_QUERY_ENGINE : '/etc/contrail/contrail-query-engine.conf',
-    SERVICE_OPSERVER : '/etc/contrail/contrail-analytics-api.conf',
-    SERVICE_ALARM_GENERATOR : '/etc/contrail/contrail-alarm-gen.conf',
-    SERVICE_ALARM_GENERATOR_0 : '/etc/contrail/contrail-alarm-gen.conf',
-    SERVICE_SNMP_COLLECTOR : '/etc/contrail/contrail-snmp-collector.conf',
-    SERVICE_TOPOLOGY : '/etc/contrail/contrail-topology.conf',
-    SERVICE_API_SERVER : '/etc/contrail/contrail-api.conf',
-    SERVICE_API_SERVER_0 : '/etc/contrail/contrail-api.conf',
-    SERVICE_DISCOVERY : '/etc/contrail/contrail-discovery.conf',
-    SERVICE_DISCOVERY_0 : '/etc/contrail/contrail-discovery.conf',
-    SERVICE_SCHEMA_TRANSFORMER : '/etc/contrail/contrail-schema.conf',
-    SERVICE_SVC_MONITOR : '/etc/contrail/contrail-svc-monitor.conf',
-    SERVICE_DEVICE_MANAGER : '/etc/contrail/contrail-device-manager.conf',
-    SERVICE_DNSD : '/etc/contrail/dns.conf',
-    SERVICE_KUBE_MANAGER : '/etc/contrail/contrail-kubernetes.conf',
-    SERVICE_MESOS_MANAGER : '/etc/contrail/contrail-mesos.conf',
+const string ContrailKeystoneAuthConfigurationFile = '/etc/contrail/contrail-keystone-auth.conf'
+const string ContrailDatabaseConfigurationFile = '/etc/contrail/contrail-database.conf'
+
+const map<string, list<string> > ServicesDefaultConfigurationFiles = {
+    SERVICE_VROUTER_AGENT : ['/etc/contrail/contrail-vrouter-agent.conf'],
+    SERVICE_CONTROL_NODE : ['/etc/contrail/contrail-control.conf'],
+    SERVICE_COLLECTOR : ['/etc/contrail/contrail-collector.conf',
+                         ContrailKeystoneAuthConfigurationFile,
+                         ContrailDatabaseConfigurationFile]
+    SERVICE_QUERY_ENGINE : ['/etc/contrail/contrail-query-engine.conf',
+                            ContrailDatabaseConfigurationFile],
+    SERVICE_OPSERVER : ['/etc/contrail/contrail-analytics-api.conf',
+                        ContrailKeystoneAuthConfigurationFile,
+                        ContrailDatabaseConfigurationFile]
+    SERVICE_ALARM_GENERATOR : ['/etc/contrail/contrail-alarm-gen.conf',
+                               ContrailKeystoneAuthConfigurationFile]
+    SERVICE_ALARM_GENERATOR_0 : ['/etc/contrail/contrail-alarm-gen.conf',
+                                 ContrailKeystoneAuthConfigurationFile]
+    SERVICE_SNMP_COLLECTOR : ['/etc/contrail/contrail-snmp-collector.conf',
+                              ContrailKeystoneAuthConfigurationFile]
+    SERVICE_TOPOLOGY : ['/etc/contrail/contrail-topology.conf',
+                        ContrailKeystoneAuthConfigurationFile],
+    SERVICE_API_SERVER : ['/etc/contrail/contrail-api.conf'],
+    SERVICE_API_SERVER_0 : ['/etc/contrail/contrail-api.conf'],
+    SERVICE_DISCOVERY : ['/etc/contrail/contrail-discovery.conf'],
+    SERVICE_DISCOVERY_0 : ['/etc/contrail/contrail-discovery.conf'],
+    SERVICE_SCHEMA_TRANSFORMER : ['/etc/contrail/contrail-schema.conf'],
+    SERVICE_SVC_MONITOR : ['/etc/contrail/contrail-svc-monitor.conf'],
+    SERVICE_DEVICE_MANAGER : ['/etc/contrail/contrail-device-manager.conf'],
+    SERVICE_DNSD : ['/etc/contrail/dns.conf'],
+    SERVICE_KUBE_MANAGER : ['/etc/contrail/contrail-kubernetes.conf'],
+    SERVICE_MESOS_MANAGER : ['/etc/contrail/contrail-mesos.conf'],
 }
 
 enum Module {
@@ -256,6 +268,20 @@ const map<byte, string> VrouterAgentPlatformTypeMap = {
     VrouterAgentPlatformType.VROUTER_AGENT_ON_NIC        : 'NIC',
     VrouterAgentPlatformType.VROUTER_AGENT_ON_HOST_DPDK  : 'HOST_DPDK',
     VrouterAgentPlatformType.VROUTER_AGENT_ON_HOST       : 'HOST'
+}
+
+enum VrouterAgentVmState {
+    VROUTER_AGENT_VM_ACTIVE,
+    VROUTER_AGENT_VM_PAUSED,
+    VROUTER_AGENT_VM_SHUTDOWN,
+    VROUTER_AGENT_VM_UNKNOWN
+}
+
+const map<byte, string> VrouterAgentVmStateMap = {
+    VrouterAgentVmState.VROUTER_AGENT_VM_ACTIVE     : 'ACTIVE',
+    VrouterAgentVmState.VROUTER_AGENT_VM_PAUSED     : 'PAUSED',
+    VrouterAgentVmState.VROUTER_AGENT_VM_SHUTDOWN   : 'SHUT OFF',
+    VrouterAgentVmState.VROUTER_AGENT_VM_UNKNOWN    : 'UNKNOWN'
 }
 
 const string MODULE_CONTROL_NODE_NAME = SERVICE_CONTROL_NODE
@@ -603,8 +629,10 @@ const string CLOUD_ADMIN_ROLE = "admin"
 
 const string AAA_MODE_NO_AUTH = "no-auth"
 const string AAA_MODE_CLOUD_ADMIN = "cloud-admin"
+const string AAA_MODE_RBAC = "rbac"
 
 const list <string> APIAAAModes = [
     AAA_MODE_NO_AUTH,
     AAA_MODE_CLOUD_ADMIN,
+    AAA_MODE_RBAC,
 ]

@@ -39,6 +39,7 @@ using boost::tie;
 using std::copy;
 using std::dec;
 using std::map;
+using std::numeric_limits;
 using std::ostringstream;
 using std::string;
 using std::vector;
@@ -442,6 +443,13 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
     oss2 << peer_name();
     uve_key_str_ = oss2.str();
 
+    if (router_type_ == "control-node" ||
+        router_type_ == "external-control-node") {
+        peer_is_control_node_ = true;
+    } else {
+        peer_is_control_node_ = false;
+    }
+
     membership_req_pending_ = 0;
     BGP_LOG_PEER(Event, this, SandeshLevel::SYS_INFO, BGP_LOG_FLAG_ALL,
         BGP_PEER_DIR_NA, "Created");
@@ -493,7 +501,7 @@ BgpPeer::BgpPeer(BgpServer *server, RoutingInstance *instance,
     peer_info.set_peer_port(peer_port_);
     peer_info.set_hold_time(hold_time_);
     peer_info.set_local_id(local_bgp_id_);
-    peer_info.set_configured_families(config->GetAddressFamilies());
+    peer_info.set_configured_families(configured_families_);
     peer_info.set_peer_address(peer_key_.endpoint.address().to_string());
     BGPPeerInfoSend(peer_info);
 }
@@ -720,8 +728,14 @@ void BgpPeer::ConfigUpdate(const BgpNeighborConfig *config) {
     if (router_type_ != config->router_type()) {
         router_type_ = config->router_type();
         peer_info.set_router_type(router_type_);
-        resolve_paths_ = (config->router_type() == "bgpaas-client"),
+        resolve_paths_ = (config->router_type() == "bgpaas-client");
         clear_session = true;
+    }
+    if (router_type_ == "control-node" ||
+        router_type_ == "external-control-node") {
+        peer_is_control_node_ = true;
+    } else {
+        peer_is_control_node_ = false;
     }
 
     // Check if there is any change in the peer address.
@@ -774,7 +788,6 @@ void BgpPeer::ConfigUpdate(const BgpNeighborConfig *config) {
     }
 
     peer_type_ = (peer_as_ == local_as_) ? BgpProto::IBGP : BgpProto::EBGP;
-
     if (old_type != PeerType()) {
         peer_info.set_peer_type(
             PeerType() == BgpProto::IBGP ? "internal" : "external");
@@ -1586,9 +1599,10 @@ void BgpPeer::ProcessNlri(Address::Family family, DBRequest::DBOperation oper,
         PrefixT prefix;
         BgpAttrPtr new_attr(attr);
         uint32_t label = 0;
+        uint32_t l3_label = 0;
         int result = PrefixT::FromProtoPrefix(server_, **it,
             (oper == DBRequest::DB_ENTRY_ADD_CHANGE ? attr.get() : NULL),
-            &prefix, &new_attr, &label);
+            &prefix, &new_attr, &label, &l3_label);
         if (result) {
             BGP_LOG_PEER_WARNING(Message, this,
                 BGP_LOG_FLAG_ALL, BGP_PEER_DIR_IN,
@@ -1600,8 +1614,8 @@ void BgpPeer::ProcessNlri(Address::Family family, DBRequest::DBOperation oper,
         DBRequest req;
         req.oper = oper;
         if (oper == DBRequest::DB_ENTRY_ADD_CHANGE) {
-            req.data.reset(
-                new typename TableT::RequestData(new_attr, flags, label));
+            req.data.reset(new typename TableT::RequestData(
+                new_attr, flags, label, l3_label, 0));
         }
         req.key.reset(new typename TableT::RequestKey(prefix, this));
         table->Enqueue(&req);
@@ -1636,8 +1650,28 @@ uint32_t BgpPeer::GetPathFlags(Address::Family family,
     return flags;
 }
 
+uint32_t BgpPeer::GetLocalPrefFromMed(uint32_t med) const {
+    if (peer_type_ != BgpProto::EBGP)
+        return 0;
+    if (!peer_is_control_node_)
+        return 0;
+    if (med == 0)
+        return 0;
+    if (med == 100)
+        return 200;
+    if (med == 200)
+        return 100;
+    return numeric_limits<uint32_t>::max() - med;
+}
+
 void BgpPeer::ProcessUpdate(const BgpProto::Update *msg, size_t msgsize) {
     BgpAttrPtr attr = server_->attr_db()->Locate(msg->path_attributes);
+
+    uint32_t local_pref = GetLocalPrefFromMed(attr->med());
+    if (local_pref) {
+        attr = server_->attr_db()->ReplaceLocalPreferenceAndLocate(attr.get(),
+            local_pref);
+    }
 
     uint32_t reach_count = 0, unreach_count = 0;
     RoutingInstance *instance = GetRoutingInstance();
@@ -1685,7 +1719,7 @@ void BgpPeer::ProcessUpdate(const BgpProto::Update *msg, size_t msgsize) {
 
             DBRequest req;
             req.oper = DBRequest::DB_ENTRY_ADD_CHANGE;
-            req.data.reset(new InetTable::RequestData(attr, flags, 0));
+            req.data.reset(new InetTable::RequestData(attr, flags, 0, 0, 0));
             req.key.reset(new InetTable::RequestKey(prefix, this));
             table->Enqueue(&req);
         }

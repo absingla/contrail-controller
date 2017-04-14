@@ -122,6 +122,7 @@ struct BgpNeighborResp {
     33: optional peer_info.PeerUpdateStats tx_update_stats;
     34: optional peer_info.PeerSocketStats rx_socket_stats;
     35: optional peer_info.PeerSocketStats tx_socket_stats;
+    63: i16 dscp_value;
     42: optional peer_info.PeerRxErrorStats rx_error_stats;
 }
 
@@ -334,6 +335,7 @@ struct ShowRoutingInstance {
     9: string deleted_at;                           // Delete timestamp
     2: optional list<ShowRoutingInstanceTable> tables;
     11: optional list<ShowInstanceRoutingPolicyInfo> routing_policies;
+    14: optional list<string> neighbors;
 }
 
 response sandesh ShowRoutingInstanceResp {
@@ -581,6 +583,7 @@ struct ShowBgpInstanceConfig {
     13: bool allow_transit;
     14: bool pbb_evpn_enable;
     9: string last_change_at;
+    15: list<string> neighbors;
     5: list<ShowBgpServiceChainConfig> service_chain_infos;
     6: list<ShowBgpStaticRouteConfig> static_routes;
     11: list<ShowBgpRouteAggregateConfig> aggregate_routes;

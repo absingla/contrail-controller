@@ -42,7 +42,7 @@ public:
     static const int kBgpRouterServiceInvalidFd = -1;
 
     PktFlowInfo(Agent *a, boost::shared_ptr<PktInfo> info, FlowTable *ftable) :
-        l3_flow(info->l3_forwarding), family(info->family), pkt(info),
+        l3_flow(false), family(info->family), pkt(info),
         flow_table(ftable), agent(a),
         flow_source_vrf(-1), flow_dest_vrf(-1), nat_done(false),
         nat_ip_saddr(), nat_ip_daddr(), nat_sport(0), nat_dport(0), nat_vrf(0),
@@ -50,8 +50,8 @@ public:
         short_flow(false), local_flow(false), linklocal_flow(false),
         tcp_ack(false), linklocal_bind_local_port(false),
         linklocal_src_port_fd(kLinkLocalInvalidFd),
-        ecmp(false), in_component_nh_idx(-1), out_component_nh_idx(-1),
-        trap_rev_flow(false), fip_snat(false), fip_dnat(false), snat_fip(),
+        ecmp(false), out_component_nh_idx(-1),
+        fip_snat(false), fip_dnat(false), snat_fip(),
         short_flow_reason(0), peer_vrouter(), tunnel_type(TunnelType::INVALID),
         flood_unknown_unicast(false), bgp_router_service_flow(false),
         alias_ip_flow(false), ttl(0) {
@@ -69,6 +69,8 @@ public:
                                 PktControlInfo *out);
     void BgpRouterServiceTranslate(const PktInfo *pkt, PktControlInfo *in,
                                    PktControlInfo *out);
+    void ProcessHealthCheckFatFlow(const VmInterface *vmi, const PktInfo *pkt,
+                                   PktControlInfo *in, PktControlInfo *out);
     void FloatingIpSNat(const PktInfo *pkt, PktControlInfo *in,
                         PktControlInfo *out);
     void FloatingIpDNat(const PktInfo *pkt, PktControlInfo *in,
@@ -80,10 +82,10 @@ public:
     void Add(const PktInfo *pkt, PktControlInfo *in,
              PktControlInfo *out);
     bool Process(const PktInfo *pkt, PktControlInfo *in, PktControlInfo *out);
+    bool ValidateConfig(const PktInfo *pkt, PktControlInfo *in);
     static bool GetIngressNwPolicyAclList(const Interface *intf,
                                           const VnEntry *vn,
                                           MatchPolicy *m_policy);
-    void RewritePktInfo(uint32_t index);
     bool VrfTranslate(const PktInfo *pkt, PktControlInfo *ctrl,
                       PktControlInfo *rev_flow, const IpAddress &src_ip,
                       bool nat_flow);
@@ -169,9 +171,7 @@ public:
     int                 linklocal_src_port_fd;
 
     bool                ecmp;
-    uint32_t            in_component_nh_idx;
     uint32_t            out_component_nh_idx;
-    bool                trap_rev_flow;
 
     // Following fields are required for FIP stats accounting
     bool                fip_snat;

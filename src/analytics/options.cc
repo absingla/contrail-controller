@@ -5,7 +5,10 @@
 
 #include <fstream>
 #include <iostream>
+#include <boost/foreach.hpp>
+#include <boost/assign/list_of.hpp>
 #include <boost/asio/ip/host_name.hpp>
+#include <boost/assign/list_of.hpp>
 
 #include "analytics/buildinfo.h"
 #include "base/contrail_ports.h"
@@ -18,6 +21,7 @@
 
 using namespace std;
 using namespace boost::asio::ip;
+using namespace boost::assign;
 namespace opt = boost::program_options;
 
 // Process command line options for collector   .
@@ -47,17 +51,29 @@ void Options::Initialize(EventManager &evm,
         exit(-1);
     }
 
-    vector<string> conf_files;
-    conf_files.push_back("/etc/contrail/contrail-collector.conf");
-    conf_files.push_back("/etc/contrail/contrail-keystone-auth.conf");
+    map<string, vector<string> >::const_iterator it =
+        g_vns_constants.ServicesDefaultConfigurationFiles.find(
+            g_vns_constants.SERVICE_COLLECTOR);
+    assert(it != g_vns_constants.ServicesDefaultConfigurationFiles.end());
+    const vector<string> &conf_files(it->second);
 
     opt::options_description generic("Generic options");
 
     // Command line only options.
+    ostringstream conf_files_oss;
+    bool first = true;
+    BOOST_FOREACH(const string &cfile, conf_files) {
+        if (first) {
+            conf_files_oss << cfile;
+            first = false;
+        } else {
+            conf_files_oss << ", " << cfile;
+        }
+    }
     generic.add_options()
         ("conf_file", opt::value<vector<string> >()->default_value(
-                                               conf_files,
-             "Configuration file"))
+             conf_files, conf_files_oss.str()),
+             "Configuration file")
          ("help", "help message")
         ("version", "Display version information")
     ;
@@ -71,7 +87,6 @@ void Options::Initialize(EventManager &evm,
         ContrailPorts::CollectorStructuredSyslogPort();
     uint16_t default_partitions = 15;
     uint16_t default_http_server_port = ContrailPorts::HttpPortCollector();
-    uint16_t default_discovery_port = ContrailPorts::DiscoveryServerPort();
     uint32_t default_disk_usage_percentage_high_watermark0 = 90;
     uint32_t default_disk_usage_percentage_low_watermark0 = 85;
     uint32_t default_disk_usage_percentage_high_watermark1 = 80;
@@ -97,8 +112,25 @@ void Options::Initialize(EventManager &evm,
 
     string default_zookeeper_server("127.0.0.1:2181");
 
+    // e.g. "ModuleClientState-max_sm_queue_count:AggProxySumAnomalyEWM01:AggProxySum"
+    vector<string> default_uve_proxy_list = list_of
+("UveVirtualNetworkAgent-egress_flow_count:AggProxySumAnomalyEWM01:AggProxySum")
+("UveVirtualNetworkAgent-ingress_flow_count:AggProxySumAnomalyEWM01:AggProxySum");
+
+    string default_uve_proxy;
+    for (vector<string>::const_iterator it = default_uve_proxy_list.begin();
+            it != default_uve_proxy_list.end(); it++) {
+        default_uve_proxy = default_uve_proxy + (*it) + std::string(" ");
+    }
+
     vector<string> default_kafka_broker_list;
     default_kafka_broker_list.push_back("");
+
+    string default_api_server("127.0.0.1:8082");
+    vector<string> default_api_server_list = list_of(default_api_server);
+
+    vector<string> default_structured_syslog_forward_destination;
+    default_structured_syslog_forward_destination.push_back("");
 
     // Command line and config file options.
     opt::options_description cassandra_config("Cassandra Configuration options");
@@ -117,18 +149,8 @@ void Options::Initialize(EventManager &evm,
             "Cassandra compaction strategy for flow tables");
 
     // Command line and config file options.
-    opt::options_description config("Configuration options");
-    config.add_options()
-        ("COLLECTOR.port", opt::value<uint16_t>()->default_value(
-                                                default_collector_port),
-             "Listener port of sandesh collector server")
-        ("COLLECTOR.server",
-             opt::value<string>()->default_value("0.0.0.0"),
-             "IP address of sandesh collector server")
-        ("COLLECTOR.protobuf_port",
-            opt::value<uint16_t>()->default_value(
-                default_collector_protobuf_port),
-         "Listener port of Google Protocol Buffer collector server")
+    opt::options_description database_config("Database Configuration options");
+    database_config.add_options()
         ("DATABASE.disk_usage_percentage.high_watermark0",
             opt::value<uint32_t>()->default_value(
                 default_disk_usage_percentage_high_watermark0),
@@ -153,7 +175,6 @@ void Options::Initialize(EventManager &evm,
             opt::value<uint32_t>()->default_value(
                 default_disk_usage_percentage_low_watermark2),
             "Disk usage percentage low watermark 2")
-
         ("DATABASE.pending_compaction_tasks.high_watermark0",
             opt::value<uint32_t>()->default_value(
                 default_pending_compaction_tasks_high_watermark0),
@@ -178,7 +199,6 @@ void Options::Initialize(EventManager &evm,
             opt::value<uint32_t>()->default_value(
                 default_pending_compaction_tasks_low_watermark2),
             "Cassandra pending compaction tasks low watermark 2")
-
         ("DATABASE.high_watermark0.message_severity_level",
             opt::value<string>()->default_value(
                 default_high_watermark0_message_severity_level),
@@ -204,23 +224,69 @@ void Options::Initialize(EventManager &evm,
                 default_low_watermark2_message_severity_level),
             "Low Watermark 2 Message severity level")
 
+        ("DATABASE.cluster_id", opt::value<string>()->default_value(""),
+             "Analytics Cluster Id")
+        ("DATABASE.disable_all_writes",
+            opt::bool_switch(&cassandra_options_.disable_all_db_writes_),
+            "Disable all writes to the database")
+        ("DATABASE.disable_statistics_writes",
+            opt::bool_switch(&cassandra_options_.disable_db_stats_writes_),
+            "Disable statistics writes to the database")
+        ("DATABASE.disable_message_writes",
+            opt::bool_switch(&cassandra_options_.disable_db_messages_writes_),
+            "Disable message writes to the database")
+        ("DATABASE.enable_message_keyword_writes",
+            opt::bool_switch(&enable_db_messages_keyword_writes_)->
+                default_value(false),
+            "Enable message keyword writes to the database")
+        ;
+
+    // Command line and config file options.
+    opt::options_description collector_config("Collector Configuration options");
+    collector_config.add_options()
+        ("COLLECTOR.port", opt::value<uint16_t>()->default_value(
+                                                default_collector_port),
+             "Listener port of sandesh collector server")
+        ("COLLECTOR.server",
+             opt::value<string>()->default_value("0.0.0.0"),
+             "IP address of sandesh collector server")
+        ("COLLECTOR.protobuf_port",
+            opt::value<uint16_t>()->default_value(
+                default_collector_protobuf_port),
+         "Listener port of Google Protocol Buffer collector server")
         ("COLLECTOR.structured_syslog_port",
             opt::value<uint16_t>()->default_value(
                 default_collector_structured_syslog_port),
          "Listener port of Structured Syslog collector server")
+        ("COLLECTOR.structured_syslog_forward_destination",
+           opt::value<vector<string> >()->default_value(
+               default_structured_syslog_forward_destination, ""),
+             "Structured Syslog Forward Destination List")
+        ;
 
+    // Command line and config file options.
+    opt::options_description config("Configuration options");
+    config.add_options()
         ("DEFAULT.analytics_data_ttl",
-             opt::value<uint64_t>()->default_value(g_viz_constants.TtlValuesDefault.find(TtlType::GLOBAL_TTL)->second),
-             "global TTL(hours) for analytics data")
+             opt::value<uint64_t>()->default_value(
+                 g_viz_constants.TtlValuesDefault.find(
+                 TtlType::GLOBAL_TTL)->second),
+             "TTL in hours for analytics data")
         ("DEFAULT.analytics_config_audit_ttl",
-             opt::value<uint64_t>()->default_value(g_viz_constants.TtlValuesDefault.find(TtlType::CONFIGAUDIT_TTL)->second),
-             "global TTL(hours) for analytics config audit data")
+             opt::value<uint64_t>()->default_value(
+                 g_viz_constants.TtlValuesDefault.find(
+                 TtlType::CONFIGAUDIT_TTL)->second),
+             "TTL in hours for analytics configuration audit data")
         ("DEFAULT.analytics_statistics_ttl",
-             opt::value<uint64_t>()->default_value(g_viz_constants.TtlValuesDefault.find(TtlType::STATSDATA_TTL)->second),
-             "global TTL(hours) for analytics stats data")
+             opt::value<uint64_t>()->default_value(
+                 g_viz_constants.TtlValuesDefault.find(
+                 TtlType::STATSDATA_TTL)->second),
+             "TTL in hours for analytics statistics data")
         ("DEFAULT.analytics_flow_ttl",
-             opt::value<uint64_t>()->default_value(g_viz_constants.TtlValuesDefault.find(TtlType::FLOWDATA_TTL)->second),
-             "global TTL(hours) for analytics flow data")
+             opt::value<uint64_t>()->default_value(
+                 g_viz_constants.TtlValuesDefault.find(
+                 TtlType::FLOWDATA_TTL)->second),
+             "TTL in hours for analytics flow data")
         ("DEFAULT.cassandra_server_list",
            opt::value<vector<string> >()->default_value(
                default_cassandra_server_list, default_cassandra_server),
@@ -232,6 +298,10 @@ void Options::Initialize(EventManager &evm,
            opt::value<vector<string> >()->default_value(
                default_kafka_broker_list, ""),
              "Kafka Broker List")
+        ("DEFAULT.uve_proxy_list",
+           opt::value<vector<string> >()->default_value(
+               default_uve_proxy_list, default_uve_proxy),
+             "UVE Proxy List")
         ("DEFAULT.partitions",
             opt::value<uint16_t>()->default_value(
                 default_partitions),
@@ -282,28 +352,11 @@ void Options::Initialize(EventManager &evm,
         ("DEFAULT.disable_flow_collection",
             opt::bool_switch(&disable_flow_collection_),
             "Disable flow message collection")
-        ("DATABASE.cluster_id", opt::value<string>()->default_value(""),
-             "Analytics Cluster Id")
-        ("DATABASE.disable_all_writes",
-            opt::bool_switch(&cassandra_options_.disable_all_db_writes_),
-            "Disable all writes to the database")
-        ("DATABASE.disable_statistics_writes",
-            opt::bool_switch(&cassandra_options_.disable_db_stats_writes_),
-            "Disable statistics writes to the database")
-        ("DATABASE.disable_message_writes",
-            opt::bool_switch(&cassandra_options_.disable_db_messages_writes_),
-            "Disable message writes to the database")
-        ("DATABASE.enable_message_keyword_writes",
-            opt::bool_switch(&enable_db_messages_keyword_writes_)->
-                default_value(false),
-            "Enable message keyword writes to the database")
+        ;
 
-        ("DISCOVERY.port", opt::value<uint16_t>()->default_value(
-                                                       default_discovery_port),
-             "Port of Discovery Server")
-        ("DISCOVERY.server", opt::value<string>()->default_value(""),
-             "IP address of Discovery Server")
-
+    // Command line and config file options.
+    opt::options_description redis_config("Redis Configuration options");
+    redis_config.add_options()
         ("REDIS.port",
              opt::value<uint16_t>()->default_value(default_redis_port),
              "Port of Redis-uve server")
@@ -311,6 +364,11 @@ void Options::Initialize(EventManager &evm,
              "IP address of Redis Server")
         ("REDIS.password", opt::value<string>()->default_value(""),
              "password for Redis Server")
+        ;
+
+    // Command line and config file options.
+    opt::options_description keystone_config("Keystone Configuration options");
+    keystone_config.add_options()
         ("KEYSTONE.auth_host", opt::value<string>()->default_value("127.0.0.1"),
              "IP address of keystone Server")
         ("KEYSTONE.auth_port",
@@ -336,7 +394,11 @@ void Options::Initialize(EventManager &evm,
                     "/etc/contrail/ks-key"), "Keystone private key")
         ("KEYSTONE.cafile", opt::value<string>()->default_value(
                     "/etc/contrail/ks-ca"), "Keystone CA chain")
+        ;
 
+    // Command line and config file options.
+    opt::options_description sandesh_config("Sandesh Configuration options");
+    sandesh_config.add_options()
         ("SANDESH.sandesh_keyfile", opt::value<string>()->default_value(
             "/etc/contrail/ssl/private/server-privkey.pem"),
             "Sandesh ssl private key")
@@ -354,8 +416,24 @@ void Options::Initialize(EventManager &evm,
              "Enable ssl for introspect connection")
         ;
 
-    config_file_options_.add(config).add(cassandra_config);
-    cmdline_options.add(generic).add(config).add(cassandra_config);
+    // Command line and config file options for api-server
+    opt::options_description api_server_config("Api-Server Configuration options");
+    api_server_config.add_options()
+        ("API_SERVER.api_server_list",
+         opt::value<vector<string> >()->default_value(
+            default_api_server_list, default_api_server),
+            "Api-Server list")
+        ("API_SERVER.api_server_use_ssl",
+         opt::bool_switch(&api_server_use_ssl_),
+         "Use ssl for connecting to Api-Server")
+        ;
+
+    config_file_options_.add(config).add(cassandra_config)
+        .add(database_config).add(sandesh_config).add(keystone_config)
+        .add(collector_config).add(redis_config).add(api_server_config);
+    cmdline_options.add(generic).add(config).add(cassandra_config)
+        .add(database_config).add(sandesh_config).add(keystone_config)
+        .add(collector_config).add(redis_config).add(api_server_config);
 }
 
 template <typename ValueType>
@@ -538,6 +616,8 @@ void Options::Process(int argc, char *argv[],
     } else {
         collector_structured_syslog_port_configured_ = false;
     }
+    GetOptValue< vector<string> >(var_map, collector_structured_syslog_forward_destination_,
+                                  "COLLECTOR.structured_syslog_forward_destination");
 
     GetOptValue<uint64_t>(var_map, analytics_data_ttl_,
                      "DEFAULT.analytics_data_ttl");
@@ -564,6 +644,8 @@ void Options::Process(int argc, char *argv[],
                                   "DEFAULT.cassandra_server_list");
     GetOptValue<string>(var_map, zookeeper_server_list_,
                         "DEFAULT.zookeeper_server_list");
+    GetOptValue< vector<string> >(var_map, uve_proxy_list_,
+                                  "DEFAULT.uve_proxy_list");
     GetOptValue< vector<string> >(var_map, kafka_broker_list_,
                                   "DEFAULT.kafka_broker_list");
     GetOptValue<uint16_t>(var_map, partitions_, "DEFAULT.partitions");
@@ -586,9 +668,6 @@ void Options::Process(int argc, char *argv[],
     GetOptValue<int>(var_map, ipfix_port_, "DEFAULT.ipfix_port");
     GetOptValue<uint32_t>(var_map, sandesh_ratelimit_,
                               "DEFAULT.sandesh_send_rate_limit");
-
-    GetOptValue<uint16_t>(var_map, discovery_port_, "DISCOVERY.port");
-    GetOptValue<string>(var_map, discovery_server_, "DISCOVERY.server");
 
     GetOptValue<uint16_t>(var_map, redis_port_, "REDIS.port");
     GetOptValue<string>(var_map, redis_server_, "REDIS.server");
@@ -637,4 +716,9 @@ void Options::Process(int argc, char *argv[],
                       "SANDESH.sandesh_ssl_enable");
     GetOptValue<bool>(var_map, sandesh_config_.introspect_ssl_enable,
                       "SANDESH.introspect_ssl_enable");
+
+    GetOptValue< vector<string> >(var_map, api_server_list_,
+                                  "API_SERVER.api_server_list");
+    GetOptValue<bool>(var_map, api_server_use_ssl_,
+                      "API_SERVER.api_server_use_ssl");
 }

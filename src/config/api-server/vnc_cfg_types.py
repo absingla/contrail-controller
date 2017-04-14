@@ -29,18 +29,18 @@ from provision_defaults import *
 
 
 def _parse_rt(rt):
-     (prefix, asn, target) = rt.split(':')
-     if prefix != 'target':
-         raise ValueError()
-     target = int(target)
-     if not asn.isdigit():
-         try:
-             netaddr.IPAddress(asn)
-         except netaddr.core.AddrFormatError:
-             raise ValueError()
-     else:
-         asn = int(asn)
-     return (prefix, asn, target)
+    (prefix, asn, target) = rt.split(':')
+    if prefix != 'target':
+        raise ValueError()
+    target = int(target)
+    if not asn.isdigit():
+        try:
+            netaddr.IPAddress(asn)
+        except netaddr.core.AddrFormatError:
+            raise ValueError()
+    else:
+        asn = int(asn)
+    return (prefix, asn, target)
 
 
 class ResourceDbMixin(object):
@@ -105,19 +105,16 @@ class ResourceDbMixin(object):
         return True, ''
 
     @classmethod
-    def dbe_create_notification(cls, obj_ids, obj_dict):
+    def dbe_create_notification(cls, db_conn, obj_id):
         pass
-    #end dbe_create_notification
 
     @classmethod
-    def dbe_update_notification(cls, obj_ids):
+    def dbe_update_notification(cls, obj_id):
         pass
-    #end dbe_update_notification
 
     @classmethod
-    def dbe_delete_notification(cls, obj_ids, obj_dict):
+    def dbe_delete_notification(cls, obj_id, obj_dict):
         pass
-    #end dbe_delete_notification
 
     @classmethod
     def pre_dbe_read(cls, id, db_conn):
@@ -135,8 +132,7 @@ class Resource(ResourceDbMixin):
     @classmethod
     def dbe_read(cls, db_conn, res_type, obj_uuid, obj_fields=None):
         try:
-            ok, result = db_conn.dbe_read(res_type,
-                                          {'uuid': obj_uuid}, obj_fields)
+            ok, result = db_conn.dbe_read(res_type, obj_uuid, obj_fields)
         except cfgm_common.exceptions.NoIdError:
             return (False, (404, 'No %s: %s' %(res_type, obj_uuid)))
         if not ok:
@@ -227,8 +223,7 @@ class FloatingIpServer(Resource, FloatingIp):
         fip_pool_fq_name = fip_obj_dict['fq_name'][:-1]
         fip_pool_uuid = db_conn.fq_name_to_uuid('floating_ip_pool',
             fip_pool_fq_name)
-        ok, res = cls.dbe_read(db_conn, 'floating_ip_pool',
-            fip_pool_uuid)
+        ok, res = cls.dbe_read(db_conn, 'floating_ip_pool', fip_pool_uuid)
         if ok:
             # Successful read returns fip pool.
             fip_pool_dict = res
@@ -237,8 +232,7 @@ class FloatingIpServer(Resource, FloatingIp):
 
         # Get any subnets configured on the floating-ip-pool.
         try:
-            fip_subnets =\
-                fip_pool_dict['floating_ip_pool_subnets']
+            fip_subnets = fip_pool_dict['floating_ip_pool_subnets']
         except KeyError, TypeError:
             # It is acceptable that the prefixes and subnet_list may be absent
             # or may be None.
@@ -338,7 +332,10 @@ class FloatingIpServer(Resource, FloatingIp):
 
 
     @classmethod
-    def dbe_create_notification(cls, obj_ids, obj_dict):
+    def dbe_create_notification(cls, db_conn, obj_id):
+        ok, obj_dict = cls.dbe_read(db_conn, 'floating_ip', obj_id)
+        if not ok:
+            return
         if obj_dict['parent_type'] == 'instance-ip':
             return
 
@@ -348,7 +345,7 @@ class FloatingIpServer(Resource, FloatingIp):
     # end dbe_create_notification
 
     @classmethod
-    def dbe_delete_notification(cls, obj_ids, obj_dict):
+    def dbe_delete_notification(cls, obj_id, obj_dict):
         if obj_dict['parent_type'] == 'instance-ip':
             return
 
@@ -406,14 +403,17 @@ class AliasIpServer(Resource, AliasIp):
 
 
     @classmethod
-    def dbe_create_notification(cls, obj_ids, obj_dict):
+    def dbe_create_notification(cls, db_conn, obj_id):
+        ok, obj_dict = cls.dbe_read(db_conn, 'alias_ip', obj_id)
+        if not ok:
+            return
         aip_addr = obj_dict['alias_ip_address']
         vn_fq_name = obj_dict['fq_name'][:-2]
         cls.addr_mgmt.ip_alloc_notify(aip_addr, vn_fq_name)
     # end dbe_create_notification
 
     @classmethod
-    def dbe_delete_notification(cls, obj_ids, obj_dict):
+    def dbe_delete_notification(cls, obj_id, obj_dict):
         aip_addr = obj_dict['alias_ip_address']
         vn_fq_name = obj_dict['fq_name'][:-2]
         cls.addr_mgmt.ip_free_notify(aip_addr, vn_fq_name)
@@ -554,8 +554,7 @@ class InstanceIpServer(Resource, InstanceIp):
         if req_ip_addr and req_ip_addr != db_ip_addr:
             return (False, (400, 'Instance IP Address can not be changed'))
 
-        ok, result = cls.dbe_read(db_conn, 'virtual_network',
-                                  vn_uuid,
+        ok, result = cls.dbe_read(db_conn, 'virtual_network', vn_uuid,
                                   obj_fields=['network_ipam_refs'])
         if not ok:
             return ok, result
@@ -594,14 +593,17 @@ class InstanceIpServer(Resource, InstanceIp):
     # end post_dbe_delete
 
     @classmethod
-    def dbe_create_notification(cls, obj_ids, obj_dict):
+    def dbe_create_notification(cls, db_conn, obj_id):
+        ok, obj_dict = cls.dbe_read(db_conn, 'instance_ip', obj_id)
+        if not ok:
+            return
         ip_addr = obj_dict['instance_ip_address']
         vn_fq_name = obj_dict['virtual_network_refs'][0]['to']
         cls.addr_mgmt.ip_alloc_notify(ip_addr, vn_fq_name)
     # end dbe_create_notification
 
     @classmethod
-    def dbe_delete_notification(cls, obj_ids, obj_dict):
+    def dbe_delete_notification(cls, obj_id, obj_dict):
         try:
             ip_addr = obj_dict['instance_ip_address']
         except KeyError:
@@ -661,9 +663,7 @@ class LogicalRouterServer(Resource, LogicalRouter):
         if lr_id:
             if ('virtual_network_refs' in obj_dict or
                     'virtual_machine_interface_refs' in obj_dict):
-                ok, read_result = cls.dbe_read(db_conn,
-                                               'logical_router',
-                                               lr_id)
+                ok, read_result = cls.dbe_read(db_conn, 'logical_router', lr_id)
                 if not ok:
                     return ok, read_result
             if 'virtual_network_refs' in obj_dict:
@@ -836,6 +836,49 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
 
         vn_dict = result
 
+        vlan_tag = ((obj_dict.get('virtual_machine_interface_properties') or
+                     {}).get('sub_interface_vlan_tag'))
+        if vlan_tag:
+            if 'virtual_machine_interface_refs' in obj_dict:
+                primary_vmi_ref = obj_dict['virtual_machine_interface_refs']
+                ok, primary_vmi = cls.dbe_read(db_conn,
+                                  'virtual_machine_interface',
+                                  primary_vmi_ref[0]['uuid'],
+                                  obj_fields=['virtual_machine_interface_refs',
+                                  'virtual_machine_interface_properties'])
+                if not ok:
+                    return ok, primary_vmi
+
+                primary_vmi_vlan_tag = ((primary_vmi
+                                       .get('virtual_machine_interface_properties')
+                                       or{}).get('sub_interface_vlan_tag'))
+                if primary_vmi_vlan_tag:
+                    return (False, (400, "sub interface can't have another sub "
+                                         "interface as it's primary port"))
+
+                sub_vmi_refs = (primary_vmi.get('virtual_machine_interface_refs')
+                               or [])
+
+                sub_vmi_uuids = []
+                for vmi_ref in sub_vmi_refs:
+                    sub_vmi_uuids.append(vmi_ref['uuid'])
+
+                ok, sub_vmis = db_conn.dbe_list(
+                               'virtual_machine_interface',
+                               obj_uuids=sub_vmi_uuids,
+                               field_names=['virtual_machine_interface_properties'])
+                if not ok:
+                    return ok, sub_vmis
+
+                for vmi in sub_vmis:
+                    sub_vmi_vlan_tag = ((vmi
+                                       .get('virtual_machine_interface_properties')
+                                       or{}).get('sub_interface_vlan_tag'))
+                    if sub_vmi_vlan_tag == vlan_tag:
+                        msg = "Two sub interfaces under same primary port "\
+                              "can't have same Vlan tag"
+                        return (False, (400, msg))
+
         (ok, error) = cls._check_bridge_domain_vmi_association(obj_dict,
                                                        db_conn, vn_uuid, True)
         if not ok:
@@ -923,8 +966,7 @@ class VirtualMachineInterfaceServer(Resource, VirtualMachineInterface):
     def pre_dbe_update(cls, id, fq_name, obj_dict, db_conn,
                        prop_collection_updates=None, **kwargs):
 
-        ok, read_result = cls.dbe_read(
-                              db_conn, 'virtual_machine_interface', id)
+        ok, read_result = cls.dbe_read(db_conn, 'virtual_machine_interface', id)
         if not ok:
             return ok, read_result
 
@@ -1032,7 +1074,8 @@ class BridgeDomainServer(Resource, BridgeDomain):
         vn_uuid = obj_dict.get('parent_uuid')
         if vn_uuid is None:
             vn_uuid = db_conn.fq_name_to_uuid('virtual_network', obj_dict['fq_name'][0:3])
-        ok, result = cls.dbe_read(db_conn, 'virtual_network', vn_uuid, obj_fields=['bridge_domains'])
+        ok, result = cls.dbe_read(db_conn, 'virtual_network', vn_uuid,
+                                  obj_fields=['bridge_domains'])
         if not ok:
             return ok, result
         if 'bridge_domains' in result and len(result['bridge_domains']) == 1:
@@ -1137,18 +1180,65 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
 
 
     @classmethod
+    def _check_net_mode_for_flat_ipam(cls, obj_dict, db_dict):
+        net_mode = None
+        vn_props = None
+        if 'virtual_network_properties' in obj_dict:
+            vn_props = obj_dict['virtual_network_properties']
+        elif db_dict:
+            vn_props = db_dict.get('virtual_network_properties')
+        if vn_props:
+           net_mode = vn_props.get('forwarding_mode')
+
+        if net_mode != 'l3':
+            return (False, "flat-subnet is allowed only with l3 network")
+        else:
+            return (True, "")
+
+    @classmethod
     def _check_ipam_network_subnets(cls, obj_dict, db_conn, vn_uuid,
                                     db_dict=None):
         # if Network has subnets in network_ipam_refs, it should refer to
         # atleast one ipam with user-defined-subnet method. If network is
         # attached to all "flat-subnet", vn can not have any VnSubnetType cidrs
-        net_mode = None
-        virtual_network_properties = obj_dict.get('virtual_network_properties')
-        if virtual_network_properties is not None:
-           net_mode = virtual_network_properties.get('forwarding_mode')
 
+        if (('network_ipam_refs' not in obj_dict) and
+           ('virtual_network_properties' in obj_dict)):
+            # it is a network update without any changes in network_ipam_refs
+            # but changes in virtual_network_properties
+            # we need to read ipam_refs from db_dict and for any ipam if
+            # if subnet_method is flat-subnet, network_mode should be l3
+            if db_dict is None:
+                return (True, 200, '')
+            else:
+                db_ipam_refs = db_dict.get('network_ipam_refs') or []
+
+            ipam_with_flat_subnet = False
+            ipam_uuid_list = [ipam['uuid'] for ipam in db_ipam_refs]
+            if not ipam_uuid_list:
+                return (True, 200, '')
+
+            ok, ipam_lists = db_conn.dbe_list('network_ipam',
+                                              obj_uuids=ipam_uuid_list,
+                                              field_names=['ipam_subnet_method'])
+            if not ok:
+                return (ok, 500, 'Error in dbe_list: %s' % pformat(ipam_lists))
+            for ipam in ipam_lists:
+                if 'ipam_subnet_method' in ipam:
+                    subnet_method = ipam['ipam_subnet_method']
+                    ipam_with_flat_subnet = True
+                    break
+
+            if ipam_with_flat_subnet:
+                (ok, result) = cls._check_net_mode_for_flat_ipam(obj_dict,
+                                                                 db_dict)
+                if not ok:
+                    return (ok, 400, result)
+
+        # validate ipam_refs in obj_dict either update or remove
         ipam_refs = obj_dict.get('network_ipam_refs') or []
         ipam_subnets_list = []
+        ipam_with_flat_subnet = False
         for ipam in ipam_refs:
             ipam_fq_name = ipam['to']
             ipam_uuid = ipam.get('uuid')
@@ -1156,9 +1246,8 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                 ipam_uuid = db_conn.fq_name_to_uuid('network_ipam',
                                                     ipam_fq_name)
 
-            (ok, ipam_dict) = db_conn.dbe_read(
-                               obj_type='network_ipam',
-                               obj_ids={'uuid': ipam_uuid})
+            (ok, ipam_dict) = db_conn.dbe_read(obj_type='network_ipam',
+                                               obj_id=ipam_uuid)
             if not ok:
                 return (ok, 400, ipam_dict)
 
@@ -1167,6 +1256,7 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                 subnet_method = 'user-defined-subnet'
 
             if subnet_method == 'flat-subnet':
+                ipam_with_flat_subnet = True
                 subnets_list = cls.addr_mgmt._ipam_to_subnets(ipam_dict)
                 if not subnets_list:
                     subnets_list = []
@@ -1185,10 +1275,6 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                             return (False, 400,
                                 "with flat-subnet, network can not have user-defined subnet")
 
-                if (net_mode != 'l3'):
-                    return (False, 400,
-                            "flat-subnet is allowed only with l3 network")
-
             if subnet_method == 'user-defined-subnet':
                 (ok, result) = cls.addr_mgmt.net_check_subnet(ipam_subnets)
                 if not ok:
@@ -1199,6 +1285,12 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                     'AddrMgmt: subnet uuid is updated for vn %s'
                         % (vn_uuid), level=SandeshLevel.SYS_DEBUG)
         # end of ipam in ipam_refs
+
+        if ipam_with_flat_subnet:
+            (ok, result) = cls._check_net_mode_for_flat_ipam(obj_dict,
+                                                             db_dict)
+            if not ok:
+                return (ok, 400, result)
 
         if db_dict is None:
             db_dict = obj_dict
@@ -1286,9 +1378,8 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                 if not ipam_uuid:
                     ipam_uuid = db_conn.fq_name_to_uuid('network_ipam',
                                                         ipam_fq_name)
-                (ok, ipam_dict) = db_conn.dbe_read(
-                                      obj_type='network_ipam',
-                                      obj_ids={'uuid': ipam_uuid})
+                (ok, ipam_dict) = db_conn.dbe_read(obj_type='network_ipam',
+                                                   obj_id=ipam_uuid)
                 if not ok:
                     return (ok, (400, ipam_dict))
 
@@ -1362,9 +1453,12 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         if not ok:
             return (False, (409, error))
 
-        fields = ['network_ipam_refs', 'virtual_network_network_id', 'address_allocation_mode',
-                  'route_target_list', 'import_route_target_list', 'export_route_target_list',
-                  'multi_policy_service_chains_enabled']
+        fields = ['network_ipam_refs', 'virtual_network_network_id',
+                  'address_allocation_mode', 'route_target_list',
+                  'import_route_target_list', 'export_route_target_list',
+                  'multi_policy_service_chains_enabled',
+                  'instance_ip_back_refs', 'floating_ip_pools',
+                  'virtual_network_properties']
         ok, read_result = cls.dbe_read(db_conn, 'virtual_network', id,
                                        obj_fields=fields)
         if not ok:
@@ -1399,6 +1493,13 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         if not ok:
             return (ok, (409, result))
 
+        ipam_refs = obj_dict.get('network_ipam_refs') or []
+        if ipam_refs:
+            (ok, result) = cls.addr_mgmt.net_validate_subnet_update(read_result,
+                                                                    obj_dict)
+            if not ok:
+                return (ok, (400, result))
+
         # Check if network forwarding mode support BGP VPN types
         ok, result = BgpvpnServer.check_network_supports_vpn_type(
             db_conn, obj_dict, update=True)
@@ -1411,7 +1512,6 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
         if not ok:
             return ok, result
 
-        ipam_refs = obj_dict.get('network_ipam_refs') or []
         try:
             cls.addr_mgmt.net_update_req(fq_name, read_result, obj_dict, id)
             #update link with a subnet_uuid if ipam in read_result or obj_dict
@@ -1420,9 +1520,8 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
                 ipam_fq_name = ipam['to']
                 ipam_uuid = db_conn.fq_name_to_uuid('network_ipam',
                                                     ipam_fq_name)
-                (ok, ipam_dict) = db_conn.dbe_read(
-                                      obj_type='network_ipam',
-                                      obj_ids={'uuid': ipam_uuid})
+                (ok, ipam_dict) = db_conn.dbe_read(obj_type='network_ipam',
+                                                   obj_id=ipam_uuid)
                 if not ok:
                     return (ok, (409, ipam_dict))
 
@@ -1472,8 +1571,7 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
 
         backref_fields = RoutingInstance.backref_fields
         children_fields = RoutingInstance.children_fields
-        ok, result = cls.dbe_read(db_conn,
-                                  'routing_instance', ri_uuid,
+        ok, result = cls.dbe_read(db_conn, 'routing_instance', ri_uuid,
                                   obj_fields=backref_fields|children_fields)
         if not ok:
             return ok, result
@@ -1541,18 +1639,18 @@ class VirtualNetworkServer(Resource, VirtualNetwork):
     # end subnet_ip_count
 
     @classmethod
-    def dbe_create_notification(cls, obj_ids, obj_dict):
-        cls.addr_mgmt.net_create_notify(obj_ids, obj_dict)
+    def dbe_create_notification(cls, db_conn, obj_id):
+        cls.addr_mgmt.net_create_notify(obj_id)
     # end dbe_create_notification
 
     @classmethod
-    def dbe_update_notification(cls, obj_ids):
-        cls.addr_mgmt.net_update_notify(obj_ids)
+    def dbe_update_notification(cls, obj_id):
+        cls.addr_mgmt.net_update_notify(obj_id)
     # end dbe_update_notification
 
     @classmethod
-    def dbe_delete_notification(cls, obj_ids, obj_dict):
-        cls.addr_mgmt.net_delete_notify(obj_ids, obj_dict)
+    def dbe_delete_notification(cls, obj_id, obj_dict):
+        cls.addr_mgmt.net_delete_notify(obj_id, obj_dict)
     # end dbe_delete_notification
 
 # end class VirtualNetworkServer
@@ -1653,8 +1751,7 @@ class NetworkIpamServer(Resource, NetworkIpam):
             for ref in vn_refs:
                 vn_id = ref.get('uuid')
                 try:
-                    (ok, vn_dict) = db_conn.dbe_read('virtual_network',
-                                                     {'uuid':vn_id})
+                    (ok, vn_dict) = db_conn.dbe_read('virtual_network', vn_id)
                 except cfgm_common.exceptions.NoIdError:
                     continue
                 if not ok:
@@ -1720,6 +1817,11 @@ class NetworkIpamServer(Resource, NetworkIpam):
         if not ok:
             return (ok, (409, result))
 
+        (ok, result) = cls.addr_mgmt.ipam_validate_subnet_update(read_result,
+                                                                 obj_dict)
+        if not ok:
+            return (ok, (400, result))
+
         try:
             cls.addr_mgmt.ipam_update_req(fq_name, read_result, obj_dict, id)
             def undo():
@@ -1755,18 +1857,18 @@ class NetworkIpamServer(Resource, NetworkIpam):
     # end pre_dbe_delete
 
     @classmethod
-    def dbe_create_notification(cls, obj_ids, obj_dict):
-        cls.addr_mgmt.ipam_create_notify(obj_ids, obj_dict)
+    def dbe_create_notification(cls, db_conn, obj_id):
+        cls.addr_mgmt.ipam_create_notify(obj_id)
     # end dbe_create_notification
 
     @classmethod
-    def dbe_update_notification(cls, obj_ids):
-        cls.addr_mgmt.ipam_update_notify(obj_ids)
+    def dbe_update_notification(cls, obj_id):
+        cls.addr_mgmt.ipam_update_notify(obj_id)
     # end dbe_update_notification
 
     @classmethod
-    def dbe_delete_notification(cls, obj_ids, obj_dict):
-        cls.addr_mgmt.ipam_delete_notify(obj_ids, obj_dict)
+    def dbe_delete_notification(cls, obj_id, obj_dict):
+        cls.addr_mgmt.ipam_delete_notify(obj_id, obj_dict)
     # end dbe_update_notification
 
     @classmethod
@@ -2088,10 +2190,20 @@ def _check_policy_rules(entries, network_policy_rule=False):
             if protocol not in valids:
                 return (False, (400, 'Rule with invalid protocol : %s' %
                                 protocol))
+        src_sg_list = [addr.get('security_group') for addr in
+                  rule.get('src_addresses') or []]
+        dst_sg_list = [addr.get('security_group') for addr in
+                  rule.get('dst_addresses') or []]
 
         if network_policy_rule:
             if rule.get('action_list') is None:
                 return (False, (400, 'Action is required'))
+
+            src_sg = [True for sg in src_sg_list if sg != None]
+            dst_sg = [True for sg in dst_sg_list if sg != None]
+            if True in src_sg or True in dst_sg:
+                return (False, (400, 'Config Error: policy rule refering to'
+                                      ' security group is not allowed'))
         else:
             ethertype = rule.get('ethertype')
             if ethertype is not None:
@@ -2104,11 +2216,8 @@ def _check_policy_rules(entries, network_policy_rule=False):
                         if not ethertype == "IPv%s" % network.version:
                             return (False, (400, "Rule subnet %s doesn't match ethertype %s" %
                                             (network, ethertype)))
-            src_sg = [addr.get('security_group') for addr in
-                      rule.get('src_addresses') or []]
-            dst_sg = [addr.get('security_group') for addr in
-                      rule.get('dst_addresses') or []]
-            if ('local' not in src_sg and 'local' not in dst_sg):
+
+            if ('local' not in src_sg_list and 'local' not in dst_sg_list):
                 return (False, (400, "At least one of source or destination"
                                      " addresses must be 'local'"))
     return True, ""
@@ -2457,7 +2566,7 @@ class LoadbalancerMemberServer(Resource, LoadbalancerMember):
 
         for pool in lb_pools:
             ok, result = cls.dbe_read(db_conn, 'loadbalancer_pool',
-                                       pool['uuid'])
+                                      pool['uuid'])
             if not ok:
                 code, msg = result
                 if code == 404:
@@ -2720,7 +2829,7 @@ class FloatingIpPoolServer(Resource, FloatingIpPool):
 class PhysicalRouterServer(Resource, PhysicalRouter):
     @classmethod
     def post_dbe_read(cls, obj_dict, db_conn):
-        if 'physical_router_user_credentials' in obj_dict:
+        if obj_dict.get('physical_router_user_credentials'):
             if obj_dict['physical_router_user_credentials'].get('password'):
                 obj_dict['physical_router_user_credentials']['password'] = "**Password Hidden**"
 

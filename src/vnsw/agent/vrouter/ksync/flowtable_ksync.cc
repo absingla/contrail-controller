@@ -321,7 +321,7 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
                 (uint32_t)CompositeNH::kInvalidComponentNHIdx) {
             req.set_fr_ecmp_nh_index(flow_entry_->data().component_nh_idx);
         } else {
-            req.set_fr_ecmp_nh_index(0);
+            req.set_fr_ecmp_nh_index(-1);
         }
 
         if (action == VR_FLOW_ACTION_NAT) {
@@ -345,13 +345,14 @@ int FlowTableKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
                 }
             }
 
-            //TODO Seperate flags for BgpRouterService??
-            if (nat_flow->is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort) ||
-                nat_flow->is_flags_set(FlowEntry::BgpRouterService)) {
+            //Link local, flag determines relaxed policy
+            if (nat_flow->is_flags_set(FlowEntry::LinkLocalBindLocalSrcPort)) {
                 flags |= VR_FLOW_FLAG_LINK_LOCAL;
-                if (nat_flow->is_flags_set(FlowEntry::BgpRouterService)) {
-                    flags |= VR_FLOW_BGP_SERVICE;
-                }
+            }
+
+            //Bgp service, flag determines relaxed policy
+            if (nat_flow->is_flags_set(FlowEntry::BgpRouterService)) {
+                flags |= VR_FLOW_BGP_SERVICE;
             }
 
             flags |= VR_FLOW_FLAG_VRFT;
@@ -494,8 +495,8 @@ bool FlowTableKSyncEntry::Sync() {
     }
 
     uint32_t nh_id = NextHopTable::kRpfDiscardIndex;
-    if (flow_entry_->data().nh.get()) {
-        nh_id = flow_entry_->data().nh.get()->id();
+    if (flow_entry_->data().rpf_nh.get()) {
+        nh_id = flow_entry_->data().rpf_nh.get()->id();
     }
     if (src_nh_id_ != nh_id) {
         src_nh_id_ = nh_id;

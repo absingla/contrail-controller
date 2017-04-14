@@ -4,6 +4,7 @@
 
 import copy
 import uuid
+import netaddr
 from netaddr import IPNetwork, IPAddress, IPRange, all_matching_cidrs
 from vnc_quota import QuotaHelper
 from pprint import pformat
@@ -212,7 +213,7 @@ class Subnet(object):
             try:
                 start_ip = IPAddress(ip_pool['start'])
                 end_ip = IPAddress(ip_pool['end'])
-            except AddrFormatError:
+            except netaddr.core.AddrFormatError:
                 raise AddrMgmtInvalidIpAddr(name, ip_pool)
             if (start_ip not in network or end_ip not in network):
                 raise AddrMgmtOutofBoundAllocPool(name, ip_pool)
@@ -223,7 +224,7 @@ class Subnet(object):
         if gw:
             try:
                 gw_ip = IPAddress(gw)
-            except AddrFormatError:
+            except netaddr.core.AddrFormatError:
                 raise AddrMgmtInvalidGatewayIp(name, gw_ip)
 
         else:
@@ -237,7 +238,7 @@ class Subnet(object):
         if service_address:
             try:
                 service_node_address = IPAddress(service_address)
-            except AddrFormatError:
+            except netaddr.core.AddrFormatError:
                 raise AddrMgmtInvalidServiceNodeIp(name, service_node_address)
 
         else:
@@ -251,7 +252,7 @@ class Subnet(object):
         for nameserver in dns_nameservers or []:
             try:
                 ip_addr = IPAddress(nameserver)
-            except AddrFormatError:
+            except netaddr.core.AddrFormatError:
                 raise AddrMgmtInvalidDnsNameServer(name, nameserver)
 
         # check allocation-unit
@@ -527,10 +528,10 @@ class AddrMgmt(object):
 
         (ok, obj_dict) = db_conn.dbe_read(
                              obj_type=req_obj_type,
-                             obj_ids={'uuid':obj_uuid},
+                             obj_id=obj_uuid,
                              obj_fields=req_fields)
         return (ok, obj_dict)
-    #end _uuid_to_obj_dict
+    # end _uuid_to_obj_dict
 
     def _fq_name_to_obj_dict(self, req_obj_type, fq_name, req_fields=None):
         db_conn = self._get_db_conn()
@@ -689,12 +690,12 @@ class AddrMgmt(object):
                                      obj_dict, should_persist=True)
     # end net_create_req
 
-    def net_create_notify(self, obj_ids, obj_dict):
+    def net_create_notify(self, obj_id):
         db_conn = self._get_db_conn()
         try:
             (ok, result) = db_conn.dbe_read(
                                'virtual_network',
-                               obj_ids={'uuid': obj_ids['uuid']},
+                               obj_id=obj_id,
                                obj_fields=['fq_name', 'network_ipam_refs'])
         except cfgm_common.exceptions.NoIdError:
             return
@@ -705,9 +706,8 @@ class AddrMgmt(object):
             return
 
         vn_dict = result
-        vn_uuid = obj_ids['uuid']
         vn_fq_name_str = ':'.join(vn_dict['fq_name'])
-        self._create_net_subnet_objs(vn_fq_name_str, vn_uuid, vn_dict,
+        self._create_net_subnet_objs(vn_fq_name_str, obj_id, vn_dict,
                                      should_persist=False)
     # end net_create_notify
 
@@ -757,12 +757,12 @@ class AddrMgmt(object):
                                      should_persist=True)
     # end net_update_req
 
-    def net_update_notify(self, obj_ids):
+    def net_update_notify(self, obj_id):
         db_conn = self._get_db_conn()
         try:
             (ok, result) = db_conn.dbe_read(
                                 obj_type='virtual_network',
-                                obj_ids={'uuid': obj_ids['uuid']},
+                                obj_id=obj_id,
                                 obj_fields=['fq_name', 'network_ipam_refs'])
         except cfgm_common.exceptions.NoIdError:
             return
@@ -774,8 +774,7 @@ class AddrMgmt(object):
 
         vn_dict = result
         vn_fq_name_str = ':'.join(vn_dict['fq_name'])
-        vn_uuid = obj_ids['uuid']
-        self._create_net_subnet_objs(vn_fq_name_str, vn_uuid, vn_dict,
+        self._create_net_subnet_objs(vn_fq_name_str, obj_id, vn_dict,
                                      should_persist=False)
     # end net_update_notify
 
@@ -795,10 +794,9 @@ class AddrMgmt(object):
             pass
     # end net_delete_req
 
-    def net_delete_notify(self, obj_ids, obj_dict):
+    def net_delete_notify(self, obj_id, obj_dict):
         try:
-            vn_uuid = obj_dict['uuid']
-            del self._subnet_objs[vn_uuid]
+            del self._subnet_objs[obj_id]
         except KeyError:
             pass
     # end net_delete_notify
@@ -953,7 +951,7 @@ class AddrMgmt(object):
             for pool in alloc_pools or []:
                 try:
                     iprange = IPRange(pool['start'], pool['end'])
-                except AddrFormatError:
+                except netaddr.core.AddrFormatError:
                     err_msg = "Invalid allocation Pool start:%s, end:%s in subnet:%s" \
                     %(pool['start'], pool['end'], subnet_name)
                     return False, err_msg
@@ -967,7 +965,7 @@ class AddrMgmt(object):
             if gw is not None:
                 try:
                     gw_ip = IPAddress(gw)
-                except AddrFormatError:
+                except netaddr.core.AddrFormatError:
                     err_msg = "Invalid gateway Ip address:%s" \
                     %(gw)
                     return False, err_msg
@@ -984,7 +982,7 @@ class AddrMgmt(object):
             if service_address is not None:
                 try:
                     service_node_address = IPAddress(service_address)
-                except AddrFormatError:
+                except netaddr.core.AddrFormatError:
                     err_msg = "Invalid Dns Server Ip address:%s" \
                     %(service_address)
                     return False, err_msg
@@ -1000,8 +998,7 @@ class AddrMgmt(object):
         instip_refs = vn_dict.get('instance_ip_back_refs') or []
         for ref in instip_refs:
             try:
-                (ok, result) = db_conn.dbe_read(
-                    'instance_ip', {'uuid': ref['uuid']})
+                (ok, result) = db_conn.dbe_read('instance_ip', ref['uuid'])
             except cfgm_common.exceptions.NoIdError:
                 continue
             if not ok:
@@ -1024,8 +1021,7 @@ class AddrMgmt(object):
         fip_pool_refs = vn_dict.get('floating_ip_pools') or []
         for ref in fip_pool_refs:
             try:
-                (ok, result) = db_conn.dbe_read(
-                    'floating_ip_pool', {'uuid': ref['uuid']})
+                (ok, result) = db_conn.dbe_read('floating_ip_pool', ref['uuid'])
             except cfgm_common.exceptions.NoIdError:
                 continue
             if not ok:
@@ -1039,7 +1035,7 @@ class AddrMgmt(object):
             for floating_ip in floating_ips:
                 try:
                     (read_ok, read_result) = db_conn.dbe_read(
-                        'floating_ip', {'uuid': floating_ip['uuid']})
+                        'floating_ip', floating_ip['uuid'])
                 except cfgm_common.exceptions.NoIdError:
                     continue
                 if not read_ok:
@@ -1064,8 +1060,7 @@ class AddrMgmt(object):
         aip_pool_refs = vn_dict.get('alias_ip_pools') or []
         for ref in aip_pool_refs:
             try:
-                (ok, result) = db_conn.dbe_read(
-                    'alias_ip_pool', {'uuid': ref['uuid']})
+                (ok, result) = db_conn.dbe_read('alias_ip_pool', ref['uuid'])
             except cfgm_common.exceptions.NoIdError:
                 continue
             if not ok:
@@ -1081,7 +1076,7 @@ class AddrMgmt(object):
                 # new subnet_list
                 try:
                     (read_ok, read_result) = db_conn.dbe_read(
-                        'alias_ip', {'uuid': floating_ip['uuid']})
+                        'alias_ip', floating_ip['uuid'])
                 except cfgm_common.exceptions.NoIdError:
                     continue
                 if not read_ok:
@@ -1136,8 +1131,7 @@ class AddrMgmt(object):
         for ref in vn_refs:
             vn_id = ref.get('uuid')
             try:
-                (ok, read_result) = db_conn.dbe_read('virtual_network',
-                                                     {'uuid':vn_id})
+                (ok, read_result) = db_conn.dbe_read('virtual_network', vn_id)
             except cfgm_common.exceptions.NoIdError:
                 continue
             if not ok:
@@ -1179,6 +1173,114 @@ class AddrMgmt(object):
         return self._check_subnet_delete(delete_set, db_vn_dict)
     # end net_check_subnet_delete
 
+    # validate any change in subnet and reject if
+    # dns server and gw_ip got changed 
+    def _validate_subnet_update(self, req_subnets, db_subnets):
+        for req_subnet in req_subnets:
+            req_cidr = req_subnet.get('subnet')
+            req_df_gw = req_subnet.get('default_gateway')
+            req_dns = req_subnet.get('dns_server_address')
+            for db_subnet in db_subnets:
+                db_cidr = db_subnet.get('subnet')
+                if req_cidr is None or db_cidr is None:
+                    continue
+                if req_cidr != db_cidr:
+                    continue
+
+                # for a given subnet, default gateway should not be different
+                db_df_gw = db_subnet.get('default_gateway')
+                db_prefix = db_cidr.get('ip_prefix')
+                db_prefix_len = db_cidr.get('ip_prefix_len')
+
+                network = IPNetwork('%s/%s' % (db_prefix, db_prefix_len))
+                if db_subnet.get('addr_from_start'):
+                    df_gw_ip = str(IPAddress(network.first + 1))
+                    df_dns = str(IPAddress(network.first + 2))
+                else:
+                    df_gw_ip = str(IPAddress(network.last - 1))
+                    df_dns = str(IPAddress(network.last - 2))
+
+                if db_df_gw != req_df_gw:
+                    invalid_update = False
+                    if ((req_df_gw is None) and (db_df_gw != df_gw_ip)):
+                        invalid_update = True
+
+                    if ((req_df_gw != None) and (req_df_gw != df_gw_ip)):
+                        invalid_update = True
+                    if invalid_update is True: 
+                        err_msg = "default gateway change is not allowed" +\
+                                  " orig:%s, new: %s" \
+                                  %(db_df_gw, req_df_gw)
+                        return False, err_msg
+
+                # for a given subnet, dns server address should not be different
+                db_dns = db_subnet.get('dns_server_address')
+                if db_dns != req_dns:
+                    invalid_update = False
+                    if ((req_dns is None) and (db_dns != df_dns)):
+                        invalid_update = True
+
+                    if ((req_dns != None) and (req_dns != df_dns)):
+                        invalid_update = True
+                    if invalid_update is True: 
+                        err_msg = "dns server change is not allowed" +\
+                                  " orig:%s, new: %s" \
+                                  %(db_dns, req_dns)
+                        return False, err_msg
+
+        return True, ""
+    # end _validate_subnet_update
+
+    # validate ipam_subnets configured at ipam
+    # reject change in gw_ip and dsn_server in any subnet
+    def ipam_validate_subnet_update(self, db_ipam_dict, req_ipam_dict):
+        req_ipam_subnets = req_ipam_dict.get('ipam_subnets')
+        db_ipam_subnets = db_ipam_dict.get('ipam_subnets')
+        if req_ipam_subnets is None or db_ipam_subnets is None:
+            return True, ""
+
+        req_subnets = req_ipam_subnets.get('subnets') or []
+        db_subnets = db_ipam_subnets.get('subnets') or []
+        (ok, result) = self._validate_subnet_update(req_subnets, db_subnets)
+        if not ok:
+            return ok, result
+
+        return True, ""
+    # end ipam_validate_subnet_update
+
+    # validate ipam_subnets configured at ipam->vn link
+    # reject change in gw_ip and dsn_server in any subnet
+    def net_validate_subnet_update(self, db_vn_dict, req_vn_dict):
+        if 'network_ipam_refs' not in req_vn_dict:
+            # subnets not modified in request
+            return True, ""
+        if 'network_ipam_refs' not in db_vn_dict:
+            # all subnets in req_vn_dict are new.
+            return True, ""
+
+        # check if gw_ip and dns_address are not modified
+        # in requested network_ipam_refs for any given subnets.
+        req_ipam_refs = req_vn_dict.get('network_ipam_refs')
+        db_ipam_refs = db_vn_dict.get('network_ipam_refs')
+        for req_ref in req_ipam_refs:
+            req_ipam_ref_uuid = req_ref.get('uuid')
+            for db_ref in db_ipam_refs:
+                db_ipam_ref_uuid = db_ref.get('uuid')
+                if db_ipam_ref_uuid != req_ipam_ref_uuid:
+                    continue
+
+                req_vnsn_data = req_ref.get('attr')
+                req_subnets = req_vnsn_data.get('ipam_subnets') or []
+                db_vnsn_data = db_ref.get('attr')
+                db_subnets = db_vnsn_data.get('ipam_subnets') or []
+                (ok, result) = self._validate_subnet_update(req_subnets, db_subnets)
+                if not ok:
+                    return ok, result
+               
+        return True, ""
+    # end net_validate_subnet_update
+
+                                
     # return number of ip address currently allocated for a subnet
     # count will also include reserved ips
     def ip_count_req(self, vn_fq_name, subnet_uuid):
@@ -1668,9 +1770,15 @@ class AddrMgmt(object):
                                           should_persist=True)
     # end ipam_create_req
 
-    def ipam_create_notify(self, obj_ids, obj_dict):
+    def ipam_create_notify(self, obj_id):
+        db_conn = self._get_db_conn()
+        try:
+            (ok, obj_dict) = db_conn.dbe_read('network_ipam', obj_id=obj_id)
+        except cfgm_common.exceptions.NoIdError:
+            return
+
         if obj_dict.get('ipam_subnet_method') == 'flat-subnet':
-            self._create_ipam_subnet_objs(obj_ids['uuid'], obj_dict,
+            self._create_ipam_subnet_objs(obj_id, obj_dict,
                                           should_persist=False)
     # end ipam_create_notify
 
@@ -1695,10 +1803,9 @@ class AddrMgmt(object):
             pass
     # end ipam_delete_req
 
-    def ipam_delete_notify(self, obj_ids, obj_dict):
+    def ipam_delete_notify(self, obj_id, obj_dict):
         try:
-            ipam_uuid = obj_dict['uuid']
-            del self._subnet_objs[ipam_uuid]
+            del self._subnet_objs[obj_id]
         except KeyError:
             pass
     # end ipam_delete_notify
@@ -1751,12 +1858,10 @@ class AddrMgmt(object):
                                       should_persist=True)
     # end ipam_update_req
 
-    def ipam_update_notify(self, obj_ids):
+    def ipam_update_notify(self, obj_id):
         db_conn = self._get_db_conn()
         try:
-            (ok, result) = db_conn.dbe_read(
-                               'network_ipam',
-                               obj_ids={'uuid': obj_ids['uuid']})
+            (ok, result) = db_conn.dbe_read('network_ipam', obj_id=obj_id)
         except cfgm_common.exceptions.NoIdError:
             return
 
@@ -1766,8 +1871,7 @@ class AddrMgmt(object):
             return
 
         ipam_dict = result
-        ipam_uuid = obj_ids['uuid']
-        self._create_ipam_subnet_objs(ipam_uuid, ipam_dict,
+        self._create_ipam_subnet_objs(obj_id, ipam_dict,
                                      should_persist=False)
     # end ipam_update_notify
 

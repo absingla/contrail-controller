@@ -260,7 +260,7 @@ void MulticastHandler::AddBridgeDomain(DBTablePartBase *partition,
     if (e->IsDeleted() || bd->vrf() == NULL || bd->vn() == NULL) {
         if (state) {
             MulticastGroupObject *obj =
-                FindFloodGroupObject(bd->vrf()->GetName());
+                FindFloodGroupObject(state->vrf_name_);
             assert(obj);
             obj->reset_bridge_domain();
             bd->ClearState(partition->parent(), bridge_domain_id_);
@@ -283,6 +283,7 @@ void MulticastHandler::AddBridgeDomain(DBTablePartBase *partition,
     }
 
     if (state->vxlan_id_ != bd->isid()) {
+        DeleteEvpnPath(obj);
         state->vxlan_id_ = bd->isid();
         obj->set_vxlan_id(state->vxlan_id_);
         Resync(obj);
@@ -900,11 +901,12 @@ void MulticastHandler::ModifyEvpnMembers(const Peer *peer,
     MulticastGroupObject *obj = FindActiveGroupObject(vrf_name, grp);
     std::string derived_vrf_name = vrf_name;
 
-    if (ethernet_tag) {
+    if (ethernet_tag && obj) {
         MulticastGroupObject *dependent_mg =
             obj->GetDependentMG(ethernet_tag);
         if (dependent_mg) {
             obj = dependent_mg;
+            derived_vrf_name = obj->vrf_name();
         }
     }
 
@@ -921,7 +923,7 @@ void MulticastHandler::ModifyEvpnMembers(const Peer *peer,
     TriggerRemoteRouteChange(obj, peer, derived_vrf_name, olist,
                              peer_identifier, delete_op, Composite::EVPN,
                              MplsTable::kInvalidLabel, false, ethernet_tag);
-    MCTRACE(Log, "Add EVPN TOR Olist ", vrf_name, grp.to_string(), 0);
+    MCTRACE(Log, "Add EVPN TOR Olist ", derived_vrf_name, grp.to_string(), 0);
 }
 
 void MulticastHandler::ModifyTorMembers(const Peer *peer,
@@ -959,9 +961,9 @@ void MulticastGroupObject::FlushAllPeerInfo(const Agent *agent,
         (peer_identifier == INVALID_PEER_IDENTIFIER)) {
         agent->oper_db()->multicast()->DeleteBroadcast(peer, vrf_name_, 0,
                                                        Composite::FABRIC);
+        MCTRACE(Log, "Delete broadcast route", vrf_name_,
+                grp_address_.to_string(), 0);
     }
-    MCTRACE(Log, "Delete broadcast route", vrf_name_,
-            grp_address_.to_string(), 0);
 }
 
 MulticastHandler::MulticastHandler(Agent *agent)
@@ -1065,4 +1067,32 @@ void MulticastHandler::Resync(MulticastGroupObject *obj) {
                             dependent_mg->peer_identifier());
     }
     TriggerLocalRouteChange(obj, agent_->local_vm_peer());
+}
+
+void MulticastHandler::DeleteEvpnPath(MulticastGroupObject *obj) {
+    VrfKey key(obj->vrf_name());
+    VrfEntry *vrf =
+        static_cast <VrfEntry *>(agent_->vrf_table()->FindActiveEntry(&key));
+    if (vrf == NULL) {
+        return;
+    }
+
+    BridgeAgentRouteTable *br_table =
+        static_cast<BridgeAgentRouteTable *>(vrf->GetBridgeRouteTable());
+    BridgeRouteEntry *bridge_route =
+        br_table->FindRoute(MacAddress::BroadcastMac());
+    if (bridge_route == NULL){
+        return;
+    }
+
+    for(Route::PathList::iterator it = bridge_route->GetPathList().begin();
+        it != bridge_route->GetPathList().end();it++) {
+        AgentPath *path =
+            static_cast<AgentPath *>(it.operator->());
+        const Peer *peer = path->peer();
+        if (peer && peer->GetType() == Peer::BGP_PEER) {
+            DeleteBroadcast(peer, obj->vrf_name(), obj->vxlan_id(),
+                            Composite::EVPN);
+        }
+    }
 }

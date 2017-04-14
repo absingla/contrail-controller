@@ -139,6 +139,11 @@ void RouteExport::Notify(const Agent *agent,
             return;
     }
 
+    //If channel is no more active, ignore any updates.
+    //It may happen that notify is enqueued before channel is removed.
+    if (!AgentXmppChannel::IsBgpPeerActive(agent, bgp_xmpp_peer))
+        return;
+
     if (route->is_multicast()) {
         MulticastNotify(bgp_xmpp_peer, associate, partition, e);
     } else {
@@ -327,11 +332,15 @@ void RouteExport::MulticastNotify(AgentXmppChannel *bgp_xmpp_peer,
         }
 
         if ((state->ingress_replication_exported_ == true)) {
+            uint32_t label = state->label_;
+            if (route->vrf()->IsPbbVrf()) {
+                label = state->isid_;
+            }
             state->tunnel_type_ = TunnelType::INVALID;
             AgentXmppChannel::ControllerSendEvpnRouteDelete(bgp_xmpp_peer,
                                                             route,
                                                             state->vn_,
-                                                            state->label_,
+                                                            label,
                                                             state->destination_,
                                                             state->source_,
                                                             TunnelType::AllType());
@@ -432,6 +441,12 @@ void RouteExport::SubscribeIngressReplication(Agent *agent,
     if (active_path->GetActiveLabel() != state->label_) {
         state->force_chg_ = true;
         state->label_ = active_path->GetActiveLabel();
+    }
+
+    if (route->vrf()->IsPbbVrf()) {
+        if (active_path->vxlan_id() == 0) {
+            return;
+        }
     }
 
     //Subcribe if:

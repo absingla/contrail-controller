@@ -8,7 +8,7 @@ import sys
 env = BuildEnv.Clone()
 
 env.Append(CPPPATH = env['TOP'])
-env.Append(CPPPATH = env['TOP'] + '/discovery/client')
+env.Append(CPPPATH = [env['TOP'] + '/database'])
 env.Append(CPPPATH = env['TOP'] + '/ifmap/client/test')
 
 env.Append(LIBPATH = env['TOP'] + '/io')
@@ -22,11 +22,10 @@ env.Append(LIBPATH = env['TOP'] + '/ifmap/test')
 env.Append(LIBPATH = env['TOP'] + '/xml')
 env.Append(LIBPATH = env['TOP'] + '/xmpp')
 env.Append(LIBPATH = env['TOP'] + '/schema')
-env.Append(LIBPATH = env['TOP'] + '/discovery/client')
 
 env.Prepend(LIBS = [
                     'ifmapio', 'bgp_schema', 'ifmap_vnc', 'ifmap_server',
-                    'ds', 'xmpp', 'peer_sandesh',
+                    'xmpp', 'peer_sandesh',
                     'sandesh', 'http', 'http_parser', 'httpc',
                     'curl', 'sandeshvns', 'process_info', 'io', 'control_node',
                     'ifmap_common', 'bgp_schema', 'ifmap_vnc', 
@@ -35,7 +34,7 @@ env.Prepend(LIBS = [
                     'base', 'gunit', 'crypto', 'ssl', 'boost_regex',
                     'ifmapio', 'libbgp_schema',
                     'libifmap_server', 'libifmap_vnc', 'cassandra_cql',
-                    'cassandra', 'gendb', 'ds', 'httpc',
+                    'cassandra', 'gendb', 'httpc',
                     'SimpleAmqpClient', 'rabbitmq'
                    ])
 
@@ -46,7 +45,25 @@ config_json_parser_test = env.UnitTest('config_json_parser_test',
                                        ['config_json_parser_test.cc'])
 env.Alias('src/ifmap/client:config_json_parser_test', config_json_parser_test)
 
-client_unit_tests = [ config_json_parser_test ]
+config_cassandra_client_test = env.UnitTest('config_cassandra_client_test',
+                                       ['config_cassandra_client_test.cc'])
+env.Alias('src/ifmap/client:config_cassandra_client_test',
+          config_cassandra_client_test)
+
+config_cassandra_client_reader_test = \
+    env.UnitTest('config_cassandra_client_reader_test',
+                 ['config_cassandra_client_reader_test.cc'])
+env.Alias('src/ifmap/client:config_cassandra_client_reader_test',
+          config_cassandra_client_reader_test)
+
+config_amqp_client_test = env.UnitTest('config_amqp_client_test',
+                                       ['config_amqp_client_test.cc'])
+env.Alias('src/ifmap/client:config_amqp_client_test', config_amqp_client_test)
+
+client_unit_tests = [ config_amqp_client_test,
+                      config_json_parser_test,
+                      config_cassandra_client_reader_test,
+                      config_cassandra_client_test ]
 
 client_test = env.TestSuite('ifmap-test', client_unit_tests)
 

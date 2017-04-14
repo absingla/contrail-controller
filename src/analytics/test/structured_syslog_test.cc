@@ -198,14 +198,13 @@ TEST_F(StructuredSyslogStatWalkerTest, Basic) {
         boost::asio::ip::address::from_string("127.0.0.1", ec));
     boost::asio::ip::udp::endpoint rep(raddr, 0);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(test_structured_syslog.c_str());
-    boost::shared_ptr<ConfigDBConnection> cfgdbConnection (new ConfigDBConnection(0, 0));
-    StructuredSyslogConfig *structured_syslog_config = new StructuredSyslogConfig(cfgdbConnection);
-    structured_syslog::StructuredSyslogServerConfig *config_obj = new structured_syslog::StructuredSyslogServerConfig(structured_syslog_config);
+    boost::shared_ptr<ConfigDBConnection> cfgdbConnection(
+        new ConfigDBConnection(NULL, ConfigDBConnection::ApiServerList(),
+                               VncApiConfig()));
+    StructuredSyslogConfig *config_obj = new StructuredSyslogConfig(cfgdbConnection);
     bool r = structured_syslog::impl::ProcessStructuredSyslog(p, test_structured_syslog.length(), rep.address(),
-        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj);
-    delete structured_syslog_config;
+        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj, boost::shared_ptr<structured_syslog::StructuredSyslogForwarder>());
     delete config_obj;
-
     ASSERT_TRUE(r);
     if (r ==false) {
         ct.Verify();
@@ -221,12 +220,12 @@ TEST_F(StructuredSyslogStatWalkerTest, DeviceMultiSyslog) {
         boost::asio::ip::address::from_string("127.0.0.1", ec));
     boost::asio::ip::udp::endpoint rep(raddr, 0);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(test_structured_syslog.c_str());
-    boost::shared_ptr<ConfigDBConnection> cfgdbConnection (new ConfigDBConnection(0, 0));
-    StructuredSyslogConfig *structured_syslog_config = new StructuredSyslogConfig(cfgdbConnection);
-    structured_syslog::StructuredSyslogServerConfig *config_obj = new structured_syslog::StructuredSyslogServerConfig(structured_syslog_config);
+    boost::shared_ptr<ConfigDBConnection> cfgdbConnection(
+        new ConfigDBConnection(NULL, ConfigDBConnection::ApiServerList(),
+                               VncApiConfig()));
+    StructuredSyslogConfig *config_obj = new StructuredSyslogConfig(cfgdbConnection);
     bool r = structured_syslog::impl::ProcessStructuredSyslog(p, test_structured_syslog.length(), rep.address(),
-        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj);
-    delete structured_syslog_config;
+        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj, boost::shared_ptr<structured_syslog::StructuredSyslogForwarder>());
     delete config_obj;
     ASSERT_TRUE(r);
     if (r ==false) {
@@ -242,12 +241,12 @@ TEST_F(StructuredSyslogStatWalkerTest, DeviceSyslog) {
         boost::asio::ip::address::from_string("127.0.0.1", ec));
     boost::asio::ip::udp::endpoint rep(raddr, 0);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(test_structured_syslog.c_str());
-    boost::shared_ptr<ConfigDBConnection> cfgdbConnection (new ConfigDBConnection(0, 0));
-    StructuredSyslogConfig *structured_syslog_config = new StructuredSyslogConfig(cfgdbConnection);
-    structured_syslog::StructuredSyslogServerConfig *config_obj = new structured_syslog::StructuredSyslogServerConfig(structured_syslog_config);
+    boost::shared_ptr<ConfigDBConnection> cfgdbConnection(
+        new ConfigDBConnection(NULL, ConfigDBConnection::ApiServerList(),
+                               VncApiConfig()));
+    StructuredSyslogConfig *config_obj = new StructuredSyslogConfig(cfgdbConnection);
     bool r = structured_syslog::impl::ProcessStructuredSyslog(p, test_structured_syslog.length(), rep.address(),
-        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj);
-    delete structured_syslog_config;
+        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj, boost::shared_ptr<structured_syslog::StructuredSyslogForwarder>());
     delete config_obj;
     ASSERT_TRUE(r);
     if (r ==false) {
@@ -264,12 +263,12 @@ TEST_F(StructuredSyslogStatWalkerTest, DeviceSyslogTz) {
         boost::asio::ip::address::from_string("127.0.0.1", ec));
     boost::asio::ip::udp::endpoint rep(raddr, 0);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(test_structured_syslog.c_str());
-    boost::shared_ptr<ConfigDBConnection> cfgdbConnection (new ConfigDBConnection(0, 0));
-    StructuredSyslogConfig *structured_syslog_config = new StructuredSyslogConfig(cfgdbConnection);
-    structured_syslog::StructuredSyslogServerConfig *config_obj = new structured_syslog::StructuredSyslogServerConfig(structured_syslog_config);
+    boost::shared_ptr<ConfigDBConnection> cfgdbConnection(
+        new ConfigDBConnection(NULL, ConfigDBConnection::ApiServerList(),
+                               VncApiConfig()));
+    StructuredSyslogConfig *config_obj = new StructuredSyslogConfig(cfgdbConnection);
     bool r = structured_syslog::impl::ProcessStructuredSyslog(p, test_structured_syslog.length(), rep.address(),
-        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj);
-    delete structured_syslog_config;
+        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj, boost::shared_ptr<structured_syslog::StructuredSyslogForwarder>());
     delete config_obj;
     ASSERT_TRUE(r);
     if (r ==false) {
@@ -286,12 +285,12 @@ TEST_F(StructuredSyslogStatWalkerTest, ParseError) {
         boost::asio::ip::address::from_string("127.0.0.1", ec));
     boost::asio::ip::udp::endpoint rep(raddr, 0);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(test_structured_syslog.c_str());
-    boost::shared_ptr<ConfigDBConnection> cfgdbConnection (new ConfigDBConnection(0, 0));
-    StructuredSyslogConfig *structured_syslog_config = new StructuredSyslogConfig(cfgdbConnection);
-    structured_syslog::StructuredSyslogServerConfig *config_obj = new structured_syslog::StructuredSyslogServerConfig(structured_syslog_config);
+    boost::shared_ptr<ConfigDBConnection> cfgdbConnection(
+        new ConfigDBConnection(NULL, ConfigDBConnection::ApiServerList(),
+                               VncApiConfig()));
+    StructuredSyslogConfig *config_obj = new StructuredSyslogConfig(cfgdbConnection);
     bool r = structured_syslog::impl::ProcessStructuredSyslog(p, test_structured_syslog.length(), rep.address(),
-        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj);
-    delete structured_syslog_config;
+        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj, boost::shared_ptr<structured_syslog::StructuredSyslogForwarder>());
     delete config_obj;
     ASSERT_FALSE(r);
 
@@ -305,13 +304,12 @@ TEST_F(StructuredSyslogStatWalkerTest, BadStruct) {
         boost::asio::ip::address::from_string("127.0.0.1", ec));
     boost::asio::ip::udp::endpoint rep(raddr, 0);
     const uint8_t* p = reinterpret_cast<const uint8_t*>(test_structured_syslog.c_str());
-    boost::shared_ptr<ConfigDBConnection> cfgdbConnection (new ConfigDBConnection(0, 0));
-    StructuredSyslogConfig *structured_syslog_config = new StructuredSyslogConfig(cfgdbConnection);
-    structured_syslog::StructuredSyslogServerConfig *config_obj = new structured_syslog::StructuredSyslogServerConfig(structured_syslog_config);
+    boost::shared_ptr<ConfigDBConnection> cfgdbConnection(
+        new ConfigDBConnection(NULL, ConfigDBConnection::ApiServerList(),
+                               VncApiConfig()));
+    StructuredSyslogConfig *config_obj = new StructuredSyslogConfig(cfgdbConnection);
     bool r = structured_syslog::impl::ProcessStructuredSyslog(p, test_structured_syslog.length(), rep.address(),
-        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj);
-
-    delete structured_syslog_config;
+        boost::bind(&StatCbTester::Cb, &ct, _1, _2, _3, _4, _5), config_obj, boost::shared_ptr<structured_syslog::StructuredSyslogForwarder>());
     delete config_obj;
     ASSERT_TRUE(r);
 
@@ -324,8 +322,4 @@ int main(int argc, char **argv) {
     LoggingInit();
     int result = RUN_ALL_TESTS();
     return result;
-}
-
-
-void ShowCollectorServerReq::HandleRequest() const {
 }

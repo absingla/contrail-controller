@@ -14,7 +14,6 @@
 #include "config_json_parser.h"
 #include "ifmap_log.h"
 #include "client/config_log_types.h"
-#include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
 
@@ -23,8 +22,10 @@ using contrail_rapidjson::Document;
 using contrail_rapidjson::StringBuffer;
 using contrail_rapidjson::Value;
 using contrail_rapidjson::Writer;
-using std::string;
+using std::cout;
+using std::endl;
 using std::set;
+using std::string;
 
 const string ConfigCass2JsonAdapter::fq_name_prefix = "fq_name";
 const string ConfigCass2JsonAdapter::prop_prefix = "prop:";
@@ -45,7 +46,13 @@ bool ConfigCass2JsonAdapter::assert_on_parse_error_ =
     do {                                                                       \
         if (condition)                                                         \
             break;                                                             \
-        IFMAP_WARN(ConfigurationMalformed ## t, c.key, c.value, type_, uuid_); \
+        IFMAP_WARN_LOG(ConfigurationMalformed ## t ## Warning ## Log,          \
+                       Category::IFMAP, c.key, c.value, type_, uuid_);         \
+        IFMAP_TRACE(ConfigurationMalformed ## t ## Warning ## Trace,           \
+                    c.key, c.value, type_, uuid_);                             \
+        cout << "CONFIG_PARSE_ERROR " << __FILE__ << ":" << __LINE__ << " ";   \
+        cout << type_ << " " << c.key << " " << c.value << " ";                \
+        cout << uuid_ << endl;                                                 \
         if (assert_on_parse_error_)                                            \
             assert(false);                                                     \
         return;                                                                \
@@ -129,7 +136,7 @@ void ConfigCass2JsonAdapter::AddOneEntry(Value *jsonObject,
                                        from_back_pos-from_front_pos - 1);
         string ref_uuid = c.key.substr(from_back_pos + 1);
 
-        string fq_name_ref = cassandra_client_->UUIDToFQName(ref_uuid);
+        string fq_name_ref = cassandra_client_->UUIDToFQName(ref_uuid).second;
         if (fq_name_ref == "ERROR")
             return;
         string r = ref_type + "_refs";
@@ -220,7 +227,9 @@ void ConfigCass2JsonAdapter::CreateJsonString(const string &obj_type,
     }
 
     if (type_.empty()) {
-        IFMAP_WARN(ConfigurationMissingType, uuid_, obj_type);
+        IFMAP_WARN_LOG(ConfigurationMissingTypeWarningLog, Category::IFMAP,
+                       uuid_, obj_type);
+        IFMAP_TRACE(ConfigurationMissingTypeWarningTrace, uuid_, obj_type);
         return;
     }
 

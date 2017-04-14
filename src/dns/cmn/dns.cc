@@ -13,8 +13,7 @@
 #include <sandesh/sandesh.h>
 #include <sandesh/request_pipeline.h>
 
-#include <discovery/client/discovery_client.h>
-#include <discovery_client_stats_types.h>
+#include "ifmap/client/config_client_manager.h"
 
 using namespace std;
 EventManager *Dns::event_mgr_;
@@ -29,7 +28,6 @@ std::string Dns::collector_;
 std::string Dns::self_ip_;
 uint32_t Dns::http_port_;
 uint32_t Dns::dns_port_ = ContrailPorts::DnsServerPort();
-DiscoveryServiceClient *Dns::ds_client_;
 
 bool Dns::GetVersion(string &build_info_str) {
     return MiscUtils::GetBuildInfo(MiscUtils::Dns, BuildInfo, build_info_str);
@@ -82,51 +80,29 @@ void Dns::SetTaskSchedulingPolicy() {
     scheduler->SetPolicy(scheduler->GetTaskId("xmpp::StateMachine"),
                          exclude_io);
 
-    // Policy for cassandra::ObjectProcessor Task.
-    TaskPolicy cassadra_obj_process_policy = boost::assign::list_of
-        (TaskExclusion(scheduler->GetTaskId("cassandra::ObjectProcessor")));
-    scheduler->SetPolicy(scheduler->GetTaskId("cassandra::Reader"),
-        cassadra_obj_process_policy);
-
     // Policy for cassandra::Reader Task.
     TaskPolicy cassadra_reader_policy = boost::assign::list_of
-        (TaskExclusion(scheduler->GetTaskId("cassandra::Reader")));
-    scheduler->SetPolicy(scheduler->GetTaskId("cassandra::ObjectProcessor"),
+        (TaskExclusion(scheduler->GetTaskId("cassandra::FQNameReader")));
+    for (int idx = 0; idx < ConfigClientManager::GetNumConfigReader(); ++idx) {
+        cassadra_reader_policy.push_back(
+        TaskExclusion(scheduler->GetTaskId("cassandra::ObjectProcessor"), idx));
+    }
+    scheduler->SetPolicy(scheduler->GetTaskId("cassandra::Reader"),
         cassadra_reader_policy);
 
-}
-
-void DiscoveryClientSubscriberStatsReq::HandleRequest() const {
-
-    DiscoveryClientSubscriberStatsResponse *resp =
-        new DiscoveryClientSubscriberStatsResponse();
-    resp->set_context(context());
-
-    std::vector<DiscoveryClientSubscriberStats> stats_list;
-    DiscoveryServiceClient *ds = Dns::GetDnsDiscoveryServiceClient();  
-    if (ds) {
-        ds->FillDiscoveryServiceSubscriberStats(stats_list);
+    // Policy for cassandra::ObjectProcessor Task.
+    TaskPolicy cassadra_obj_process_policy;
+    for (int idx = 0; idx < ConfigClientManager::GetNumConfigReader(); ++idx) {
+        cassadra_obj_process_policy.push_back(
+                 TaskExclusion(scheduler->GetTaskId("cassandra::Reader"), idx));
     }
+    scheduler->SetPolicy(scheduler->GetTaskId("cassandra::ObjectProcessor"),
+        cassadra_obj_process_policy);
 
-    resp->set_subscriber(stats_list);
-    resp->set_more(false);
-    resp->Response();
-} 
+    // Policy for cassandra::FQNameReader Task.
+    TaskPolicy fq_name_reader_policy = boost::assign::list_of
+        (TaskExclusion(scheduler->GetTaskId("cassandra::Reader")));
+    scheduler->SetPolicy(scheduler->GetTaskId("cassandra::FQNameReader"),
+        fq_name_reader_policy);
 
-void DiscoveryClientPublisherStatsReq::HandleRequest() const {
-
-    DiscoveryClientPublisherStatsResponse *resp =
-        new DiscoveryClientPublisherStatsResponse();
-    resp->set_context(context());
-
-    std::vector<DiscoveryClientPublisherStats> stats_list;
-    DiscoveryServiceClient *ds = Dns::GetDnsDiscoveryServiceClient();  
-    if (ds) {
-        ds->FillDiscoveryServicePublisherStats(stats_list);
-    }
-
-    resp->set_publisher(stats_list);
-    resp->set_more(false);
-    resp->Response();
 }
-

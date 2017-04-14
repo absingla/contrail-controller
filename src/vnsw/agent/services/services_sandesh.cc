@@ -228,22 +228,13 @@ void ServicesSandesh::DnsStatsSandesh(std::string ctxt, bool more) {
     std::vector<string> &list =
         const_cast<std::vector<string>&>(dns->get_dns_resolver());
 
-    std::vector<DSResponse> ds_reponse =
-        Agent::GetInstance()->GetDiscoveryDnsServerResponseList();
-
-    if (ds_reponse.size()) {
-        std::vector<DSResponse>::iterator iter;
-        for (iter = ds_reponse.begin(); iter != ds_reponse.end(); iter++) {
-            DSResponse dr = *iter;
-            list.push_back(dr.ep.address().to_string());
-        }
-    } else {
-        while (count < MAX_XMPP_SERVERS) {
-            if (!Agent::GetInstance()->dns_server(count).empty()) {
-                list.push_back(Agent::GetInstance()->dns_server(count));
-            }
-            count++;
-        }
+    std::vector<string>dns_servers;
+    uint8_t resolver_count = Agent::GetInstance()->GetDnslist().size();
+    while (count < resolver_count) {
+        boost::split(dns_servers, Agent::GetInstance()->GetDnslist()[count],
+                     boost::is_any_of(":"));
+        list.push_back(dns_servers[0]);
+        count++;
     }
     dns->set_dns_requests(nstats.requests);
     dns->set_dns_resolved(nstats.resolved);
@@ -1104,12 +1095,32 @@ void ShowArpCache::HandleRequest() const {
     delete arp_sandesh;
 }
 
+void ShowGratuitousArpCache::HandleRequest() const {
+    ArpCacheResp *resp = new ArpCacheResp();
+    resp->set_context(context());
+    ArpSandesh *arp_sandesh = new ArpSandesh(resp);
+    const ArpProto::GratuitousArpCache &cache =
+              (Agent::GetInstance()->GetArpProto()->gratuitous_arp_cache());
+    for (ArpProto::GratuitousArpCache::const_iterator it = cache.begin();
+         it != cache.end(); it++) {
+        for (ArpProto::ArpEntrySet::iterator sit = it->second.begin();
+             sit != it->second.end(); sit++) {
+            arp_sandesh->SetArpEntry(it->first, *sit);
+        }
+    }
+
+    arp_sandesh->Response();
+    delete arp_sandesh;
+}
+
 bool ArpSandesh::SetArpEntry(const ArpKey &key, const ArpEntry *entry) {
     ArpCacheResp *vresp = static_cast<ArpCacheResp *>(resp_);
     ArpSandeshData data;
     boost::asio::ip::address_v4 ip(key.ip);
     data.set_ip(ip.to_string());
     data.set_vrf(key.vrf->GetName());
+    if (entry->interface())
+        data.set_interface_name(entry->interface()->name());
     std::string mac_str;
     ServicesSandesh::MacToString(entry->mac_address(), mac_str);
     data.set_mac(mac_str);

@@ -92,7 +92,7 @@ class ISSUContrailPostProvisioner(object):
         )
         parser.set_defaults(**defaults)
 
-        parser.add_argument(
+        group.add_argument(
             "--api_server_ip", help="IP address of api server")
         parser.add_argument("--api_server_port", help="Port of api server")
         parser.add_argument("--api_server_use_ssl",
@@ -239,9 +239,13 @@ class ISSUContrailPostProvisioner(object):
         for k,v in self._args.control_host_info.items():
             control_name_list.append(v)
         for node_list_value in node_list_values[0]:
-            if node_list_value['fq_name'][4] in control_name_list:
+            router_info = self._vnc_lib.bgp_router_read(id=node_list_value['uuid'])
+            print "control name lists %s " %(control_name_list)
+            if node_list_value['fq_name'][4] in control_name_list or \
+               router_info.bgp_router_parameters.router_type != 'control-node':
                 continue;
-            print "deleting %s" %(node_list_value['fq_name'][4])
+            print "deleting %s %s" %(node_list_value['fq_name'][4],
+                    router_info.bgp_router_parameters.router_type)
             self._vnc_lib.bgp_router_delete(id=node_list_value['uuid'])
 
     # end del_node

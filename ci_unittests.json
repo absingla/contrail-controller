@@ -28,6 +28,7 @@
         "scons_test_targets" : [
             "controller/src/config/svc_monitor:test",
             "controller/src/config/schema-transformer:test",
+            "controller/src/config/device-manager:test",
             "controller/src/api-lib:test",
             "controller/src/config/api-server:test",
             "controller/src/config/vnc_openstack:test"
@@ -119,9 +120,9 @@
             "controller/src/container"
         ],
         "scons_test_targets" : [
-            "controller/src/container/kube_cni:test",
-            "controller/src/container/kube_manager:test",
-            "controller/src/container/mesos_manager:test"
+            "controller/src/config/svc_monitor:test",
+            "controller/src/config/schema-transformer:test",
+            "controller/src/container/kube-manager:test"
         ],
         "misc_test_targets" : [ ]
     },

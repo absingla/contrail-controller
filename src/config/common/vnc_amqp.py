@@ -2,6 +2,7 @@ import socket
 import gevent
 import cStringIO
 from pprint import pformat
+from requests.exceptions import ConnectionError
 
 from cfgm_common.utils import cgitb_hook
 from cfgm_common.exceptions import NoIdError
@@ -38,8 +39,20 @@ class VncAmqpHandle(object):
         self.msg_tracer.error = msg
 
     def msgbus_trace_msg(self):
-            self.msg_tracer.trace_msg(name='MessageBusNotifyTraceBuf',
-                                      sandesh=self.logger._sandesh)
+        self.msg_tracer.trace_msg(name='MessageBusNotifyTraceBuf',
+                                  sandesh=self.logger._sandesh)
+
+    def log_exception(self):
+        string_buf = cStringIO.StringIO()
+        cgitb_hook(file=string_buf, format="text")
+        self.logger.error(string_buf.getvalue())
+
+        self.msgbus_store_err_msg(string_buf.getvalue())
+        try:
+            with open(self._args.trace_file, 'a') as err_file:
+                err_file.write(string_buf.getvalue())
+        except IOError:
+            pass
 
     def _vnc_subscribe_callback(self, oper_info):
         self._db_resync_done.wait()
@@ -47,17 +60,21 @@ class VncAmqpHandle(object):
             self.oper_info = oper_info
             self.vnc_subscribe_actions()
 
-        except Exception:
-            string_buf = cStringIO.StringIO()
-            cgitb_hook(file=string_buf, format="text")
-            self.logger.error(string_buf.getvalue())
-
-            self.msgbus_store_err_msg(string_buf.getvalue())
+        except ConnectionError:
             try:
-                with open(self._args.trace_file, 'a') as err_file:
-                    err_file.write(string_buf.getvalue())
-            except IOError:
-                pass
+                # retry write during api-server ConnectionError
+                self.vnc_subscribe_actions()
+            except ConnectionError:
+                # log the exception, and exit during api-server
+                # ConnectionError on retry to let standby to become active.
+                self.log_exception()
+                self.close()
+                self.logger.error("Api-server connection lost. Exiting")
+                raise SystemExit
+            except Exception:
+                self.log_exception()
+        except Exception:
+            self.log_exception()
         finally:
             try:
                 self.msgbus_trace_msg()
@@ -98,16 +115,21 @@ class VncAmqpHandle(object):
             self.handle_unknown()
             return
         if self.obj is None:
-            self.logger.error('Error while accessing %s uuid %s' % (
-                self.obj_type, obj_id))
+            self.logger.warning(
+                    "Object %s uuid %s was not found for operation %s" %
+                    (self. obj_type, obj_id, oper))
             return
         self.evaluate_dependency()
 
+    def _get_key_from_oper_info(self):
+        if self.db_cls._indexed_by_name:
+            return ':'.join(self.oper_info['fq_name'])
+        return self.oper_info['uuid']
+
     def handle_create(self):
-        obj_dict = self.oper_info['obj_dict']
-        obj_key = self.db_cls.get_key_from_dict(obj_dict)
+        obj_key = self._get_key_from_oper_info()
         obj_id = self.oper_info['uuid']
-        obj_fq_name = obj_dict['fq_name']
+        obj_fq_name = self.oper_info['fq_name']
         self.db_cls._object_db.cache_uuid_to_fq_name_add(
                 obj_id, obj_fq_name, self.obj_type)
         self.obj = self.obj_class.locate(obj_key)
@@ -133,7 +155,14 @@ class VncAmqpHandle(object):
             return
 
         try:
-            self.obj.update()
+            ret = self.obj.update()
+            if ret is not None and not ret:
+                # If update returns None, the function may not support a
+                # return value, hence treat it as if something might have
+                # changed. If a value is returned, use its truth value.
+                # If it True, then some change was detected.
+                # If no change, then terminate dependency tracker
+                return
         except NoIdError:
             obj_id = self.oper_info['uuid']
             self.logger.warning('%s uuid %s update caused NoIdError' %
@@ -161,7 +190,7 @@ class VncAmqpHandle(object):
         self.dependency_tracker = DependencyTracker(
             self.db_cls.get_obj_type_map(), self.reaction_map)
         self.dependency_tracker.evaluate(self.obj_type, self.obj)
-        obj_key = self.db_cls.get_key_from_dict(self.oper_info['obj_dict'])
+        obj_key = self._get_key_from_oper_info()
         self.obj_class.delete(obj_key)
 
     def handle_unknown(self):

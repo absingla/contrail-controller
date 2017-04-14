@@ -47,8 +47,8 @@ public:
 
     void Init();
     ResourceSandeshMaps& sandesh_maps();
-    uint32_t ReadResourceDataFromFile(const std::string &file_name,
-                                      uint8_t **buf);
+    static uint32_t ReadResourceDataFromFile(const std::string &file_name,
+                                             std::auto_ptr<uint8_t> *buf);
 
     Agent *agent() {return agent_;}
     ResourceManager *resource_manager() {return resource_manager_;}
@@ -56,6 +56,7 @@ public:
     void BackupResource(ResourceManager::KeyPtr key,
                         ResourceManager::DataPtr data, 
                         ResourceBackupReq::Op op);
+    void AuditDone();
 
 private:
     ResourceManager *resource_manager_;
@@ -63,6 +64,7 @@ private:
     ResourceSandeshMaps sandesh_maps_;
     // Work queue to backup the data.
     WorkQueue<ResourceBackupReqPtr> backup_work_queue_;
+    EventNotifyHandle::Ptr audit_handle_;
     DISALLOW_COPY_AND_ASSIGN(ResourceBackupManager);
 };
 

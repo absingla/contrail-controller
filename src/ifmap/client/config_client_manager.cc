@@ -29,16 +29,32 @@
 using namespace boost::assign;
 using namespace std;
 
-ConfigClientManager::ConfigClientManager(EventManager *evm,
-        IFMapServer *ifmap_server, string hostname, string module_name,
-        const IFMapConfigOptions& config_options)
-        : evm_(evm), ifmap_server_(ifmap_server) {
+const set<string> ConfigClientManager::skip_properties = list_of("perms2");
+
+int ConfigClientManager::GetNumConfigReader() {
+    static bool init_ = false;
+    static int num_config_readers = 0;
+
+    if (!init_) {
+        // XXX To be used for testing purposes only.
+        char *count_str = getenv("CONFIG_NUM_WORKERS");
+        if (count_str) {
+            num_config_readers = strtol(count_str, NULL, 0);
+        } else {
+            num_config_readers = kNumConfigReaderTasks;
+        }
+        init_ = true;
+    }
+    return num_config_readers;
+}
+
+void ConfigClientManager::SetUp(string hostname, string module_name,
+        const IFMapConfigOptions& config_options) {
     config_json_parser_.reset(new ConfigJsonParser(this));
-    thread_count_ = kNumConfigReaderTasks;
-    end_of_rib_computed_ = false;
+    thread_count_ = GetNumConfigReader();
     end_of_rib_computed_at_ = UTCTimestampUsec();
     config_db_client_.reset(
-            IFMapFactory::Create<ConfigCassandraClient>(this, evm,
+            IFMapFactory::Create<ConfigCassandraClient>(this, evm_,
                 config_options, config_json_parser_.get(), thread_count_));
     config_amqp_client_.reset(new ConfigAmqpClient(this, hostname, module_name,
                                                    config_options));
@@ -62,6 +78,27 @@ ConfigClientManager::ConfigClientManager(EventManager *evm,
 
     bgp_schema_Server_GenerateWrapperPropertyInfo(&wrapper_field_map_);
     vnc_cfg_Server_GenerateWrapperPropertyInfo(&wrapper_field_map_);
+
+    bgp_schema_Server_GenerateObjectTypeList(&obj_type_to_read_);
+    vnc_cfg_Server_GenerateObjectTypeList(&obj_type_to_read_);
+}
+
+ConfigClientManager::ConfigClientManager(EventManager *evm,
+        IFMapServer *ifmap_server, string hostname, string module_name,
+        const IFMapConfigOptions& config_options, bool end_of_rib_computed)
+                : end_of_rib_computed_(end_of_rib_computed), evm_(evm),
+                  ifmap_server_(ifmap_server) {
+    SetUp(hostname, module_name, config_options);
+}
+
+ConfigClientManager::ConfigClientManager(EventManager *evm,
+        IFMapServer *ifmap_server, string hostname, string module_name,
+        const IFMapConfigOptions& config_options)
+        : end_of_rib_computed_(false), evm_(evm), ifmap_server_(ifmap_server) {
+    SetUp(hostname, module_name, config_options);
+}
+
+ConfigClientManager::~ConfigClientManager() {
 }
 
 void ConfigClientManager::Initialize() {
@@ -114,7 +151,6 @@ void ConfigClientManager::EnqueueListToTables(RequestList *req_list) const {
     while (!req_list->empty()) {
         auto_ptr<DBRequest> req(req_list->front());
         req_list->pop_front();
-
         IFMapTable::RequestKey *key =
             static_cast<IFMapTable::RequestKey *>(req->key.get());
 

@@ -187,26 +187,14 @@ FlowHandler *FlowProto::AllocProtoHandler(PktInfoPtr info,
 }
 
 bool FlowProto::Validate(PktInfo *msg) {
-    if (msg->l3_forwarding && msg->ip == NULL && msg->ip6 == NULL &&
-        msg->type != PktType::MESSAGE) {
-        if (msg->family == Address::INET) {
+    if (msg->ip == NULL && msg->ip6 == NULL && msg->type != PktType::MESSAGE) {
+        if (msg->family == Address::INET || msg->family == Address::INET6) {
             FLOW_TRACE(DetailErr, msg->agent_hdr.cmd_param,
                        msg->agent_hdr.ifindex,
                        msg->agent_hdr.vrf,
-                       msg->ip_saddr.to_v4().to_ulong(),
-                       msg->ip_daddr.to_v4().to_ulong(),
-                       "Flow : Non-IP packet. Dropping",
-                       msg->l3_forwarding, 0, 0, 0, 0);
-        } else if (msg->family == Address::INET6) {
-            uint64_t sip[2], dip[2];
-            Ip6AddressToU64Array(msg->ip_saddr.to_v6(), sip, 2);
-            Ip6AddressToU64Array(msg->ip_daddr.to_v6(), dip, 2);
-            FLOW_TRACE(DetailErr, msg->agent_hdr.cmd_param,
-                       msg->agent_hdr.ifindex,
-                       msg->agent_hdr.vrf, -1, -1,
-                       "Flow : Non-IP packet. Dropping",
-                       msg->l3_forwarding,
-                       sip[0], sip[1], dip[0], dip[1]);
+                       msg->ip_saddr.to_string(),
+                       msg->ip_daddr.to_string(),
+                       "Flow : Non-IP packet. Dropping", false);
         } else {
             assert(0);
         }
@@ -669,7 +657,7 @@ bool FlowProto::ShouldTrace(const FlowEntry *flow, const FlowEntry *rflow) {
 //////////////////////////////////////////////////////////////////////////////
 // Token Management routines
 //////////////////////////////////////////////////////////////////////////////
-FlowTokenPtr FlowProto::GetToken(FlowEvent::Event event) {
+TokenPtr FlowProto::GetToken(FlowEvent::Event event) {
     switch (event) {
     case FlowEvent::VROUTER_FLOW_MSG:
     case FlowEvent::AUDIT_FLOW:
@@ -701,14 +689,18 @@ FlowTokenPtr FlowProto::GetToken(FlowEvent::Event event) {
         break;
     }
 
-    return FlowTokenPtr(NULL);
+    return add_tokens_.GetToken(NULL);
 }
 
-bool FlowProto::TokenCheck(const FlowTokenPool *pool) {
+bool FlowProto::TokenCheck(const FlowTokenPool *pool) const {
     return pool->TokenCheck();
 }
 
-void FlowProto::TokenAvailable(FlowTokenPool *pool) {
+void FlowProto::TokenAvailable(TokenPool *pool_base) {
+    FlowTokenPool *pool = dynamic_cast<FlowTokenPool *>(pool_base);
+    if (pool_base == NULL)
+        return;
+
     pool->IncrementRestarts();
     if (pool == &add_tokens_) {
         for (uint32_t i = 0; i < flow_event_queue_.size(); i++) {

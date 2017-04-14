@@ -49,12 +49,13 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     has_service_vlan_(entry->has_service_vlan_),
     interface_id_(entry->interface_id_),
     interface_name_(entry->interface_name_),
-    ip_(entry->ip_), ipv4_active_(false),
+    ip_(entry->ip_), hc_active_(false), ipv4_active_(false),
     layer3_forwarding_(entry->layer3_forwarding_),
     ksync_obj_(obj), l2_active_(false),
     metadata_l2_active_(entry->metadata_l2_active_),
     metadata_ip_active_(entry->metadata_ip_active_),
     bridging_(entry->bridging_),
+    proxy_arp_mode_(VmInterface::PROXY_ARP_NONE),
     mac_(entry->mac_),
     smac_(entry->smac_),
     mirror_direction_(entry->mirror_direction_),
@@ -96,6 +97,7 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     interface_id_(intf->id()),
     interface_name_(intf->name()),
     ip_(0),
+    hc_active_(false),
     ipv4_active_(false),
     layer3_forwarding_(true),
     ksync_obj_(obj),
@@ -103,6 +105,7 @@ InterfaceKSyncEntry::InterfaceKSyncEntry(InterfaceKSyncObject *obj,
     metadata_l2_active_(false),
     metadata_ip_active_(false),
     bridging_(true),
+    proxy_arp_mode_(VmInterface::PROXY_ARP_NONE),
     mac_(),
     smac_(),
     mirror_direction_(Interface::UNKNOWN),
@@ -197,6 +200,11 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
     Interface *intf = static_cast<Interface *>(e);
     bool ret = false;
 
+    if (hc_active_ != intf->is_hc_active()) {
+        hc_active_ = intf->is_hc_active();
+        ret = true;
+    }
+
     if (ipv4_active_ != intf->ipv4_active()) {
         ipv4_active_ = intf->ipv4_active();
         ret = true;
@@ -257,6 +265,11 @@ bool InterfaceKSyncEntry::Sync(DBEntry *e) {
 
         if (bridging_ != vm_port->bridging()) {
             bridging_ = vm_port->bridging();
+            ret = true;
+        }
+
+        if (proxy_arp_mode_ != vm_port->proxy_arp_mode()) {
+            proxy_arp_mode_ = vm_port->proxy_arp_mode();
             ret = true;
         }
 
@@ -610,7 +623,9 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
         if (learning_enabled_) {
             flags |= VIF_FLAG_MAC_LEARN;
         }
-
+        if (proxy_arp_mode_ == VmInterface::PROXY_ARP_UNRESTRICTED) {
+            flags |= VIF_FLAG_MAC_PROXY;
+        }
         MacAddress mac;
         if (parent_.get() != NULL) {
             encoder.set_vifr_type(VIF_TYPE_VIRTUAL_VLAN);
@@ -644,7 +659,17 @@ int InterfaceKSyncEntry::Encode(sandesh_op::type op, char *buf, int buf_len) {
                                       (const int8_t *)smac() + smac().size()));
         }
 
-        if (fat_flow_list_.list_.size() != 0) {
+        // Disable fat-flow when health-check status is inactive
+        // If fat-flow is active, then following problem happens,
+        //    1. Health Check Request from vhost0 interface creates a flow
+        //    2. Health Check response is received from VMI with fat-flow
+        //       - Response creates new flow due to fat-flow configuration
+        //       - If health-check status is inactive routes for interface are
+        //         withdrawn
+         //      - Flow created from response fails due to missing routes
+        // If fat-flow is disabled, the reverse packet hits flow created (1)
+        // and succeeds
+        if (hc_active_ && fat_flow_list_.list_.size() != 0) {
             std::vector<int32_t> fat_flow_list;
             for (VmInterface::FatFlowEntrySet::const_iterator it =
                  fat_flow_list_.list_.begin(); it != fat_flow_list_.list_.end();
@@ -834,6 +859,7 @@ void InterfaceKSyncEntry::FillObjectLog(sandesh_op::type op,
     if (op == sandesh_op::ADD) {
         info.set_os_idx(os_index_);
         info.set_vrf_id(vrf_id_);
+        info.set_hc_active(hc_active_);
         info.set_l2_active(l2_active_);
         info.set_active(ipv4_active_);
         info.set_policy_enabled(policy_enabled_);

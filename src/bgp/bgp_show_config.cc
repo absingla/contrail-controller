@@ -6,6 +6,7 @@
 
 #include <boost/assign/list_of.hpp>
 #include <boost/foreach.hpp>
+#include <boost/regex.hpp>
 
 #include "bgp/bgp_config.h"
 #include "bgp/bgp_config_ifmap.h"
@@ -13,6 +14,8 @@
 #include "bgp/bgp_server.h"
 
 using boost::assign::list_of;
+using boost::regex;
+using boost::regex_search;
 using std::string;
 using std::vector;
 
@@ -40,6 +43,10 @@ static void FillBgpInstanceConfigInfo(ShowBgpInstanceConfig *sbic,
     sbic->set_allow_transit(instance->virtual_network_allow_transit());
     sbic->set_pbb_evpn_enable(instance->virtual_network_pbb_evpn_enable());
     sbic->set_last_change_at(UTCUsecToString(instance->last_change_at()));
+
+    vector<string> neighbors(
+        instance->neighbor_list().begin(), instance->neighbor_list().end());
+    sbic->set_neighbors(neighbors);
 
     vector<ShowBgpServiceChainConfig> sbscc_list;
     BOOST_FOREACH(const ServiceChainConfig &sc_config,
@@ -110,17 +117,15 @@ bool BgpShowHandler<ShowBgpInstanceConfigReq, ShowBgpInstanceConfigReqIterate,
     uint32_t iter_limit = bsc->iter_limit() ? bsc->iter_limit() : kIterLimit;
     const BgpConfigManager *bcm = bsc->bgp_server->config_manager();
 
+    regex search_expr(data->search_string);
     BgpConfigManager::InstanceMapRange range =
         bcm->InstanceMapItems(data->next_entry);
     BgpConfigManager::InstanceMap::const_iterator it = range.first;
     BgpConfigManager::InstanceMap::const_iterator it_end = range.second;
     for (uint32_t iter_count = 0; it != it_end; ++it, ++iter_count) {
         const BgpInstanceConfig *instance = it->second;
-        if (!data->search_string.empty() &&
-            (instance->name().find(data->search_string) == string::npos)) {
+        if (!regex_search(instance->name(), search_expr))
             continue;
-        }
-
         ShowBgpInstanceConfig sbic;
         FillBgpInstanceConfigInfo(&sbic, bsc, instance);
         data->show_list.push_back(sbic);
@@ -228,17 +233,15 @@ bool BgpShowHandler<ShowBgpRoutingPolicyConfigReq,
     uint32_t iter_limit = bsc->iter_limit() ? bsc->iter_limit() : kIterLimit;
     const BgpConfigManager *bcm = bsc->bgp_server->config_manager();
 
+    regex search_expr(data->search_string);
     BgpConfigManager::RoutingPolicyMapRange range =
         bcm->RoutingPolicyMapItems(data->next_entry);
     BgpConfigManager::RoutingPolicyMap::const_iterator it = range.first;
     BgpConfigManager::RoutingPolicyMap::const_iterator it_end = range.second;
     for (uint32_t iter_count = 0; it != it_end; ++it, ++iter_count) {
         const BgpRoutingPolicyConfig *policy = it->second;
-        if (!data->search_string.empty() &&
-            (policy->name().find(data->search_string) == string::npos)) {
+        if (!regex_search(policy->name(), search_expr))
             continue;
-        }
-
         ShowBgpRoutingPolicyConfig sbrpc;
         FillBgpRoutingPolicyInfo(&sbrpc, bsc, policy);
         data->show_list.push_back(sbrpc);
@@ -379,6 +382,7 @@ bool BgpShowHandler<ShowBgpNeighborConfigReq, ShowBgpNeighborConfigReqIterate,
     uint32_t iter_limit = bsc->iter_limit() ? bsc->iter_limit() : kIterLimit;
     const BgpConfigManager *bcm = bsc->bgp_server->config_manager();
 
+    regex search_expr(data->search_string);
     BgpConfigManager::InstanceMapRange range =
         bcm->InstanceMapItems(data->next_entry);
     BgpConfigManager::InstanceMap::const_iterator it = range.first;
@@ -388,11 +392,8 @@ bool BgpShowHandler<ShowBgpNeighborConfigReq, ShowBgpNeighborConfigReqIterate,
         BOOST_FOREACH(BgpConfigManager::NeighborMap::value_type value,
             bcm->NeighborMapItems(instance->name())) {
             const BgpNeighborConfig *neighbor = value.second;
-            if (!data->search_string.empty() &&
-                (neighbor->name().find(data->search_string) == string::npos)) {
+            if (!regex_search(neighbor->name(), search_expr))
                 continue;
-            }
-
             ShowBgpNeighborConfig sbnc;
             FillBgpNeighborConfigInfo(&sbnc, bsc, neighbor);
             data->show_list.push_back(sbnc);

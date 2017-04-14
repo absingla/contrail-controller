@@ -27,7 +27,6 @@ import os
 import logging
 import logging.handlers
 
-from cfgm_common.imid import *
 from cfgm_common import importutils
 from cfgm_common import svc_info
 from cfgm_common import vnc_cgitb
@@ -40,11 +39,8 @@ from pysandesh.sandesh_base import Sandesh, SandeshSystem, SandeshConfig
 from pysandesh.gen_py.sandesh.ttypes import SandeshLevel
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
 from sandesh_common.vns.ttypes import Module
-from sandesh_common.vns.constants import ModuleNames
 
 from vnc_api.vnc_api import *
-
-import discoveryclient.client as client
 
 from agent_manager import AgentManager
 from db import ServiceMonitorDB
@@ -66,18 +62,14 @@ _zookeeper_client = None
 
 class SvcMonitor(object):
 
-    def __init__(self, args=None):
+    def __init__(self, sm_logger=None, args=None):
         self._args = args
-
-        # initialize discovery client
-        self._disc = None
-        if self._args.disc_server_ip and self._args.disc_server_port:
-            self._disc = client.DiscoveryClient(
-                self._args.disc_server_ip,
-                self._args.disc_server_port,
-                ModuleNames[Module.SVC_MONITOR])
         # initialize logger
-        self.logger = ServiceMonitorLogger(self._disc, args)
+        if sm_logger is not None:
+            self.logger = sm_logger
+        else:
+            # Initialize logger
+            self.logger = ServiceMonitorLogger(args)
 
         # rotating log file for catchall errors
         self._err_file = self._args.trace_file
@@ -119,7 +111,7 @@ class SvcMonitor(object):
         self.vrouter_scheduler = importutils.import_object(
             self._args.si_netns_scheduler_driver,
             self._vnc_lib, self._nova_client,
-            self._disc, self.logger, self._args)
+            None, self.logger, self._args)
 
         # load virtual machine instance manager
         self.vm_manager = importutils.import_object(
@@ -536,13 +528,13 @@ class SvcMonitor(object):
                         collectors = collectors.split()
                         new_chksum = hashlib.md5("".join(collectors)).hexdigest()
                         if new_chksum != self._chksum:
-                            self._chksum = new_chksum 
+                            self._chksum = new_chksum
                             config.random_collectors = random.sample(collectors, len(collectors))
                             self.logger.sandesh_reconfig_collectors(config)
                 except ConfigParser.NoOptionError as e:
-                     pass 
+                     pass
     # end sighup_handler
-                        
+
 def skip_check_service(si):
     # wait for first launch
     if not si.launch_count:
@@ -657,8 +649,6 @@ def parse_args(args_str):
                          --zk_server_ip 10.1.2.3
                          --zk_server_port 2181
                          --collectors 127.0.0.1:8086
-                         --disc_server_ip 127.0.0.1
-                         --disc_server_port 5998
                          --http_server_port 8090
                          --log_local
                          --log_level SYS_DEBUG
@@ -695,8 +685,6 @@ def parse_args(args_str):
         'zk_server_ip': '127.0.0.1',
         'zk_server_port': '2181',
         'collectors': None,
-        'disc_server_ip': None,
-        'disc_server_port': None,
         'http_server_port': '8088',
         'log_local': False,
         'log_level': SandeshLevel.SYS_DEBUG,
@@ -737,8 +725,7 @@ def parse_args(args_str):
     schedops = {
         'si_netns_scheduler_driver':
         'svc_monitor.scheduler.vrouter_scheduler.RandomScheduler',
-        'analytics_server_ip': '127.0.0.1',
-        'analytics_server_port': '8081',
+        'analytics_server_list': '127.0.0.1:8081',
         'availability_zone': None,
         'netns_availability_zone': None,
         'aaa_mode': cfgm_common.AAA_MODE_DEFAULT_VALUE,
@@ -772,6 +759,12 @@ def parse_args(args_str):
             cassandraopts.update(dict(config.items('CASSANDRA')))
         if 'SANDESH' in config.sections():
             sandeshopts.update(dict(config.items('SANDESH')))
+            if 'sandesh_ssl_enable' in config.options('SANDESH'):
+                sandeshopts['sandesh_ssl_enable'] = config.getboolean(
+                    'SANDESH', 'sandesh_ssl_enable')
+            if 'introspect_ssl_enable' in config.options('SANDESH'):
+                sandeshopts['introspect_ssl_enable'] = config.getboolean(
+                    'SANDESH', 'introspect_ssl_enable')
 
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
@@ -806,10 +799,6 @@ def parse_args(args_str):
     parser.add_argument("--collectors",
                         help="List of VNC collectors in ip:port format",
                         nargs="+")
-    parser.add_argument("--disc_server_ip",
-                        help="IP address of the discovery server")
-    parser.add_argument("--disc_server_port",
-                        help="Port of the discovery server")
     parser.add_argument("--http_server_port",
                         help="Port of local HTTP server")
     parser.add_argument(
@@ -878,14 +867,10 @@ def parse_args(args_str):
     return args
 
 
-def run_svc_monitor(args=None):
+def run_svc_monitor(sm_logger, args=None):
+    sm_logger.notice("Elected master SVC Monitor node. Initializing... ")
 
-    # randomize collector list
-    args.random_collectors = args.collectors
-    if args.collectors:
-        args.random_collectors = random.sample(args.collectors, len(args.collectors))
-
-    monitor = SvcMonitor(args)
+    monitor = SvcMonitor(sm_logger, args)
     monitor._zookeeper_client = _zookeeper_client
     monitor._conf_file = args._conf_file
     monitor._chksum = ""
@@ -913,16 +898,22 @@ def run_svc_monitor(args=None):
             monitor.logger.api_conn_status_update(
                 ConnectionStatus.DOWN, str(e))
             time.sleep(3)
-        except ResourceExhaustionError:  # haproxy throws 503
+        except (RuntimeError, ResourceExhaustionError):
+            # auth failure or haproxy throws 503
             time.sleep(3)
 
-    monitor.post_init(vnc_api, args)
-    timer_task = gevent.spawn(launch_timer, monitor)
-    gevent.joinall([timer_task])
+    try:
+        monitor.post_init(vnc_api, args)
+        timer_task = gevent.spawn(launch_timer, monitor)
+        gevent.joinall([timer_task])
+    except KeyboardInterrupt:
+        monitor.rabbit.close()
+        raise
 
 
 def main(args_str=None):
     global _zookeeper_client
+
     if not args_str:
         args_str = ' '.join(sys.argv[1:])
     args = parse_args(args_str)
@@ -933,10 +924,29 @@ def main(args_str=None):
         client_pfx = ''
         zk_path_pfx = ''
 
+    # randomize collector list
+    args.random_collectors = args.collectors
+    if args.collectors:
+        args.random_collectors = random.sample(args.collectors,
+                                               len(args.collectors))
+
+    # Initialize logger
+    sm_logger = ServiceMonitorLogger(args)
+
+    # Initialize AMQP handler then close it to be sure remain queue of a
+    # precedent run is cleaned
+    vnc_amqp = VncAmqpHandle(sm_logger, DBBaseSM, REACTION_MAP, 'svc_monitor',
+                             args=args)
+    vnc_amqp.establish()
+    vnc_amqp.close()
+    sm_logger.debug("Removed remained AMQP queue")
+
+    # Waiting to be elected as master node
     _zookeeper_client = ZookeeperClient(
         client_pfx+"svc-monitor", args.zk_server_ip)
+    sm_logger.notice("Waiting to be elected as master...")
     _zookeeper_client.master_election(zk_path_pfx+"/svc-monitor", os.getpid(),
-                                      run_svc_monitor, args)
+                                      run_svc_monitor, sm_logger, args)
 # end main
 
 

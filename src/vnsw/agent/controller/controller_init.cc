@@ -13,6 +13,7 @@
 #include "cmn/agent_cmn.h"
 #include "xmpp/xmpp_init.h"
 #include "pugixml/pugixml.hpp"
+#include "oper/global_qos_config.h"
 #include "oper/vrf.h"
 #include "oper/peer.h"
 #include "oper/mirror_table.h"
@@ -27,8 +28,8 @@
 
 using namespace boost::asio;
 
-SandeshTraceBufferPtr ControllerDiscoveryTraceBuf(SandeshTraceBufferCreate(
-    "ControllerDiscovery", 5000));
+SandeshTraceBufferPtr ControllerConnectionsTraceBuf(SandeshTraceBufferCreate(
+    "ControllerConnections", 5000));
 SandeshTraceBufferPtr ControllerInfoTraceBuf(SandeshTraceBufferCreate(
     "ControllerInfo", 5000));
 SandeshTraceBufferPtr ControllerTxConfigTraceBuf1(SandeshTraceBufferCreate(
@@ -51,11 +52,6 @@ SandeshTraceBufferPtr ControllerTxMessageTraceBuf1(SandeshTraceBufferCreate(
     "ControllerTxXmppMessage_1", 5000));
 SandeshTraceBufferPtr ControllerTxMessageTraceBuf2(SandeshTraceBufferCreate(
     "ControllerTxXmppMessage_2", 5000));
-
-ControllerDiscoveryData::ControllerDiscoveryData(xmps::PeerId peer_id,
-                                                 std::vector<DSResponse> resp) :
-    ControllerWorkQueueData(), peer_id_(peer_id), discovery_response_(resp) {
-}
 
 ControllerReConfigData::ControllerReConfigData(std::string service_name,
                                                std::vector<string>server_list) :
@@ -135,6 +131,18 @@ void VNController::SetAgentMcastLabelRange(uint8_t idx) {
         str.str();
 }
 
+void VNController::SetDscpConfig(XmppChannelConfig *xmpp_cfg) const {
+    GlobalQosConfig* qos = NULL;
+    if (agent_->oper_db()) {
+        qos = agent_->oper_db()->global_qos_config();
+    }
+    if (qos && qos->control_dscp() != GlobalQosConfig::kInvalidDscp) {
+        xmpp_cfg->dscp_value = qos->control_dscp();
+    } else {
+        xmpp_cfg->dscp_value = 0;
+    }
+}
+
 void VNController::XmppServerConnect() {
 
     uint8_t count = 0;
@@ -146,8 +154,8 @@ void VNController::XmppServerConnect() {
             AgentXmppChannel *ch = agent_->controller_xmpp_channel(count);
             if (ch) {
                 // Channel is created, do not disturb
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                    "XMPP Server is already present, ignore discovery response",
+                CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection, 
+                    "XMPP Server is already present, ignore reconfig response",
                     count, ch->GetXmppServer(), "");
                 count++;
                 continue; 
@@ -172,6 +180,7 @@ void VNController::XmppServerConnect() {
                 port = XMPP_SERVER_PORT;
             }
             xmpp_cfg->endpoint.port(port);
+            SetDscpConfig(xmpp_cfg);
 
             // Create Xmpp Client
             XmppClient *client = new XmppClient(agent_->event_manager(), xmpp_cfg);
@@ -230,8 +239,8 @@ void VNController::DnsXmppServerConnect() {
             AgentDnsXmppChannel *ch = agent_->dns_xmpp_channel(count);
             if (ch) {
                 // Channel is up and running, do not disturb
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
-                    "DNS Server is already present, ignore discovery response",
+                CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
+                    "DNS Server is already present, ignore reconfig response",
                     count, ch->GetXmppServer(), "");
                 count++;
                 continue; 
@@ -257,6 +266,7 @@ void VNController::DnsXmppServerConnect() {
                 xmpp_cfg_dns->path_to_server_priv_key =  agent_->xmpp_server_key();
                 xmpp_cfg_dns->path_to_ca_cert =  agent_->xmpp_ca_cert();
             }
+            SetDscpConfig(xmpp_cfg_dns);
 
             // Create Xmpp Client
             XmppClient *client_dns = new XmppClient(agent_->event_manager(),
@@ -489,22 +499,6 @@ void VNController::DisConnectControllerIfmapServer(uint8_t idx) {
     agent_->reset_controller_ifmap_xmpp_server(idx);
 }
 
-bool VNController::AgentXmppServerConnectedExists(
-                                 const std::string &server_ip,
-                                 std::vector<DSResponse> resp) {
-
-    std::vector<DSResponse>::iterator iter;
-    int8_t count = -1;
-    int8_t min_iter = std::min(static_cast<int>(resp.size()), MAX_XMPP_SERVERS);
-    for (iter = resp.begin(); ++count < min_iter; iter++) {
-        DSResponse dr = *iter;
-        if (dr.ep.address().to_string().compare(server_ip) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool VNController::AgentReConfigXmppServerConnectedExists(
                                  const std::string &server_ip,
                                  std::vector<std::string> resp) {
@@ -584,19 +578,19 @@ bool VNController::ApplyControllerReConfigInternal(std::vector<string> resp) {
         uint32_t port;
         port = strtoul(srv[1].c_str(), NULL, 0);
 
-        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, "XMPP ReConfig Apply Server Ip",
+        CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection, "XMPP ReConfig Apply Server Ip",
             count, server_ip, server_port);
 
         AgentXmppChannel *chnl = FindAgentXmppChannel(server_ip);
         if (chnl) {
             if (chnl->GetXmppChannel() &&
                 chnl->GetXmppChannel()->GetPeerState() == xmps::READY) {
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                     " XMPP ReConfig Server is READY and running, ignore", count,
                     chnl->GetXmppServer(), "");
                 continue;
             } else {
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                     " XMPP ReConfig Server is NOT_READY, ignore", count,
                     chnl->GetXmppServer(), "");
                 continue;
@@ -608,7 +602,7 @@ bool VNController::ApplyControllerReConfigInternal(std::vector<string> resp) {
 
                 if (agent_->controller_ifmap_xmpp_server(xs_idx).empty()) {
 
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                    CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                         "Set Xmpp ReConfig Channel",
                         xs_idx, server_ip, server_port);
 
@@ -623,13 +617,13 @@ bool VNController::ApplyControllerReConfigInternal(std::vector<string> resp) {
                     if (AgentReConfigXmppServerConnectedExists(
                         agent_->controller_ifmap_xmpp_server(xs_idx), resp)) {
 
-                        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                        CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                             "Retain Xmpp ReConfig Channel ", xs_idx,
                              agent_->controller_ifmap_xmpp_server(xs_idx), "");
                         continue;
                     }
 
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                    CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                         "ReSet Xmpp ReConfig Channel ", xs_idx,
                         agent_->controller_ifmap_xmpp_server(xs_idx),
                         server_ip);
@@ -639,87 +633,6 @@ bool VNController::ApplyControllerReConfigInternal(std::vector<string> resp) {
                          server_ip, xs_idx);
                     agent_->set_controller_ifmap_xmpp_port(
                         port, xs_idx);
-                    break;
-                }
-            }
-        }
-    }
-
-    XmppServerConnect();
-    return true;
-}
-
-void VNController::ApplyDiscoveryXmppServices(std::vector<DSResponse> resp) {
-    ControllerDiscoveryDataType data(new ControllerDiscoveryData(xmps::BGP, resp));
-    ControllerWorkQueueDataType base_data =
-        boost::static_pointer_cast<ControllerWorkQueueData>(data);
-    work_queue_.Enqueue(base_data);
-}
-
-bool VNController::ApplyDiscoveryXmppServicesInternal(std::vector<DSResponse> resp) {
-    std::vector<DSResponse>::iterator iter;
-    int8_t count = -1;
-    agent_->UpdateDiscoveryServerResponseList(resp);
-
-    /* Apply only MAX_XMPP_SERVERS from list as the list is ordered */
-    int8_t min_iter = std::min(static_cast<int>(resp.size()), MAX_XMPP_SERVERS);
-    for (iter = resp.begin(); ++count < min_iter; iter++) {
-        DSResponse dr = *iter;
-
-        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, "XMPP Discovery Server Response",
-            count, dr.ep.address().to_string(), integerToString(dr.ep.port()));
-
-        AgentXmppChannel *chnl = FindAgentXmppChannel(dr.ep.address().to_string());
-        if (chnl) {
-            if (chnl->GetXmppChannel() &&
-                chnl->GetXmppChannel()->GetPeerState() == xmps::READY) {
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                    "XMPP Server is READY and running, ignore", count,
-                    chnl->GetXmppServer(), "");
-                continue;
-            } else { 
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                    "XMPP Server is NOT_READY, ignore", count,
-                    chnl->GetXmppServer(), "");
-                continue;
-            }
-
-        } else { 
-
-            for (uint8_t xs_idx = 0; xs_idx < MAX_XMPP_SERVERS; xs_idx++) {
-
-                if (agent_->controller_ifmap_xmpp_server(xs_idx).empty()) {
-
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
-                                               "Set Xmpp Channel",
-                        xs_idx, dr.ep.address().to_string(), 
-                        integerToString(dr.ep.port())); 
-
-                    agent_->set_controller_ifmap_xmpp_server(
-                        dr.ep.address().to_string(), xs_idx);
-                    agent_->set_controller_ifmap_xmpp_port(dr.ep.port(), xs_idx);
-                    break; 
-
-                } else if (agent_->controller_xmpp_channel(xs_idx)) {
-
-                    if (AgentXmppServerConnectedExists(
-                        agent_->controller_ifmap_xmpp_server(xs_idx), resp)) {
-
-                        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
-                            "Retain Xmpp Channel ", xs_idx,
-                             agent_->controller_ifmap_xmpp_server(xs_idx), "");
-                        continue;
-                    }
-
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                        "ReSet Xmpp Channel ", xs_idx, 
-                        agent_->controller_ifmap_xmpp_server(xs_idx),
-                        dr.ep.address().to_string());
-
-                    DisConnectControllerIfmapServer(xs_idx);
-                    agent_->set_controller_ifmap_xmpp_server(
-                         dr.ep.address().to_string(),xs_idx);
-                    agent_->set_controller_ifmap_xmpp_port(dr.ep.port(), xs_idx);
                     break;
                 }
             }
@@ -781,7 +694,7 @@ bool VNController::ApplyDnsReConfigInternal(std::vector<string> resp) {
         uint32_t port;
         port = strtoul(srv[1].c_str(), NULL, 0);
 
-        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+        CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
             "DNS Server ReConfig Apply Server Ip",
             count, server_ip, server_port);
 
@@ -789,12 +702,12 @@ bool VNController::ApplyDnsReConfigInternal(std::vector<string> resp) {
         if (chnl) {
             if (chnl->GetXmppChannel() &&
                 chnl->GetXmppChannel()->GetPeerState() == xmps::READY) {
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                     "DNS Server is READY and running, ignore", count,
                     chnl->GetXmppServer(), "");
                 continue;
             } else {
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                     "DNS Server is NOT_READY, ignore", count,
                     chnl->GetXmppServer(), "");
                 continue;
@@ -805,7 +718,7 @@ bool VNController::ApplyDnsReConfigInternal(std::vector<string> resp) {
 
                 if (agent_->dns_server(xs_idx).empty()) {
 
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                    CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                         "Set Dns Xmpp Channel ",
                         xs_idx, server_ip, server_port);
 
@@ -818,13 +731,13 @@ bool VNController::ApplyDnsReConfigInternal(std::vector<string> resp) {
                     if (AgentReConfigXmppServerConnectedExists(
                         agent_->dns_server(xs_idx), resp)) {
 
-                        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                        CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                             "Retain Dns Xmpp Channel ", xs_idx,
                             agent_->dns_server(xs_idx), "");
                         continue;
                     }
 
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
+                    CONTROLLER_CONNECTIONS_TRACE(DiscoveryConnection,
                         "ReSet Dns ReConfigChannel ", xs_idx,
                         agent_->dns_server(xs_idx), server_ip);
 
@@ -836,87 +749,6 @@ bool VNController::ApplyDnsReConfigInternal(std::vector<string> resp) {
            }
         }
     }
-
-    DnsXmppServerConnect();
-    return true;
-}
-
-void VNController::ApplyDiscoveryDnsXmppServices(std::vector<DSResponse> resp) {
-    ControllerDiscoveryDataType data(new ControllerDiscoveryData(xmps::DNS, resp));
-    ControllerWorkQueueDataType base_data =
-        boost::static_pointer_cast<ControllerWorkQueueData>(data);
-    work_queue_.Enqueue(base_data);
-}
-
-bool VNController::ApplyDiscoveryDnsXmppServicesInternal(
-    std::vector<DSResponse> resp) {
-
-    std::vector<DSResponse>::iterator iter;
-    int8_t count = -1;
-    agent_->UpdateDiscoveryDnsServerResponseList(resp);
-
-    /* Apply only MAX_XMPP_SERVERS from list as the list is ordered */
-    int8_t min_iter = std::min(static_cast<int>(resp.size()), MAX_XMPP_SERVERS);
-    for (iter = resp.begin(); ++count < min_iter; iter++) {
-        DSResponse dr = *iter;
-
-        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
-                                   "DNS Discovery Server Response", count,
-            dr.ep.address().to_string(), integerToString(dr.ep.port()));
-
-        AgentDnsXmppChannel *chnl = FindAgentDnsXmppChannel(dr.ep.address().to_string());
-        if (chnl) {
-            if (chnl->GetXmppChannel() &&
-                chnl->GetXmppChannel()->GetPeerState() == xmps::READY) {
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                    "DNS Server is READY and running, ignore", count,
-                    chnl->GetXmppServer(), "");
-                continue;
-            } else { 
-                CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                    "DNS Server is NOT_READY, ignore", count,
-                    chnl->GetXmppServer(), "");
-                continue;
-            } 
-
-        } else { 
-
-            for (uint8_t xs_idx = 0; xs_idx < MAX_XMPP_SERVERS; xs_idx++) {
-
-                if (agent_->dns_server(xs_idx).empty()) {
-
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection, 
-                        "Set Dns Xmpp Channel ", xs_idx,
-                        dr.ep.address().to_string(), integerToString(dr.ep.port()));
-
-                    agent_->set_dns_server(dr.ep.address().to_string(), xs_idx);
-                    agent_->set_dns_server_port(dr.ep.port(), xs_idx);
-                    break;
-            
-                } else if (agent_->dns_xmpp_channel(xs_idx)) {
-
-                    if (AgentXmppServerConnectedExists(
-                        agent_->dns_server(xs_idx), resp)) {
-
-                        CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,
-                            "Retain Dns Xmpp Channel ", xs_idx,
-                            agent_->dns_server(xs_idx), "");
-                        continue;
-                    }
-
-                    CONTROLLER_DISCOVERY_TRACE(DiscoveryConnection,   
-                        "ReSet Dns Xmpp Channel ", xs_idx,
-                        agent_->dns_server(xs_idx),
-                        dr.ep.address().to_string());
-
-                    DisConnectDnsServer(xs_idx);
-                    agent_->set_dns_server(dr.ep.address().to_string(), xs_idx);
-                    agent_->set_dns_server_port(dr.ep.port(), xs_idx);
-                    break;
-               }
-           }
-        }
-    } 
 
     DnsXmppServerConnect();
     return true;
@@ -983,21 +815,6 @@ bool VNController::ControllerWorkQueueProcess(ControllerWorkQueueDataType data) 
         boost::dynamic_pointer_cast<ControllerXmppData>(data);
     if (derived_xmpp_data) {
         return XmppMessageProcess(derived_xmpp_data);
-    }
-
-    //Discovery response for servers
-    ControllerDiscoveryDataType discovery_data =
-        boost::dynamic_pointer_cast<ControllerDiscoveryData>(data);
-    if (discovery_data) {
-        if (discovery_data->peer_id_ == xmps::BGP) {
-            return ApplyDiscoveryXmppServicesInternal(discovery_data->
-                                                      discovery_response_);
-        } else if (discovery_data->peer_id_ == xmps::DNS) {
-            return ApplyDiscoveryDnsXmppServicesInternal(discovery_data->
-                                                         discovery_response_);
-        } else {
-            LOG(ERROR, "Unknown Peer Id processing Discovery Response");
-        }
     }
 
     // VM Subscription message

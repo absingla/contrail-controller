@@ -36,12 +36,9 @@ import hashlib
 import errno
 import copy
 import datetime
-import pycassa
 import platform
 from analytics_db import AnalyticsDb
 
-from pycassa.pool import ConnectionPool
-from pycassa.columnfamily import ColumnFamily
 from pysandesh.util import UTCTimestampUsec
 from pysandesh.sandesh_base import *
 from pysandesh.sandesh_session import SandeshWriter
@@ -50,10 +47,11 @@ from pysandesh.connection_info import ConnectionState
 from sandesh_common.vns.ttypes import Module, NodeType
 from sandesh_common.vns.constants import ModuleNames, CategoryNames,\
      ModuleCategoryMap, Module2NodeType, NodeTypeNames, ModuleIds,\
-     INSTANCE_ID_DEFAULT, COLLECTOR_DISCOVERY_SERVICE_NAME,\
+     INSTANCE_ID_DEFAULT, \
      ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME, ALARM_GENERATOR_SERVICE_NAME, \
      OpServerAdminPort, CLOUD_ADMIN_ROLE, APIAAAModes, \
-     AAA_MODE_CLOUD_ADMIN, AAA_MODE_NO_AUTH
+     AAA_MODE_CLOUD_ADMIN, AAA_MODE_NO_AUTH, AAA_MODE_RBAC, \
+     ServicesDefaultConfigurationFiles, SERVICE_OPSERVER
 from sandesh.viz.constants import _TABLES, _OBJECT_TABLES,\
     _OBJECT_TABLE_SCHEMA, _OBJECT_TABLE_COLUMN_VALUES, \
     _STAT_TABLES, STAT_OBJECTID_FIELD, STAT_VT_PREFIX, \
@@ -64,8 +62,6 @@ from sandesh.analytics.ttypes import *
 from sandesh.nodeinfo.ttypes import NodeStatusUVE, NodeStatus
 from sandesh.nodeinfo.cpuinfo.ttypes import *
 from sandesh.nodeinfo.process_info.ttypes import *
-from sandesh.discovery.ttypes import CollectorTrace
-import discoveryclient.client as discovery_client
 from opserver_util import OpServerUtils
 from opserver_util import AnalyticsDiscovery
 from sandesh_req_impl import OpserverSandeshReqImpl
@@ -396,21 +392,6 @@ class OpServer(object):
         * ``/analytics/query``:
         * ``/analytics/operation/database-purge``:
     """
-    def disc_publish(self):
-        data = {
-            'ip-address': self._args.host_ip,
-            'port': self._args.rest_api_port,
-        }
-        if self.disc:
-            self.disc.set_sandesh(self._sandesh)
-            self._logger.info("Disc Publish to %s : %d - %s" % \
-                (self._args.disc_server_ip,
-                self._args.disc_server_port, str(data)))
-            self.disc.publish(ANALYTICS_API_SERVER_DISCOVERY_SERVICE_NAME, data)
-        if self._ad is not None:
-            self._ad.publish(json.dumps(data))
-    # end disc_publish
-
     def validate_user_token(func):
         @wraps(func)
         def _impl(self, *f_args, **f_kwargs):
@@ -425,6 +406,47 @@ class OpServer(object):
             return func(self, *f_args, **f_kwargs)
         return _impl
     # end validate_user_token
+
+    def is_authorized_user(self):
+        if self._args.auth_conf_info.get('cloud_admin_access_only') and \
+                bottle.request.app == bottle.app():
+            user_token = bottle.request.headers.get('X-Auth-Token')
+            if not user_token or not \
+                    self._vnc_api_client.is_role_cloud_admin(user_token):
+                raise bottle.HTTPResponse(status = 401,
+                        body = 'Authentication required',
+                        headers = self._reject_auth_headers())
+        return True
+    # end is_authorized_user
+
+    def validate_user_token_check_perms(self, uves):
+        if self._args.auth_conf_info.get('aaa_mode') == AAA_MODE_RBAC and \
+                bottle.request.app == bottle.app():
+            if len(uves) == 0:
+                return True
+            user_token = bottle.request.headers.get('X-Auth-Token')
+            if not user_token:
+                return False
+            if 'ContrailConfig' in uves.keys():
+                if isinstance(uves['ContrailConfig']['elements'], dict):
+                    if 'uuid' in uves['ContrailConfig']['elements']:
+                        uuid = uves['ContrailConfig']['elements']['uuid']
+                if isinstance(uves['ContrailConfig']['elements'], list):
+                    if 'uuid' in uves['ContrailConfig']['elements'][0]:
+                        uuid = uves['ContrailConfig']['elements'][0]['uuid']
+                uuid = uuid.split('"')[1]
+                if not self._vnc_api_client.is_read_permission(user_token, uuid):
+                    return False
+            elif not self._vnc_api_client.is_role_cloud_admin(user_token):
+                return False
+        elif self._args.auth_conf_info.get('aaa_mode') == AAA_MODE_CLOUD_ADMIN \
+                and bottle.request.app == bottle.app():
+            user_token = bottle.request.headers.get('X-Auth-Token')
+            if not user_token or not \
+                    self._vnc_api_client.is_role_cloud_admin(user_token):
+                return False
+        return True
+    #end validate_user_token_check_perms
 
     def _reject_auth_headers(self):
         header_val = 'Keystone uri=\'%s\'' % \
@@ -466,12 +488,6 @@ class OpServer(object):
         if self._args.sandesh_send_rate_limit is not None:
             SandeshSystem.set_sandesh_send_rate_limit( \
                 self._args.sandesh_send_rate_limit)
-        self.disc = None
-        if self._args.disc_server_ip:
-           self.disc = discovery_client.DiscoveryClient(
-                            self._args.disc_server_ip,
-                            self._args.disc_server_port,
-                            ModuleNames[Module.OPSERVER])
 
         self.random_collectors = self._args.collectors
         if self._args.collectors:
@@ -482,7 +498,7 @@ class OpServer(object):
             self._moduleid, self._hostname, self._node_type_name,
             self._instance_id, self.random_collectors, 'opserver_context',
             int(self._args.http_server_port), ['opserver.sandesh'],
-            self.disc, logger_class=self._args.logger_class,
+            logger_class=self._args.logger_class,
             logger_config_file=self._args.logging_conf,
             config=self._args.sandesh_config)
         self._sandesh.set_logging_params(
@@ -598,8 +614,6 @@ class OpServer(object):
                                   instance_id = "0",
                                   port = int(redis_ip_port[1]))
                     self.agp[part] = pi
-
-        self.disc_publish()
 
 
         self._uve_server = UVEServer(self.redis_uve_list,
@@ -815,7 +829,9 @@ class OpServer(object):
         conf_parser = argparse.ArgumentParser(add_help=False)
 
         conf_parser.add_argument("-c", "--conf_file", action='append',
-                                 help="Specify config file", metavar="FILE")
+                                 help="Specify config file", metavar="FILE",
+                                 default=ServicesDefaultConfigurationFiles.get(
+                                     SERVICE_OPSERVER, None))
         args, remaining_argv = conf_parser.parse_known_args(args_str.split())
 
         defaults = {
@@ -846,7 +862,7 @@ class OpServer(object):
             'zk_prefix'         : '',
             'sandesh_send_rate_limit': SandeshSystem. \
                  get_sandesh_send_rate_limit(),
-            'aaa_mode'          : AAA_MODE_CLOUD_ADMIN,
+            'aaa_mode'          : AAA_MODE_RBAC,
             'api_server'        : '127.0.0.1:8082',
             'admin_port'        : OpServerAdminPort,
             'cloud_admin_role'  : CLOUD_ADMIN_ROLE,
@@ -856,10 +872,6 @@ class OpServer(object):
             'redis_query_port'   : 6379,
             'redis_password'       : None,
             'redis_uve_list'     : ['127.0.0.1:6379'],
-        }
-        disc_opts = {
-            'disc_server_ip'     : None,
-            'disc_server_port'   : 5998,
         }
         database_opts = {
             'cluster_id'     : '',
@@ -893,14 +905,18 @@ class OpServer(object):
                 defaults.update(dict(config.items("DEFAULTS")))
             if 'REDIS' in config.sections():
                 redis_opts.update(dict(config.items('REDIS')))
-            if 'DISCOVERY' in config.sections():
-                disc_opts.update(dict(config.items('DISCOVERY')))
             if 'CASSANDRA' in config.sections():
                 cassandra_opts.update(dict(config.items('CASSANDRA')))
             if 'KEYSTONE' in config.sections():
                 keystone_opts.update(dict(config.items('KEYSTONE')))
             if 'SANDESH' in config.sections():
                 sandesh_opts.update(dict(config.items('SANDESH')))
+                if 'sandesh_ssl_enable' in config.options('SANDESH'):
+                    sandesh_opts['sandesh_ssl_enable'] = config.getboolean(
+                        'SANDESH', 'sandesh_ssl_enable')
+                if 'introspect_ssl_enable' in config.options('SANDESH'):
+                    sandesh_opts['introspect_ssl_enable'] = config.getboolean(
+                        'SANDESH', 'introspect_ssl_enable')
             if 'DATABASE' in config.sections():
                 database_opts.update(dict(config.items('DATABASE')))
 
@@ -914,7 +930,6 @@ class OpServer(object):
             description=__doc__,
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         defaults.update(redis_opts)
-        defaults.update(disc_opts)
         defaults.update(cassandra_opts)
         defaults.update(database_opts)
         defaults.update(keystone_opts)
@@ -957,11 +972,6 @@ class OpServer(object):
             help="Use syslog for logging")
         parser.add_argument("--syslog_facility",
             help="Syslog facility to receive log lines")
-        parser.add_argument("--disc_server_ip",
-            help="Discovery Server IP address")
-        parser.add_argument("--disc_server_port",
-            type=int,
-            help="Discovery Server port")
         parser.add_argument("--dup", action="store_true",
             help="Internal use")
         parser.add_argument("--redis_uve_list",
@@ -1051,6 +1061,7 @@ class OpServer(object):
         auth_conf_info['cloud_admin_access_only'] = \
             False if self._args.aaa_mode == AAA_MODE_NO_AUTH else True
         auth_conf_info['cloud_admin_role'] = self._args.cloud_admin_role
+        auth_conf_info['aaa_mode'] = self._args.aaa_mode
         auth_conf_info['admin_port'] = self._args.admin_port
         api_server_info = self._args.api_server.split(':')
         auth_conf_info['api_server_ip'] = api_server_info[0]
@@ -1684,7 +1695,6 @@ class OpServer(object):
             yield u']}'
     # end _uve_alarm_http_post
 
-    @validate_user_token
     def dyn_http_get(self, table, name):
         # common handling for all resource get
         (ok, result) = self._get_common(bottle.request)
@@ -1713,6 +1723,8 @@ class OpServer(object):
       
         uve_name = uve_tbl + ':' + name
         if name.find('*') != -1:
+            if not self.is_authorized_user():
+                return
             flat = True
             yield u'{"value": ['
             first = True
@@ -1721,7 +1733,7 @@ class OpServer(object):
             num = 0
             byt = 0
             for gen in self._uve_server.multi_uve_get(uve_tbl, flat,
-                                                      filters, base_url):
+                    filters, base_url):
                 dp = json.dumps(gen)
                 byt += len(dp)
                 if first:
@@ -1736,10 +1748,15 @@ class OpServer(object):
         else:
             _, rsp = self._uve_server.get_uve(uve_name, flat, filters,
                                            base_url=base_url)
-            dp = json.dumps(rsp)
-            stats.collect(1, len(dp))
-            stats.sendwith()
-            yield dp
+            if self.validate_user_token_check_perms(rsp):
+                dp = json.dumps(rsp)
+                stats.collect(1, len(dp))
+                stats.sendwith()
+                yield dp
+            else:
+                yield bottle.HTTPResponse(status = 401,
+                    body = 'Authentication required',
+                    headers = self._reject_auth_headers())
     # end dyn_http_get
 
     @validate_user_token
@@ -1923,7 +1940,7 @@ class OpServer(object):
             return bottle.HTTPError(_ERRORS[errno.EINVAL],
                 'Invalid token value')
         generator_introspect = GeneratorIntrospectUtil(token['host_ip'],
-                                                       token['http_port'])
+                                 token['http_port'], self._args.sandesh_config)
         try:
             res = generator_introspect.send_alarm_ack_request(
                 table, bottle.request.json['name'],

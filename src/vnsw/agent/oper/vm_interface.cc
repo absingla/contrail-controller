@@ -66,8 +66,8 @@ VmInterface::VmInterface(const boost::uuids::uuid &uuid) :
     primary_ip6_addr_(), vm_mac_(MacAddress::kZeroMac), policy_enabled_(false),
     mirror_entry_(NULL), mirror_direction_(MIRROR_RX_TX), cfg_name_(""),
     fabric_port_(true), need_linklocal_ip_(false), drop_new_flows_(false),
-    dhcp_enable_(true), do_dhcp_relay_(false), vm_name_(),
-    vm_project_uuid_(nil_uuid()), vxlan_id_(0), bridging_(false),
+    dhcp_enable_(true), do_dhcp_relay_(false), proxy_arp_mode_(PROXY_ARP_NONE),
+    vm_name_(), vm_project_uuid_(nil_uuid()), vxlan_id_(0), bridging_(false),
     layer3_forwarding_(true), flood_unknown_unicast_(false),
     mac_set_(false), ecmp_(false), ecmp6_(false), disable_policy_(false),
     tx_vlan_id_(kInvalidVlanId), rx_vlan_id_(kInvalidVlanId), parent_(NULL, this),
@@ -106,8 +106,8 @@ VmInterface::VmInterface(const boost::uuids::uuid &uuid,
     primary_ip6_addr_(a6), vm_mac_(mac), policy_enabled_(false),
     mirror_entry_(NULL), mirror_direction_(MIRROR_RX_TX), cfg_name_(""),
     fabric_port_(true), need_linklocal_ip_(false), drop_new_flows_(false),
-    dhcp_enable_(true), do_dhcp_relay_(false), vm_name_(vm_name),
-    vm_project_uuid_(vm_project_uuid), vxlan_id_(0),
+    dhcp_enable_(true), do_dhcp_relay_(false), proxy_arp_mode_(PROXY_ARP_NONE),
+    vm_name_(vm_name), vm_project_uuid_(vm_project_uuid), vxlan_id_(0),
     bridging_(false), layer3_forwarding_(true),
     flood_unknown_unicast_(false), mac_set_(false),
     ecmp_(false), ecmp6_(false), disable_policy_(false),
@@ -174,18 +174,30 @@ static bool BuildFloatingIpVnVrf(Agent *agent, VmInterfaceConfigData *data,
         }
         FloatingIp *fip = static_cast<FloatingIp *>(node->GetObject());
         assert(fip != NULL);
-        LOG(DEBUG, "Add FloatingIP <" << fip->address() << ":" <<
-            vrf_node->name() << "> to interface " << node->name());
 
         boost::system::error_code ec;
         IpAddress addr = IpAddress::from_string(fip->address(), ec);
         if (ec.value() != 0) {
-            LOG(DEBUG, "Error decoding Floating IP address " << fip->address());
+            LOG(ERROR, "Error decoding Floating IP address " << fip->address());
+            OPER_TRACE_ENTRY(Trace, agent->interface_table(),
+                             "Error decoding Floating IP address " +
+                             fip->address());
         } else {
             IpAddress fixed_ip_addr =
                 IpAddress::from_string(fip->fixed_ip_address(), ec);
             if (ec.value() != 0) {
                 fixed_ip_addr = IpAddress();
+            }
+            if (!fixed_ip_addr.is_unspecified()) {
+                if ((addr.is_v4() && !fixed_ip_addr.is_v4()) ||
+                    (addr.is_v6() && !fixed_ip_addr.is_v6())) {
+                    string msg = "Invalid fixed-ip " + fip->fixed_ip_address() +
+                                 " for FloatingIP " + fip->address();
+                    LOG(ERROR, msg);
+                    OPER_TRACE_ENTRY(Trace, agent->interface_table(), msg);
+
+                    return true;
+                }
             }
 
             VmInterface::FloatingIp::Direction dir =
@@ -590,6 +602,33 @@ static void BuildVrfAndServiceVlanInfo(Agent *agent,
     return;
 }
 
+// Build proxy-arp flag on VMI
+// In future, we expect a proxy-arp flag on VMI. In the meanwhile, we want
+// to enable proxy-arp on following,
+// 1. Left and right interface of transparent service-chain
+// 2. Left and right interface of in-network service-chain
+// 3. Left interface of in-network-nat service-chain
+//
+// The common attribute for all these interface are,
+// - They have vrf-assign rules
+// - They have service-interface-type attribute
+//
+// Note: Right interface of in-network-nat will not have vrf-assign
+static void BuildProxyArpFlags(Agent *agent, VmInterfaceConfigData *data,
+                               VirtualMachineInterface *cfg) {
+    data->proxy_arp_mode_ = VmInterface::PROXY_ARP_NONE;
+    if (cfg->vrf_assign_table().size() == 0)
+        return;
+
+    // Proxy-mode valid only on left or right interface os SI
+    if (cfg->properties().service_interface_type != "left" &&
+        cfg->properties().service_interface_type != "right") {
+        return;
+    }
+
+    data->proxy_arp_mode_ = VmInterface::PROXY_ARP_UNRESTRICTED;
+}
+
 static void BuildFatFlowTable(Agent *agent, VmInterfaceConfigData *data,
                               IFMapNode *node) {
     VirtualMachineInterface *cfg = static_cast <VirtualMachineInterface *>
@@ -820,7 +859,12 @@ static void BuildBridgeDomainTable(Agent *agent,
 
 static void CompareVnVm(const uuid &vmi_uuid, VmInterfaceConfigData *data,
                         const PortSubscribeEntry *entry) {
-    if (entry && (entry->MatchVn(data->vn_uuid_) == false)) {
+    /* VN uuid is mandatory for port adds from REST API only for port type of
+     * PortSubscribeEntry::VMPORT. Hence VN match check should be done only for
+     * port type of PortSubscribeEntry::VMPORT
+     */
+    if (entry && entry->type() == PortSubscribeEntry::VMPORT &&
+        (entry->MatchVn(data->vn_uuid_) == false)) {
         IFMAP_ERROR(InterfaceConfiguration, 
                     "Virtual-network UUID mismatch for interface:",
                     UuidToString(vmi_uuid),
@@ -1136,6 +1180,7 @@ static void BuildAttributes(Agent *agent, IFMapNode *node,
         data->vm_mac_ = cfg->mac_addresses().at(0);
     }
     data->disable_policy_ = cfg->disable_policy();
+    BuildProxyArpFlags(agent, data, cfg);
 }
 
 static void UpdateAttributes(Agent *agent, VmInterfaceConfigData *data) {
@@ -1699,7 +1744,6 @@ void VmInterface::UpdateL3MetadataIp(VrfEntry *old_vrf, bool force_update,
                                      bool policy_change,
                                      bool old_metadata_ip_active) {
     assert(metadata_ip_active_);
-    UpdateL3TunnelId(force_update, policy_change);
     UpdateMetadataRoute(old_metadata_ip_active, old_vrf);
 }
 
@@ -1837,9 +1881,6 @@ void VmInterface::UpdateL2(bool old_l2_active, bool policy_change) {
         return;
 
     UpdateVxLan();
-    //Update label only if new entry is to be created, so
-    //no force update on same.
-    UpdateL2TunnelId(false, policy_change);
 }
 
 void VmInterface::DeleteBridgeRoutes(bool old_bridging, VrfEntry *old_vrf,
@@ -1861,7 +1902,7 @@ void VmInterface::DeleteBridgeRoutes(bool old_bridging, VrfEntry *old_vrf,
 }
 
 void VmInterface::DeleteL2(bool old_l2_active) {
-    DeleteL2TunnelId();
+    l2_label_ = MplsTable::kInvalidLabel;
 }
 
 const MacAddress& VmInterface::GetVifMac(const Agent *agent) const {
@@ -2111,7 +2152,8 @@ VmInterfaceConfigData::VmInterfaceConfigData(Agent *agent, IFMapNode *node) :
     cfg_name_(""), vm_uuid_(), vm_name_(), vn_uuid_(), vrf_name_(""),
     fabric_port_(true), need_linklocal_ip_(false), bridging_(true),
     layer3_forwarding_(true), mirror_enable_(false), ecmp_(false),
-    ecmp6_(false), dhcp_enable_(true), admin_state_(true),
+    ecmp6_(false), dhcp_enable_(true),
+    proxy_arp_mode_(VmInterface::PROXY_ARP_NONE), admin_state_(true),
     disable_policy_(false), analyzer_name_(""),
     local_preference_(VmInterface::INVALID), oper_dhcp_options_(),
     mirror_direction_(Interface::UNKNOWN), sg_list_(),
@@ -2378,6 +2420,11 @@ bool VmInterface::CopyConfig(const InterfaceTable *table,
 
     if (dhcp_enable_ != data->dhcp_enable_) {
         dhcp_enable_ = data->dhcp_enable_;
+        ret = true;
+    }
+
+    if (proxy_arp_mode_ != data->proxy_arp_mode_) {
+        proxy_arp_mode_ = data->proxy_arp_mode_;
         ret = true;
     }
 
@@ -3117,103 +3164,14 @@ bool VmInterface::IsVxlanMode() const {
     return vxlan_id_ != 0;
 }
 
-// Allocate MPLS Label for Layer3 routes
-void VmInterface::AllocL3MplsLabel(bool force_update, bool policy_change,
-                                   uint32_t new_label) {
-    if (fabric_port_)
-        return;
-
-    bool new_entry = false;
-    Agent *agent = static_cast<InterfaceTable *>(get_table())->agent();
-    if (label_ == MplsTable::kInvalidLabel) {
-        if (new_label == MplsTable::kInvalidLabel) {
-            ResourceManager::KeyPtr key
-                (new InterfaceIndexResourceKey(agent->resource_manager(),
-                                               GetUuid(), MacAddress(),
-                                               policy_enabled_, LABEL_TYPE_L3, 0));
-            label_ = agent->mpls_table()->AllocLabel(key);
-        } else {
-            label_ = new_label;
-        }
-        new_entry = true;
-        UpdateMetaDataIpInfo();
-    }
-
-    if (force_update || policy_change || new_entry)
-        MplsLabel::CreateVPortLabel(agent, label_, GetUuid(), policy_enabled_,
-                                    InterfaceNHFlags::INET4,
-                                    vm_mac_);
-}
-
 // Delete MPLS Label for Layer3 routes
 void VmInterface::DeleteL3MplsLabel() {
     if (label_ == MplsTable::kInvalidLabel) {
         return;
     }
 
-    Agent *agent = static_cast<InterfaceTable *>(get_table())->agent();
-    agent->mpls_table()->FreeLabel(label_);
-    MplsLabel::Delete(agent, label_);
     label_ = MplsTable::kInvalidLabel;
     UpdateMetaDataIpInfo();
-}
-
-// Allocate MPLS Label for Bridge entries 
-void VmInterface::AllocL2MplsLabel(bool force_update,
-                                   bool policy_change) {
-    bool new_entry = false;
-    if (l2_label_ == MplsTable::kInvalidLabel) {
-        Agent *agent = static_cast<InterfaceTable *>(get_table())->agent();
-        ResourceManager::KeyPtr key
-            (new InterfaceIndexResourceKey(agent->resource_manager(),
-                                           GetUuid(), MacAddress(),
-                                           policy_enabled_, LABEL_TYPE_L2, 0));
-        l2_label_ = agent->mpls_table()->AllocLabel(key);
-        new_entry = true;
-    }
-
-    Agent *agent = static_cast<InterfaceTable *>(get_table())->agent();
-    if (force_update || policy_change || new_entry)
-        MplsLabel::CreateVPortLabel(agent, l2_label_, GetUuid(),
-                                    policy_enabled_, InterfaceNHFlags::BRIDGE,
-                                    vm_mac_);
-}
-
-// Delete MPLS Label for Bridge Entries 
-void VmInterface::DeleteL2MplsLabel() {
-    if (l2_label_ == MplsTable::kInvalidLabel) {
-        return;
-    }
-
-    Agent *agent = static_cast<InterfaceTable *>(get_table())->agent();
-    agent->mpls_table()->FreeLabel(l2_label_);
-    MplsLabel::Delete(agent, l2_label_);
-    l2_label_ = MplsTable::kInvalidLabel;
-}
-
-void VmInterface::UpdateL3TunnelId(bool force_update, bool policy_change) {
-    //Currently only MPLS encap ind no VXLAN is supported for L3.
-    //Unconditionally create a label
-    if (policy_change && (label_ != MplsTable::kInvalidLabel)) {
-        /* We delete the existing label and add new one whenever policy changes
-         * to ensure that leaked routes point to NH with correct policy
-         * status. This is to handle the case when after leaking the route, if
-         * policy is disabled on VMI, the leaked route was still pointing to
-         * policy enabled NH */
-
-        /* Fetch new label before we delete the existing label so that we dont
-         * get back the same label*/
-        Agent *agent = static_cast<InterfaceTable *>(get_table())->agent();
-        ResourceManager::KeyPtr key
-            (new InterfaceIndexResourceKey(agent->resource_manager(),
-                                           GetUuid(), MacAddress(),
-                                           policy_enabled_, LABEL_TYPE_L3, 0));
-        uint32_t new_label = agent->mpls_table()->AllocLabel(key);
-        DeleteL3MplsLabel();
-        AllocL3MplsLabel(force_update, policy_change, new_label);
-    } else {
-        AllocL3MplsLabel(force_update, policy_change, MplsTable::kInvalidLabel);
-    }
 }
 
 void VmInterface::DeleteL3TunnelId() {
@@ -3351,6 +3309,22 @@ void VmInterface::UpdateL3NextHop() {
                         vm_mac_);
     l3_interface_nh_no_policy_ =
         static_cast<NextHop *>(agent->nexthop_table()->FindActiveEntry(&key2));
+
+    bool new_entry = false;
+    if (label_ == MplsTable::kInvalidLabel) {
+        new_entry = true;
+    }
+
+    // Update L3 mpls label from nh entry
+    if (policy_enabled()) {
+        label_ = l3_interface_nh_policy_->mpls_label()->label();
+    } else {
+        label_ = l3_interface_nh_no_policy_->mpls_label()->label();
+    }
+
+    if (new_entry) {
+        UpdateMetaDataIpInfo();
+    }
 }
 
 void VmInterface::DeleteL3NextHop() {
@@ -3381,6 +3355,13 @@ void VmInterface::UpdateL2NextHop(bool force_update) {
                            false, InterfaceNHFlags::BRIDGE, vm_mac_);
         l2_interface_nh_no_policy_ = static_cast<NextHop *>(agent->
                                      nexthop_table()->FindActiveEntry(&key));
+    }
+
+    // Update L2 mpls label from nh entry
+    if (policy_enabled()) {
+        l2_label_ = l2_interface_nh_policy_->mpls_label()->label();
+    } else {
+        l2_label_ = l2_interface_nh_no_policy_->mpls_label()->label();
     }
 }
 
@@ -3881,12 +3862,19 @@ void VmInterface::UpdateBridgeDomain() {
             BridgeDomainKey key(it->uuid_);
             it->bridge_domain_ = static_cast<const BridgeDomainEntry *>(
                   table->agent()->bridge_domain_table()->FindActiveEntry(&key));
-            assert(it->bridge_domain_->vrf());
+            if (it->bridge_domain_->vrf() == NULL) {
+                //Ignore bridge domain without VRF
+                it->del_pending_ = true;
+            }
         }
         it++;
     }
 
     DeleteBridgeDomain();
+
+    if (bridge_domain_list_.list_.size() == 0) {
+        pbb_interface_ = false;
+    }
 }
 
 void VmInterface::DeleteBridgeDomain() {
@@ -3897,14 +3885,6 @@ void VmInterface::DeleteBridgeDomain() {
             bridge_domain_list_.list_.erase(prev);
         }
     }
-}
-
-void VmInterface::UpdateL2TunnelId(bool force_update, bool policy_change) {
-    AllocL2MplsLabel(force_update, policy_change);
-}
-
-void VmInterface::DeleteL2TunnelId() {
-    DeleteL2MplsLabel();
 }
 
 void VmInterface::UpdateL2InterfaceRoute(bool old_bridging, bool force_update,
@@ -4496,9 +4476,7 @@ void VmInterface::FloatingIp::L3Activate(VmInterface *interface,
         return;
     }
 
-    if (fixed_ip_.is_v4() && fixed_ip_ == Ip4Address(0)) {
-        fixed_ip_ = GetFixedIp(interface);
-    }
+    fixed_ip_ = GetFixedIp(interface);
 
     InterfaceTable *table =
         static_cast<InterfaceTable *>(interface->get_table());
@@ -4507,7 +4485,7 @@ void VmInterface::FloatingIp::L3Activate(VmInterface *interface,
         interface->AddRoute(vrf_.get()->GetName(), floating_ip_.to_v4(),
                         Address::kMaxV4PrefixLen, vn_->GetName(), false,
                         interface->ecmp(), false, false, Ip4Address(0),
-                        GetFixedIp(interface), CommunityList(),
+                        fixed_ip_, CommunityList(),
                         interface->label());
         if (table->update_floatingip_cb().empty() == false) {
             table->update_floatingip_cb()(interface, vn_.get(),
@@ -4517,7 +4495,7 @@ void VmInterface::FloatingIp::L3Activate(VmInterface *interface,
         interface->AddRoute(vrf_.get()->GetName(), floating_ip_.to_v6(),
                         Address::kMaxV6PrefixLen, vn_->GetName(), false,
                         interface->ecmp6(), false, false, Ip6Address(),
-                        GetFixedIp(interface), CommunityList(),
+                        fixed_ip_, CommunityList(),
                         interface->label());
         //TODO:: callback for DNS handling
     }
@@ -4879,7 +4857,8 @@ void VmInterface::StaticRoute::Activate(VmInterface *interface,
             interface->AddRoute(vrf_, addr_, plen_,
                                 interface->vn_->GetName(),
                                 false, ecmp, false, false,
-                                IpAddress(), dependent_ip, communities_,
+                                interface->GetServiceIp(addr_),
+                                dependent_ip, communities_,
                                 interface->label());
         }
     }
@@ -5057,30 +5036,6 @@ void VmInterface::AllowedAddressPair::CreateLabelAndNH(Agent *agent,
                                                        VmInterface *interface,
                                                        bool policy_change)
                                                        const {
-    uint32_t old_label = MplsTable::kInvalidLabel;
-    //Allocate a new L3 label with proper layer 2
-    //rewrite information
-    if (label_ == MplsTable::kInvalidLabel) {
-        ResourceManager::KeyPtr key
-            (new InterfaceIndexResourceKey(agent->resource_manager(),
-                                           interface->GetUuid(), mac_,
-                                           interface->policy_enabled(),
-                                           LABEL_TYPE_AAP, 0));
-        label_ = agent->mpls_table()->AllocLabel(key);
-    } else if (policy_change) {
-        old_label = label_;
-        ResourceManager::KeyPtr alloc_key
-            (new InterfaceIndexResourceKey(agent->resource_manager(),
-                                           interface->GetUuid(), mac_,
-                                           interface->policy_enabled(),
-                                           LABEL_TYPE_AAP, 0));
-        label_ = agent->mpls_table()->AllocLabel(alloc_key);
-        assert(label_ != old_label);
-        // TODO: Can mac_ change for AAP?
-        agent->mpls_table()->FreeLabel(old_label);
-        MplsLabel::Delete(interface->agent(), old_label);
-    }
-
     InterfaceNH::CreateL3VmInterfaceNH(interface->GetUuid(), mac_,
                                        interface->vrf_->GetName(),
                                        interface->learning_enabled_);
@@ -5101,9 +5056,12 @@ void VmInterface::AllowedAddressPair::CreateLabelAndNH(Agent *agent,
     nh->set_delete_on_zero_refcount(true);
     policy_enabled_nh_ = nh;
 
-    MplsLabel::CreateVPortLabel(agent, label_, interface->GetUuid(),
-                                interface->policy_enabled(),
-                                InterfaceNHFlags::INET4, mac_);
+    // Update AAP mpls label from nh entry
+    if (interface->policy_enabled()) {
+        label_ = policy_enabled_nh_->mpls_label()->label();
+    } else {
+        label_ = policy_disabled_nh_->mpls_label()->label();
+    }
 }
 
 void VmInterface::AllowedAddressPair::Activate(VmInterface *interface,
@@ -5145,10 +5103,7 @@ void VmInterface::AllowedAddressPair::DeActivate(VmInterface *interface) const {
     if (installed_ == false)
         return;
     interface->DeleteRoute(vrf_, addr_, plen_);
-    Agent *agent = interface->agent();
     if (label_ != MplsTable::kInvalidLabel) {
-        agent->mpls_table()->FreeLabel(label_);
-        MplsLabel::Delete(interface->agent(), label_);
         label_ = MplsTable::kInvalidLabel;
     }
     policy_enabled_nh_ = NULL;
@@ -5293,16 +5248,14 @@ void VmInterface::ServiceVlan::Activate(VmInterface *interface,
     }
 
     if (label_ == MplsTable::kInvalidLabel) {
-        VlanNH::Create(interface->GetUuid(), tag_, vrf_name_, smac_, dmac_);
         Agent *agent = interface->agent();
-        ResourceManager::KeyPtr key
-            (new InterfaceIndexResourceKey(agent->resource_manager(),
-                                           interface->GetUuid(), MacAddress(),
-                                           false, LABEL_TYPE_SERVICE_VLAN, tag_));
-        label_ = table->agent()->mpls_table()->AllocLabel(key);
-        MplsLabel::CreateVlanNh(table->agent(), label_,
-                                interface->GetUuid(), tag_);
+        VlanNH::Create(interface->GetUuid(), tag_, vrf_name_, smac_, dmac_);
         VrfAssignTable::CreateVlan(interface->GetUuid(), vrf_name_, tag_);
+        // Assign label_ from vlan NH db entry
+        VlanNHKey key(interface->GetUuid(), tag_);
+        const NextHop *nh = static_cast<const NextHop *>(
+                                agent->nexthop_table()->FindActiveEntry(&key));
+        label_ = nh->mpls_label()->label();
     }
 
     if (!interface->ipv4_active() && !interface->ipv6_active() &&
@@ -5343,10 +5296,6 @@ void VmInterface::ServiceVlan::DeActivate(VmInterface *interface) const {
     if (label_ != MplsTable::kInvalidLabel) {
         VrfAssignTable::DeleteVlan(interface->GetUuid(), tag_);
         interface->ServiceVlanRouteDel(*this);
-        Agent *agent =
-            static_cast<InterfaceTable *>(interface->get_table())->agent();
-        agent->mpls_table()->FreeLabel(label_);
-        MplsLabel::Delete(agent, label_);
         label_ = MplsTable::kInvalidLabel;
         VlanNH::Delete(interface->GetUuid(), tag_);
         vrf_ = NULL;
@@ -5591,6 +5540,49 @@ VmInterface::hc_instance_set() const {
     return hc_instance_set_;
 }
 
+bool VmInterface::IsHealthCheckEnabled() const {
+    return hc_instance_set_.size() != 0;
+}
+
+// Match the Health-Check instance for a packet from VM-Interface
+// A packet from vmi is assumed to be response for health-check request from
+// vhost0
+const HealthCheckInstance *VmInterface::GetHealthCheckFromVmiFlow
+(const IpAddress &sip, const IpAddress &dip, uint8_t proto,
+ uint16_t sport) const {
+    HealthCheckInstanceSet::const_iterator it = hc_instance_set_.begin();
+    while (it != hc_instance_set_.end()) {
+        const HealthCheckInstance *hc_instance = *it;
+        it++;
+
+        // Match ip-proto and health-check port
+        const HealthCheckService *hc_service = hc_instance->service();
+        if (hc_service == NULL)
+            continue;
+
+        if (hc_service->ip_proto() != proto)
+            continue;
+
+        if (hc_service->url_port() != sport)
+            continue;
+
+        // The source-ip and destination-ip can be matched from MetaDataIp
+        // allocated for HealthCheck
+        const MetaDataIp *mip = hc_instance->ip();
+        if (mip == NULL)
+            continue;
+
+        if (mip->destination_ip() != sip)
+            continue;
+
+        if (mip->service_ip() != dip)
+            continue;
+
+        return hc_instance;
+    }
+
+    return NULL;
+}
 ////////////////////////////////////////////////////////////////////////////
 // VRF assign rule routines
 ////////////////////////////////////////////////////////////////////////////
@@ -5993,24 +5985,25 @@ uint32_t VmInterface::GetIsid() const {
     for (; it != bridge_domain_list_.list_.end(); it++) {
         return it->bridge_domain_->isid();
     }
-    assert(0);
     return kInvalidIsid;
 }
 
 uint32_t VmInterface::GetPbbVrf() const {
     BridgeDomainEntrySet::const_iterator it = bridge_domain_list_.list_.begin();
     for (; it != bridge_domain_list_.list_.end(); it++) {
-        return it->bridge_domain_->vrf()->vrf_id();
+        if (it->bridge_domain_->vrf()) {
+            return it->bridge_domain_->vrf()->vrf_id();
+        }
     }
-    assert(0);
     return VrfEntry::kInvalidIndex;
 }
 
 uint32_t VmInterface::GetPbbLabel() const {
     BridgeDomainEntrySet::const_iterator it = bridge_domain_list_.list_.begin();
     for (; it != bridge_domain_list_.list_.end(); it++) {
-        return it->bridge_domain_->vrf()->table_label();
+        if (it->bridge_domain_->vrf()) {
+            return it->bridge_domain_->vrf()->table_label();
+        }
     }
-    assert(0);
     return MplsTable::kInvalidLabel;
 }

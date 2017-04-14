@@ -53,11 +53,8 @@ using process::ConnectionState;
 using process::ConnectionType;
 using process::ConnectionStatus;
 
-uint32_t DbHandler::field_cache_t2_ = 0;
-std::set<std::string> DbHandler::field_cache_set_[2];
-uint32_t DbHandler::field_cache_old_t2_ = 0;
-uint8_t DbHandler::old_t2_index_ = 0;
-uint8_t DbHandler::new_t2_index_ = 1;
+uint32_t DbHandler::field_cache_index_ = 0;
+std::set<std::string> DbHandler::field_cache_set_;
 tbb::mutex DbHandler::fmutex_;
 
 DbHandler::DbHandler(EventManager *evm,
@@ -67,7 +64,9 @@ DbHandler::DbHandler(EventManager *evm,
         const std::string &zookeeper_server_list,
         bool use_zookeeper,
         bool use_db_write_options,
-        const DbWriteOptions &db_write_options) :
+        const DbWriteOptions &db_write_options,
+        const ConfigDBConnection::ApiServerList &api_server_list,
+        const VncApiConfig &api_config) :
     dbif_(new cass::cql::CqlIf(evm, cassandra_options.cassandra_ips_,
         cassandra_options.cassandra_ports_[0], cassandra_options.user_,
         cassandra_options.password_)),
@@ -89,7 +88,8 @@ DbHandler::DbHandler(EventManager *evm,
         "udc config poll timer",
         TaskScheduler::GetInstance()->GetTaskId("vnc-api http client"))),
     use_db_write_options_(use_db_write_options) {
-    cfgdb_connection_.reset(new ConfigDBConnection(evm, 0));
+    cfgdb_connection_.reset(new ConfigDBConnection(evm, api_server_list,
+                                                   api_config));
     udc_.reset(new UserDefinedCounters(cfgdb_connection_));
     error_code error;
     col_name_ = boost::asio::ip::host_name(error);
@@ -168,9 +168,9 @@ DbHandler::DbHandler(GenDb::GenDbIf *dbif, const TtlMap& ttl_map) :
     disable_messages_keyword_writes_(false),
     udc_cfg_poll_timer_(NULL),
     use_db_write_options_(false) {
-    cfgdb_connection_.reset(new ConfigDBConnection(0, 0));
+    cfgdb_connection_.reset(new ConfigDBConnection(NULL,
+        ConfigDBConnection::ApiServerList(), VncApiConfig()));
     udc_.reset(new UserDefinedCounters(cfgdb_connection_));
-
 }
 
 DbHandler::~DbHandler() {
@@ -887,6 +887,11 @@ void DbHandler::MessageTableInsert(const VizMsg *vmsgp,
         FieldNamesTableInsert(header.get_Timestamp(),
             g_viz_constants.COLLECTOR_GLOBAL_TABLE,
             ":Source", header.get_Source(), ttl, db_cb);
+        if (!header.get_Category().empty()) {
+            FieldNamesTableInsert(header.get_Timestamp(),
+                g_viz_constants.COLLECTOR_GLOBAL_TABLE,
+                ":Category", header.get_Category(), ttl, db_cb);
+        }
     }
 }
 
@@ -951,33 +956,23 @@ void DbHandler::FieldNamesTableInsert(uint64_t timestamp,
  */
 bool DbHandler::CanRecordDataForT2(uint32_t temp_u32, std::string fc_entry) {
     bool record = false;
-    if (temp_u32 > field_cache_t2_) {
-            // swap old and new index; clear the old cache
-            old_t2_index_ = new_t2_index_;
-            new_t2_index_ = (new_t2_index_ == 1)?0:1;
-            field_cache_old_t2_ = field_cache_t2_;
-            field_cache_set_[new_t2_index_].clear();
-            field_cache_t2_ = temp_u32;
-        } else if (temp_u32 > field_cache_old_t2_ && temp_u32 != field_cache_t2_){
-            field_cache_set_[old_t2_index_].clear();
-            field_cache_old_t2_ = temp_u32;
+
+    uint32_t cacheindex = temp_u32 >> g_viz_constants.CacheTimeInAdditionalBits;
+    if (cacheindex > field_cache_index_) {
+            field_cache_index_ = cacheindex;
+            field_cache_set_.clear();
+            field_cache_set_.insert(fc_entry);
+            record = true;
+    } else if (cacheindex == field_cache_index_) {
+        if (field_cache_set_.find(fc_entry) ==
+            field_cache_set_.end()) {
+            field_cache_set_.insert(fc_entry);
+            record = true;
         }
-        // Record only if not found in last or last but one T2 cache.
-        if (temp_u32 == field_cache_t2_) {
-            if (field_cache_set_[new_t2_index_].find(fc_entry) ==
-                field_cache_set_[new_t2_index_].end()) {
-                field_cache_set_[new_t2_index_].insert(fc_entry);
-                record = true;
-            }
-        } else if (temp_u32 == field_cache_old_t2_) {
-            if (field_cache_set_[old_t2_index_].find(fc_entry) ==
-                    field_cache_set_[old_t2_index_].end()) {
-                field_cache_set_[old_t2_index_].insert(fc_entry);
-                record = true;
-            }
-        }
-        return record;
+    }
+    return record;
 }
+
 void DbHandler::GetRuleMap(RuleMap& rulemap) {
 }
 
@@ -1900,13 +1895,15 @@ DbHandlerInitializer::DbHandlerInitializer(EventManager *evm,
     const Options::Cassandra &cassandra_options,
     const std::string &zookeeper_server_list,
     bool use_zookeeper,
-    const DbWriteOptions &db_write_options) :
+    const DbWriteOptions &db_write_options,
+    const ConfigDBConnection::ApiServerList &api_server_list,
+    const VncApiConfig &api_config) :
     db_name_(db_name),
     db_handler_(new DbHandler(evm,
         boost::bind(&DbHandlerInitializer::ScheduleInit, this),
         db_name,
         cassandra_options, zookeeper_server_list, use_zookeeper,
-        true, db_write_options)),
+        true, db_write_options, api_server_list, api_config)),
     callback_(callback),
     db_init_timer_(TimerManager::CreateTimer(*evm->io_service(),
         db_name + " Db Init Timer",

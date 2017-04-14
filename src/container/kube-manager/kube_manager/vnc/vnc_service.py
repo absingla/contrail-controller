@@ -12,30 +12,34 @@ from loadbalancer import *
 from kube_manager.common.kube_config_db import ServiceKM
 from cfgm_common import importutils
 import link_local_manager as ll_mgr
+from vnc_kubernetes_config import VncKubernetesConfig as vnc_kube_config
+from vnc_common import VncCommon
 
-class VncService(object):
+class VncService(VncCommon):
 
-    def __init__(self, vnc_lib=None, label_cache=None, args=None, logger=None,
-                 queue=None, kube=None):
+    def __init__(self):
+        self._k8s_event_type = 'Service'
+        super(VncService,self).__init__(self._k8s_event_type)
         self._name = type(self).__name__
-        self._vnc_lib = vnc_lib
-        self._label_cache = label_cache
-        self._args = args
-        self.logger = logger
-        self._queue = queue
-        self.kube = kube
+        self._vnc_lib = vnc_kube_config.vnc_lib()
+        self._label_cache = vnc_kube_config.label_cache()
+        self._args = vnc_kube_config.args()
+        self.logger = vnc_kube_config.logger()
+        self._queue = vnc_kube_config.queue()
+        self.kube = vnc_kube_config.kube()
 
         self._fip_pool_obj = None
 
         # Cache kubernetes API server params.
-        self._kubernetes_api_secure_ip = args.kubernetes_api_secure_ip
-        self._kubernetes_api_secure_port = int(args.kubernetes_api_secure_port)
+        self._kubernetes_api_secure_ip = self._args.kubernetes_api_secure_ip
+        self._kubernetes_api_secure_port =\
+            int(self._args.kubernetes_api_secure_port)
 
         # Cache kuberneter service name.
-        self._kubernetes_service_name = args.kubernetes_service_name
+        self._kubernetes_service_name = self._args.kubernetes_service_name
 
         # Config knob to control enable/disable of link local service.
-        if args.api_service_link_local == 'True':
+        if self._args.api_service_link_local == 'True':
             api_service_ll_enable = True
         else:
             api_service_ll_enable = False
@@ -47,26 +51,28 @@ class VncService(object):
             self._create_linklocal = False
         else:
             self._create_linklocal = api_service_ll_enable
-                                        
+
         self.service_lb_mgr = importutils.import_object(
-            'kube_manager.vnc.loadbalancer.ServiceLbManager', vnc_lib, logger)
+            'kube_manager.vnc.loadbalancer.ServiceLbManager')
         self.service_ll_mgr = importutils.import_object(
-            'kube_manager.vnc.loadbalancer.ServiceLbListenerManager', vnc_lib, logger)
+            'kube_manager.vnc.loadbalancer.ServiceLbListenerManager')
         self.service_lb_pool_mgr = importutils.import_object(
-            'kube_manager.vnc.loadbalancer.ServiceLbPoolManager', vnc_lib, logger)
+            'kube_manager.vnc.loadbalancer.ServiceLbPoolManager')
         self.service_lb_member_mgr = importutils.import_object(
-            'kube_manager.vnc.loadbalancer.ServiceLbMemberManager', vnc_lib, logger)
+            'kube_manager.vnc.loadbalancer.ServiceLbMemberManager')
 
     def _get_project(self, service_namespace):
-        proj_fq_name = ['default-domain', service_namespace]
+        proj_fq_name =\
+            vnc_kube_config.cluster_project_fq_name(service_namespace)
         try:
             proj_obj = self._vnc_lib.project_read(fq_name=proj_fq_name)
             return proj_obj
         except NoIdError:
             return None
 
-    def _get_network(self):
-        vn_fq_name = ['default-domain', 'default', 'cluster-network']
+    def _get_cluster_network(self):
+        vn_fq_name = vnc_kube_config.cluster_default_project_fq_name() +\
+            [vnc_kube_config.cluster_default_network_name()]
         try:
             vn_obj = self._vnc_lib.virtual_network_read(fq_name=vn_fq_name)
         except NoIdError:
@@ -76,9 +82,10 @@ class VncService(object):
     def _get_public_fip_pool(self):
         if self._fip_pool_obj:
             return self._fip_pool_obj
-        fip_pool_fq_name = ['default-domain', 'default', 
-                            self._args.public_network_name, 
-                            self._args.public_fip_pool_name]
+        fip_pool_fq_name = [vnc_kube_config.cluster_domain(),
+                            self._args.public_network_project,
+                            self._args.public_network,
+                            self._args.public_fip_pool]
         try:
             fip_pool_obj = self._vnc_lib.floating_ip_pool_read(fq_name=fip_pool_fq_name)
         except NoIdError:
@@ -178,14 +185,11 @@ class VncService(object):
 
     def _vnc_create_lb(self, service_id, service_name,
                        service_namespace, service_ip):
-        name = 'service' + '-' + service_name
         proj_obj = self._get_project(service_namespace)
-        vn_obj = self._get_network()
-        lb_provider = 'native'
-        annotations = {}
-        annotations['device_owner'] = 'K8S:SERVICE'
-        lb_obj = self.service_lb_mgr.create(lb_provider, vn_obj, service_id,
-                                     name, proj_obj, service_ip, annotations=annotations)
+        vn_obj = self._get_cluster_network()
+        lb_obj = self.service_lb_mgr.create(self._k8s_event_type,
+            service_namespace, service_id, service_name, proj_obj,
+            vn_obj, service_ip)
         return lb_obj
 
     def _lb_create(self, service_id, service_name,
@@ -247,8 +251,8 @@ class VncService(object):
         fip_pool = self._get_public_fip_pool()
         if fip_pool is None:
             self.logger.warning("public_fip_pool [%s, %s] doesn't exists" %
-                                 (self.config.public_network_name,
-                                 self.config.public_fip_pool_name))
+                                 (self._args.public_network,
+                                 self._args.public_fip_pool))
             return None
 
         fip_obj = FloatingIp(lb.name + "-externalIP", fip_pool)
@@ -267,7 +271,10 @@ class VncService(object):
             err_msg = cfgm_common.utils.detailed_traceback()
             self.logger.error(err_msg)
             return None
+
         fip = FloatingIpKM.locate(fip_obj.uuid)
+        self.logger.notice("floating ip allocated : %s for Service (%s)" % 
+                           (fip.address, service_id))
         return fip.address
 
     def _deallocate_floating_ip(self, service_id):
@@ -294,56 +301,52 @@ class VncService(object):
         merge_patch = {'spec': {'externalIPs': [external_ip]}}
         self.kube.patch_resource(resource_type="services", resource_name=service_name,
                            namespace=service_namespace, merge_patch=merge_patch)
+        self.logger.notice("Service (%s, %s) updated with EXTERNAL-IP (%s)" 
+                               % (service_namespace, service_name, external_ip));
 
     def _update_service_public_ip(self, service_id, service_name,
                         service_namespace, service_type, external_ip, loadBalancerIp):
         allocated_fip = self._get_floating_ip(service_id)
+
         if service_type in ["LoadBalancer"]:
-            if allocated_fip is None and loadBalancerIp is not None:
+            if allocated_fip is None:
+                # Allocate floating-ip from public-pool, if none exists.
+                # if "loadBalancerIp" if specified in Service definition,
+                # allocate the specific ip.
                 allocated_fip = self._allocate_floating_ip(service_id, loadBalancerIp)
-                if external_ip != allocated_fip:
-                    self._update_service_external_ip(service_namespace, service_name, allocated_fip)
-                return
 
-            if allocated_fip is None and loadBalancerIp is None:
-                allocated_fip = self._allocate_floating_ip(service_id)
+            if allocated_fip:
                 if external_ip != allocated_fip:
+                    # If Service's EXTERNAL-IP is not same as allocated floating-ip,
+                    # update kube-api server with allocated fip as the EXTERNAL-IP
                     self._update_service_external_ip(service_namespace, service_name, allocated_fip)
-                return
 
-            if allocated_fip is not None and loadBalancerIp is None:
-                if external_ip != allocated_fip:
-                    self._update_service_external_ip(service_namespace, service_name, allocated_fip)
-                return
-
-            if allocated_fip and loadBalancerIp and allocated_fip == loadBalancerIp:
-                if external_ip is None:
-                    self._update_service_external_ip(service_namespace, service_name, allocated_fip)
-                return
+            return
 
         if service_type in ["ClusterIP"]:
-            if allocated_fip is not None and external_ip is None:
-                self._deallocate_floating_ip(service_id)
-                return
-
-            if allocated_fip is None and external_ip is None:
-                return
-
-            if allocated_fip is not None and external_ip is not None:
-                if external_ip != allocated_fip:
+            if allocated_fip :
+                if external_ip is None:
                     self._deallocate_floating_ip(service_id)
-                    self._allocate_floating_ip(service_id, external_ip)
-                    self._update_service_external_ip(service_namespace, service_name, external_ip)
-                return
+                    return
+                else:
+                    if external_ip != allocated_fip:
+                        self._deallocate_floating_ip(service_id)
+                        self._allocate_floating_ip(service_id, external_ip)
+                        self._update_service_external_ip(service_namespace, service_name, external_ip)
+                    return
 
-            if allocated_fip is None and external_ip is not None:
-                self._allocate_floating_ip(service_id, external_ip)
-                return
+            else:  #allocated_fip is None 
+                if external_ip is not None:
+                    self._allocate_floating_ip(service_id, external_ip)
+                    return
+
+            return
 
     def _check_service_uuid_change(self, svc_uuid, svc_name, 
                                    svc_namespace, ports):
-        lb_fq_name = ['default-domain', svc_namespace, svc_name]
-        lb_uuid = LoadbalancerKM.get_fq_name_to_uuid(lb_fq_name)
+        proj_fq_name = vnc_kube_config.cluster_project_fq_name(svc_namespace)
+        lb_fq_name = proj_fq_name + [svc_name]
+        lb_uuid = LoadbalancerKM.get_kube_fq_name_to_uuid(lb_fq_name)
         if lb_uuid is None:
             return
 
@@ -357,7 +360,7 @@ class VncService(object):
                         service_type, externalIp, loadBalancerIp):
         lb = LoadbalancerKM.get(service_id)
         if not lb:
-            self._check_service_uuid_change(service_id, service_name, 
+            self._check_service_uuid_change(service_id, service_name,
                                             service_namespace, ports)
 
         self._lb_create(service_id, service_name, service_namespace,
@@ -365,7 +368,7 @@ class VncService(object):
 
         # "kubernetes" service needs a link-local service to be created.
         # This link-local service will steer traffic destined for
-        # "kubernetes" service from slave (compute) nodes to kube-api server 
+        # "kubernetes" service from slave (compute) nodes to kube-api server
         # running on master (control) node.
         if service_name == self._kubernetes_service_name:
             self._create_link_local_service(service_name, service_ip, ports)
@@ -445,19 +448,23 @@ class VncService(object):
         return
 
     def _sync_service_lb(self):
-        lb_uuid_list = list(LoadbalancerKM.keys())
-        service_uuid_list = list(ServiceKM.keys())
-        for uuid in lb_uuid_list:
-            if uuid in service_uuid_list:
-                continue
+        lb_uuid_set = set(LoadbalancerKM.keys())
+        service_uuid_set = set(ServiceKM.keys())
+        deleted_uuid_set = lb_uuid_set - service_uuid_set
+        for uuid in deleted_uuid_set:
             lb = LoadbalancerKM.get(uuid)
             if not lb:
                 continue
             if not lb.annotations:
                 continue
+            owner = None
+            kind = None
             for kvp in lb.annotations['key_value_pair'] or []:
-                if kvp['key'] == 'device_owner' \
-                   and kvp['value'] == 'K8S:SERVICE':
+                if kvp['key'] == 'owner':
+                    owner = kvp['value']
+                elif kvp['key'] == 'kind':
+                    kind = kvp['value']
+                if owner == 'k8s' and kind == self._k8s_event_type:
                     self._create_service_event('delete', uuid, lb)
                     break
         return
@@ -469,9 +476,9 @@ class VncService(object):
     def process(self, event):
         event_type = event['type']
         kind = event['object'].get('kind')
-        service_id = event['object']['metadata'].get('uid')
-        service_name = event['object']['metadata'].get('name')
         service_namespace = event['object']['metadata'].get('namespace')
+        service_name = event['object']['metadata'].get('name')
+        service_id = event['object']['metadata'].get('uid')
         service_ip = event['object']['spec'].get('clusterIP')
         selectors = event['object']['spec'].get('selector', None)
         ports = event['object']['spec'].get('ports')
@@ -479,10 +486,12 @@ class VncService(object):
         loadBalancerIp  = event['object']['spec'].get('loadBalancerIP', None)
         externalIps  = event['object']['spec'].get('externalIPs', None)
 
-        print("%s - Got %s %s %s:%s"
-              %(self._name, event_type, kind, service_namespace, service_name))
-        self.logger.debug("%s - Got %s %s %s:%s"
-              %(self._name, event_type, kind, service_namespace, service_name))
+        print("%s - Got %s %s %s:%s:%s"
+              %(self._name, event_type, kind,
+              service_namespace, service_name, service_id))
+        self.logger.debug("%s - Got %s %s %s:%s:%s"
+              %(self._name, event_type, kind,
+              service_namespace, service_name, service_id))
 
         if externalIps is not None:
             externalIp = externalIps[0]

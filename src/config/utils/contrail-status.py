@@ -20,31 +20,35 @@ warnings.filterwarnings('ignore', category=SubjectAltNameWarning)
 from StringIO import StringIO
 from lxml import etree
 from sandesh_common.vns.constants import ServiceHttpPortMap, \
-    NodeUVEImplementedServices, ServicesDefaultConfigurationFile, \
+    NodeUVEImplementedServices, ServicesDefaultConfigurationFiles, \
     BackupImplementedServices
 
 DPDK_NETLINK_TCP_PORT = 20914
 
 CONTRAIL_SERVICES = {'compute' : {'sysv' : ['supervisor-vrouter'],
                                   'upstart' : ['supervisor-vrouter'],
+                                  'supervisor' : ['supervisor-vrouter'],
                                   'systemd' : ['contrail-vrouter-agent',
+                                               'contrail-tor-agent',
                                                'contrail-vrouter-nodemgr']},
                      'control' : {'sysv' : ['supervisor-control'],
                                   'upstart' : ['supervisor-control'],
+                                  'supervisor' : ['supervisor-control'],
                                   'systemd' :['contrail-control',
                                               'contrail-named',
                                               'contrail-dns',
                                               'contrail-control-nodemgr']},
                      'config' : {'sysv' : ['supervisor-config'],
                                  'upstart' : ['supervisor-config'],
+                                 'supervisor' : ['supervisor-config'],
                                  'systemd' :['contrail-api',
                                              'contrail-schema',
                                              'contrail-svc-monitor',
                                              'contrail-device-manager',
-                                             'contrail-config-nodemgr',
-                                             'ifmap']},
+                                             'contrail-config-nodemgr']},
                      'analytics' : {'sysv' : ['supervisor-analytics'],
                                     'upstart' : ['supervisor-analytics'],
+                                    'supervisor' : ['supervisor-analytics'],
                                     'systemd' :['contrail-collector',
                                                 'contrail-analytics-api',
                                                 'contrail-query-engine',
@@ -54,14 +58,17 @@ CONTRAIL_SERVICES = {'compute' : {'sysv' : ['supervisor-vrouter'],
                                                 'contrail-analytics-nodemgr',]},
                      'database' : {'sysv' : ['supervisor-database'],
                                    'upstart' : ['supervisor-database'],
+                                   'supervisor' : ['supervisor-database'],
                                   'systemd' :['kafka',
                                               'contrail-database-nodemgr']},
                      'webui' : {'sysv' : ['supervisor-webui'],
                                 'upstart' : ['supervisor-webui'],
+                                'supervisor' : ['supervisor-webui'],
                                 'systemd' :['contrail-webui',
                                             'contrail-webui-middleware']},
                      'support-service' : {'sysv' : ['supervisor-support-service'],
                                           'upstart' : ['supervisor-support-service'],
+                                          'supervisor' : ['supervisor-support-service'],
                                           'systemd' :['rabbitmq-server',
                                                       'zookeeper']},
                     }
@@ -72,22 +79,42 @@ if distribution.startswith('centos') or \
 elif distribution.startswith('ubuntu'):
     distribution = 'debian'
 
-try:
-    with open(os.devnull, "w") as fnull:
-        subprocess.check_call(["pidof", "systemd"], stdout=fnull, stderr=fnull)
-    init = 'systemd'
-except:
+def get_init_systems():
+    init_sys_used = None
     try:
         with open(os.devnull, "w") as fnull:
-            subprocess.check_call(["initctl", "list"], stdout=fnull, stderr=fnull)
-        init = 'upstart'
+            subprocess.check_call(["pidof", "systemd"], stdout=fnull,
+                    stderr=fnull)
+        init = 'systemd'
     except:
-        init = 'sysv'
+        try:
+            with open(os.devnull, "w") as fnull:
+                subprocess.check_call(["initctl", "list"], stdout=fnull,
+                       stderr=fnull)
+            init = 'upstart'
+            # On docker initctl is redirected to /bin/true and so we need to use
+            # sysv. Verify that some fake command also returns success to
+            # determine.
+            try:
+                with open(os.devnull, "w") as fnull:
+                    subprocess.check_call(["initctl", "fake"], stdout=fnull,
+                            stderr=fnull)
+                init = 'sysv'
+                init_sys_used = 'supervisor'
+            except:
+                pass
+        except:
+            init = 'sysv'
 
-# contrail services in redhat system uses sysv, though systemd is default.
-init_sys_used = init
-if distribution in ['redhat']:
-    init_sys_used = 'sysv'
+    # contrail services in redhat system uses sysv, though systemd is default.
+    if not init_sys_used:
+        init_sys_used = init
+    if distribution in ['redhat']:
+        init_sys_used = 'sysv'
+    return (init, init_sys_used)
+# end get_init_systems
+
+(init, init_sys_used) = get_init_systems()
 
 class EtreeToDict(object):
     """Converts the xml etree to dictionary/list of dictionary."""
@@ -215,44 +242,59 @@ class IntrospectUtil(object):
 #end class IntrospectUtil
 
 def service_installed(svc, initd_svc):
-    if (distribution == 'debian' and not init == 'systemd'):
-        if initd_svc:
-            return os.path.exists('/etc/init.d/' + svc)
-        cmd = 'initctl show-config ' + svc
+    si_init = init
+    if initd_svc:
+        si_init = 'sysv'
+    if distribution == 'redhat':
+        cmd = 'chkconfig --list %s' % svc
     else:
-        cmd = 'chkconfig --list ' + svc
+        if si_init == 'systemd':
+            cmd = 'systemctl cat %s' % svc
+        elif si_init == 'upstart':
+            cmd = 'initctl show-config %s' % svc
+        else:
+            return os.path.exists('/etc/init.d/%s' % svc)
     with open(os.devnull, "w") as fnull:
         return not subprocess.call(cmd.split(), stdout=fnull, stderr=fnull)
+# end service_installed
 
 def service_bootstatus(svc, initd_svc):
-    if (distribution == 'debian' and not init == 'systemd'):
-        # On ubuntu/debian there does not seem to be an easy way to find
-        # the boot status for init.d services without going through the
-        # /etc/rcX.d level
-        if initd_svc:
-            if glob.glob('/etc/rc*.d/S*' + svc):
+    sb_init = init
+    if initd_svc:
+        sb_init = 'sysv'
+    if distribution == 'redhat':
+        cmd = 'chkconfig %s' % svc
+    else:
+        if sb_init == 'systemd':
+            cmd = 'systemctl is-enabled %s' % svc
+        elif sb_init == 'upstart':
+            cmd = 'initctl show-config %s' % svc
+            cmdout = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE).communicate()[0]
+            if cmdout.find('  start on') != -1:
                 return ''
             else:
                 return ' (disabled on boot)'
-        cmd = 'initctl show-config ' + svc
-        cmdout = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE).communicate()[0]
-        if cmdout.find('  start on') != -1:
+        else:
+            # On ubuntu/debian there does not seem to be an easy way to find
+            # the boot status for init.d services without going through the
+            # /etc/rcX.d level
+            if glob.glob('/etc/rc*.d/S*%s' % svc):
+                return ''
+            else:
+                return ' (disabled on boot)'
+
+    with open(os.devnull, "w") as fnull:
+        if not subprocess.call(cmd.split(), stdout=fnull, stderr=fnull):
             return ''
         else:
             return ' (disabled on boot)'
-    else:
-        cmd = 'chkconfig ' + svc
-        with open(os.devnull, "w") as fnull:
-            if not subprocess.call(cmd.split(), stdout=fnull, stderr=fnull):
-                return ''
-            else:
-                return ' (disabled on boot)'
+ # end service_bootstatus
 
-def service_status(svc, initd_svc):
+def service_status(svc, check_return_code):
     cmd = 'service ' + svc + ' status'
     p = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE)
     cmdout = p.communicate()[0]
-    if initd_svc:
+    if check_return_code:
         if p.returncode == 0 or 'Active: active' in cmdout:
             return 'active'
         else:
@@ -261,6 +303,7 @@ def service_status(svc, initd_svc):
         return 'active'
     else:
         return 'inactive'
+# end service_status
 
 def check_svc(svc, initd_svc=False):
     psvc = svc + ':'
@@ -272,22 +315,13 @@ def check_svc(svc, initd_svc=False):
         status='inactive'
     print '%-30s%s%s' %(psvc, status, bootstatus)
 
-_DEFAULT_CONF_FILE_DIR = '/etc/contrail/'
-_DEFAULT_CONF_FILE_EXTENSION = '.conf'
-
-def get_http_server_port_from_conf(svc_name, debug):
-    # Open and extract conf file
-    if svc_name in ServicesDefaultConfigurationFile:
-        default_conf_file = ServicesDefaultConfigurationFile[svc_name]
-    else:
-        default_conf_file = _DEFAULT_CONF_FILE_DIR + svc_name + \
-            _DEFAULT_CONF_FILE_EXTENSION
+def _get_http_server_port_from_conf(svc_name, conf_file, debug):
     try:
-        fp = open(default_conf_file)
+        fp = open(conf_file)
     except IOError as e:
         if debug:
             print '{0}: Could not read filename {1}'.format(\
-                svc_name, default_conf_file)
+                svc_name, conf_file)
         return -1
     else:
         data = StringIO('\n'.join(line.strip() for line in fp))
@@ -321,6 +355,23 @@ def get_http_server_port_from_conf(svc_name, debug):
     else:
         fp.close()
         return http_server_port
+
+_DEFAULT_CONF_FILE_DIR = '/etc/contrail/'
+_DEFAULT_CONF_FILE_EXTENSION = '.conf'
+
+def get_http_server_port_from_conf(svc_name, debug):
+    # Open and extract conf file
+    if svc_name in ServicesDefaultConfigurationFiles:
+        default_conf_files = ServicesDefaultConfigurationFiles[svc_name]
+    else:
+        default_conf_files = [_DEFAULT_CONF_FILE_DIR + svc_name + \
+            _DEFAULT_CONF_FILE_EXTENSION]
+    for conf_file in default_conf_files:
+        http_server_port = _get_http_server_port_from_conf(svc_name, conf_file,
+                                                           debug)
+        if http_server_port != -1:
+            return http_server_port
+    return -1
 
 def get_default_http_server_port(svc_name, debug):
     if svc_name in ServiceHttpPortMap:
@@ -365,6 +416,25 @@ def get_svc_uve_status(svc_name, debug, timeout, keyfile, certfile, cacert):
         if connection_info.get('type') == 'ToR':
             description = 'ToR:%s connection %s' % (connection_info['name'], connection_info['status'].lower())
     return process_status_info[0]['state'], description
+
+def check_tor_agent_svc_status(svc_name, options):
+    cmd = 'systemctl list-unit-files | grep *tor-agent*'
+    # Expected output from this command as follows
+    #  contrail-tor-agent-1.service               disabled
+    #  contrail-tor-agent-2.service               disabled
+    # From this output trying to extract the tor-agent-id to
+    # identify the specific tor-agent-process name
+    cmdout = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE).communicate()[0]
+    cmdoutlist = cmdout.split('\n')
+    for tor_agent_service in cmdoutlist:
+        if 'tor-agent' in tor_agent_service:
+            tor_agent_service_info = tor_agent_service.split('.')
+            for tor_agent_service_item in tor_agent_service_info:
+                svc_name = 'contrail-tor-agent'
+                tor_agent_service_name = tor_agent_service_item.split('-')
+                if 'tor' in tor_agent_service_name:
+                    svc_name = svc_name + '-' + tor_agent_service_name[3]
+                    check_status(svc_name, options)
 
 def check_svc_status(service_name, debug, detail, timeout, keyfile, certfile, cacert):
     service_sock = service_name.replace('-', '_')
@@ -431,7 +501,11 @@ def check_svc_status(service_name, debug, detail, timeout, keyfile, certfile, ca
         print
 
 def check_status(svc_name, options):
-    check_svc(svc_name)
+    do_check_svc = True
+    if init_sys_used in ['supervisor'] and svc_name.startswith('supervisor'):
+        do_check_svc = False
+    if do_check_svc:
+        check_svc(svc_name)
     if init_sys_used not in ['systemd']:
         check_svc_status(svc_name, options.debug, options.detail, \
                 options.timeout, options.keyfile, options.certfile, \
@@ -441,7 +515,10 @@ def contrail_service_status(nodetype, options):
     if nodetype == 'compute':
         print "== Contrail vRouter =="
         for svc_name in CONTRAIL_SERVICES[nodetype][init_sys_used]:
-            check_status(svc_name, options)
+            if svc_name == 'contrail-tor-agent':
+                check_tor_agent_svc_status(svc_name, options)
+            else:
+                check_status(svc_name, options)
     elif nodetype == 'config':
         print "== Contrail Config =="
         for svc_name in CONTRAIL_SERVICES[nodetype][init_sys_used]:
@@ -456,7 +533,8 @@ def contrail_service_status(nodetype, options):
             check_status(svc_name, options)
     elif nodetype == 'database':
         print "== Contrail Database =="
-        check_svc('contrail-database', initd_svc=True)
+        initd_svc = init == 'sysv' or init == 'upstart'
+        check_svc('contrail-database', initd_svc=initd_svc)
         print ""
         for svc_name in CONTRAIL_SERVICES[nodetype][init_sys_used]:
             check_status(svc_name, options)
@@ -520,10 +598,21 @@ def main():
     storage = package_installed('contrail-storage')
 
     vr = False
-    lsmodout = subprocess.Popen('lsmod', stdout=subprocess.PIPE).communicate()[0]
-    lsofvrouter = (subprocess.Popen(['lsof', '-ni:{0}'.format(DPDK_NETLINK_TCP_PORT),
+    lsmodout = None
+    lsofvrouter = None
+    try:
+        lsmodout = subprocess.Popen('lsmod', stdout=subprocess.PIPE).communicate()[0]
+    except Exception as lsmode:
+        if options.debug:
+            print 'lsmod FAILED: {0}'.format(str(lsmode))
+    try:
+        lsofvrouter = (subprocess.Popen(['lsof', '-ni:{0}'.format(DPDK_NETLINK_TCP_PORT),
                    '-sTCP:LISTEN'], stdout=subprocess.PIPE).communicate()[0])
-    if lsmodout.find('vrouter') != -1:
+    except Exception as lsofe:
+        if options.debug:
+            print 'lsof -ni:{0} FAILED: {1}'.format(DPDK_NETLINK_TCP_PORT, str(lsofe))
+
+    if lsmodout and lsmodout.find('vrouter') != -1:
         vr = True
 
     elif lsofvrouter:

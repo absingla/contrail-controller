@@ -6,7 +6,6 @@
 #define __VNSW_CONTROLLER_INIT_HPP__
 
 #include <sandesh/sandesh_trace.h>
-#include <discovery/client/discovery_client.h>
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_ptr.hpp>
 #include <controller/controller_timer.h>
@@ -18,6 +17,7 @@ class AgentDnsXmppChannel;
 class AgentIfMapVmExport;
 class BgpPeer;
 class XmlBase;
+class XmppChannelConfig;
 
 class ControllerWorkQueueData {
 public:
@@ -51,16 +51,6 @@ private:
     std::auto_ptr<XmlBase> dom_;
     bool config_;
     DISALLOW_COPY_AND_ASSIGN(ControllerXmppData);
-};
-
-class ControllerDiscoveryData : public ControllerWorkQueueData {
-public:
-    ControllerDiscoveryData(xmps::PeerId peer_id, std::vector<DSResponse> resp);
-    virtual ~ControllerDiscoveryData() {}
-
-    xmps::PeerId peer_id_;
-    std::vector<DSResponse> discovery_response_;
-    DISALLOW_COPY_AND_ASSIGN(ControllerDiscoveryData);
 };
 
 class ControllerVmiSubscribeData : public ControllerWorkQueueData {
@@ -103,7 +93,6 @@ public:
     typedef boost::function<void(uint8_t)> XmppChannelDownCb;
     typedef boost::shared_ptr<ControllerXmppData> ControllerXmppDataType;
     typedef boost::shared_ptr<ControllerWorkQueueData> ControllerWorkQueueDataType;
-    typedef boost::shared_ptr<ControllerDiscoveryData> ControllerDiscoveryDataType;
     typedef boost::shared_ptr<ControllerReConfigData> ControllerReConfigDataType;
     typedef boost::shared_ptr<ControllerDelPeerData> ControllerDelPeerDataType;
     typedef std::list<PeerPtr> BgpPeerList;
@@ -137,9 +126,6 @@ public:
 
     void XmppServerDisConnect();
     void DnsXmppServerDisConnect();
-
-    void ApplyDiscoveryXmppServices(std::vector<DSResponse> resp);
-    void ApplyDiscoveryDnsXmppServices(std::vector<DSResponse> resp);
 
     void DisConnectControllerIfmapServer(uint8_t idx);
     void DisConnectDnsServer(uint8_t idx);
@@ -193,17 +179,13 @@ public:
     bool IsWorkQueueEmpty() const;
 
 private:
+    void SetDscpConfig(XmppChannelConfig *xmpp_cfg) const;
     AgentXmppChannel *FindAgentXmppChannel(const std::string &server_ip);
     AgentDnsXmppChannel *FindAgentDnsXmppChannel(const std::string &server_ip);
     void DeleteConnectionInfo(const std::string &addr, bool is_dns) const;
     const std::string MakeConnectionPrefix(bool is_dns) const;
-    bool AgentXmppServerConnectedExists(const std::string &server_ip,
-                               std::vector<DSResponse> resp);
     bool AgentReConfigXmppServerConnectedExists(const std::string &server_ip,
                                std::vector<std::string> resp);
-    bool  ApplyDiscoveryXmppServicesInternal(std::vector<DSResponse> resp);
-    bool  ApplyDiscoveryDnsXmppServicesInternal(std::vector<DSResponse> resp);
-
     bool ApplyControllerReConfigInternal(std::vector<string>service_list);
     bool ApplyDnsReConfigInternal(std::vector<string>service_list);
 
@@ -223,7 +205,6 @@ private:
 extern SandeshTraceBufferPtr ControllerInfoTraceBuf;
 extern SandeshTraceBufferPtr ControllerTxConfigTraceBuf1;
 extern SandeshTraceBufferPtr ControllerTxConfigTraceBuf2;
-extern SandeshTraceBufferPtr ControllerDiscoveryTraceBuf;
 extern SandeshTraceBufferPtr ControllerRouteWalkerTraceBuf;
 extern SandeshTraceBufferPtr ControllerTraceBuf;
 extern SandeshTraceBufferPtr ControllerRxRouteMessageTraceBuf1;
@@ -274,9 +255,9 @@ do {\
     AgentXmpp##obj::TraceMsg(ControllerRouteWalkerTraceBuf, __FILE__, __LINE__, __VA_ARGS__);\
 } while(0);\
 
-#define CONTROLLER_DISCOVERY_TRACE(obj, ...)\
+#define CONTROLLER_CONNECTIONS_TRACE(obj, ...)\
 do {\
-    AgentXmpp##obj::TraceMsg(ControllerDiscoveryTraceBuf, __FILE__, __LINE__, __VA_ARGS__);\
+    AgentXmpp##obj::TraceMsg(ControllerConnectionsTraceBuf, __FILE__, __LINE__, __VA_ARGS__);\
 } while(0);\
 
 #define CONTROLLER_TRACE(obj, ...)\

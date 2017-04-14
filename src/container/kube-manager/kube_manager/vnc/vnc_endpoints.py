@@ -11,19 +11,21 @@ import uuid
 from vnc_api.vnc_api import *
 from config_db import *
 from cfgm_common import importutils
+from vnc_kubernetes_config import VncKubernetesConfig as vnc_kube_config
+from vnc_common import VncCommon
 
-class VncEndpoints(object):
-
-    def __init__(self, vnc_lib=None, logger=None, kube=None):
+class VncEndpoints(VncCommon):
+    def __init__(self):
+        super(VncEndpoints,self).__init__('Endpoint')
         self._name = type(self).__name__
-        self._vnc_lib = vnc_lib
-        self.logger = logger
-        self._kube = kube
+        self._vnc_lib = vnc_kube_config.vnc_lib()
+        self.logger = vnc_kube_config.logger()
+        self._kube = vnc_kube_config.kube()
 
         self.service_lb_pool_mgr = importutils.import_object(
-            'kube_manager.vnc.loadbalancer.ServiceLbPoolManager', vnc_lib, logger)
+            'kube_manager.vnc.loadbalancer.ServiceLbPoolManager')
         self.service_lb_member_mgr = importutils.import_object(
-            'kube_manager.vnc.loadbalancer.ServiceLbMemberManager', vnc_lib, logger)
+            'kube_manager.vnc.loadbalancer.ServiceLbMemberManager')
 
     def _vnc_create_member(self, pool, pod_id, vmi_id, protocol_port):
         pool_obj = self.service_lb_pool_mgr.read(pool.uuid)
@@ -36,8 +38,18 @@ class VncEndpoints(object):
         return member_obj
 
     def _is_service_exists(self, service_name, service_namespace):
-        name = 'service' + '-' + service_name
-        lb_fq_name = ['default-domain', service_namespace, name]
+        resource_type = "services"
+        service_info = self._kube.get_resource(resource_type,
+                       service_name, service_namespace)
+        if service_info and 'metadata' in service_info:
+            uid = service_info['metadata'].get('uid')
+            if not uid:
+                return False, None
+        else:
+            return False, None
+        name = VncCommon.make_name(service_name, uid)
+        proj_fq_name = vnc_kube_config.cluster_project_fq_name(service_namespace)
+        lb_fq_name = proj_fq_name + [name]
         try:
             lb_obj = self._vnc_lib.loadbalancer_read(fq_name=lb_fq_name)
         except NoIdError:
@@ -53,7 +65,10 @@ class VncEndpoints(object):
         if not lb:
             return
 
-        listener_found = True
+        vm = VirtualMachineKM.get(pod_id)
+        if not vm:
+            return
+
         for ll_id in list(lb.loadbalancer_listeners):
             ll = LoadbalancerListenerKM.get(ll_id)
             if not ll:
@@ -62,20 +77,14 @@ class VncEndpoints(object):
                 continue
 
             if port:
-                if ll.params['protocol_port'] != port['port'] or \
-                   ll.params['protocol'] != port['protocol']:
-                    listener_found = False
+                if ll.params['protocol'] != port['protocol']:
+                    continue
 
-            if not listener_found:
-                continue
             pool_id = ll.loadbalancer_pool
             if not pool_id:
                 continue
             pool = LoadbalancerPoolKM.get(pool_id)
             if not pool:
-                continue
-            vm = VirtualMachineKM.get(pod_id)
-            if not vm: 
                 continue
 
             for vmi_id in list(vm.virtual_machine_interfaces):
@@ -89,12 +98,9 @@ class VncEndpoints(object):
                         member_match = True
                         break
                 if not member_match:
-                    if isinstance(ll.target_port, basestring):
-                        target_port = ll.params['protocol_port']
-                    else:
-                        target_port = ll.target_port
-                    self.logger.debug("Create LB member for Pod: %s in LB: %s with target-port: %s" 
-                                       % (vm.fq_name, lb.name, target_port))
+                    target_port = port['port']
+                    self.logger.debug("Create LB member for Pod: %s in LB: %s with target-port: %s(%d)"
+                                       % (vm.fq_name, lb.name, ll.target_port, target_port))
                     member_obj = self._vnc_create_member(pool, pod_id, vmi_id,
                                                          target_port)
                     LoadbalancerMemberKM.locate(member_obj.uuid)
@@ -104,7 +110,6 @@ class VncEndpoints(object):
         if not lb:
             return
 
-        listener_found = True
         for ll_id in list(lb.loadbalancer_listeners):
             ll = LoadbalancerListenerKM.get(ll_id)
             if not ll:
@@ -115,10 +120,8 @@ class VncEndpoints(object):
             if port:
                 if ll.params['protocol_port'] != port['port'] or \
                    ll.params['protocol'] != port['protocol']:
-                    listener_found = False
+                    continue
 
-            if not listener_found:
-                continue
             pool_id = ll.loadbalancer_pool
             if not pool_id:
                 continue
@@ -171,15 +174,20 @@ class VncEndpoints(object):
 
     def _get_service_pod_list(self, event):
         pods_in_event = set()
-        subsets = event['object']['subsets']
+        port = None
+        subsets = event['object'].get('subsets', [])
         for subset in subsets:
-            endpoints = subset['addresses']
+            ports = subset.get('ports', None)
+            if ports:
+                port = ports[0]
+            endpoints = subset.get('addresses', [])
             for endpoint in endpoints:
                 pod = endpoint.get('targetRef')
                 if pod and pod.get('uid'):
                     pods_in_event.add(pod.get('uid'))
 
-        return pods_in_event
+        
+        return pods_in_event, port
 
 
     def vnc_endpoint_add(self, uid, name, namespace, event):
@@ -196,14 +204,14 @@ class VncEndpoints(object):
 
         #Get curr list of Pods matching Service Selector as listed
         # in 'event' elements.
-        cur_pod_ids = self._get_service_pod_list(event)
+        cur_pod_ids, port = self._get_service_pod_list(event)
 
         # Compare. If Pod present in both lists, do nothing
 
         # If Pod present only in cur_pod list, add 'Pod' to 'Service'
         add_pod_members = cur_pod_ids.difference(prev_pod_ids)
         for pod_id in add_pod_members:
-            self._add_pod_to_service(service_id, pod_id)
+            self._add_pod_to_service(service_id, pod_id, port)
 
         # If Pod present only in prev_pod list , delete 'Pod' from 'Service'
         del_pod_members = prev_pod_ids.difference(cur_pod_ids)
@@ -236,14 +244,14 @@ class VncEndpoints(object):
     def process(self, event):
         event_type = event['type']
         kind = event['object'].get('kind')
-        uid = event['object']['metadata'].get('uid')
-        name = event['object']['metadata'].get('name')
         namespace = event['object']['metadata'].get('namespace')
+        name = event['object']['metadata'].get('name')
+        uid = event['object']['metadata'].get('uid')
 
-        print("%s - Got %s %s %s:%s"
-              %(self._name, event_type, kind, namespace, name))
-        self.logger.debug("%s - Got %s %s %s:%s"
-              %(self._name, event_type, kind, namespace, name))
+        print("%s - Got %s %s %s:%s:%s"
+              %(self._name, event_type, kind, namespace, name, uid))
+        self.logger.debug("%s - Got %s %s %s:%s:%s"
+              %(self._name, event_type, kind, namespace, name, uid))
 
         if event['type'] == 'ADDED' or event['type'] == 'MODIFIED':
             self.vnc_endpoint_add(uid, name, namespace, event)

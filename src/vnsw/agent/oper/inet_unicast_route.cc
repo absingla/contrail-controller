@@ -405,11 +405,20 @@ bool InetUnicastRouteEntry::ModifyEcmpPath(const IpAddress &dest_addr,
                                             TunnelType::TypeBmap tunnel_bmap,
                                             const EcmpLoadBalance &ecmp_load_balance,
                                             DBRequest &nh_req,
-                                            Agent* agent, AgentPath *path) {
+                                            Agent* agent, AgentPath *path,
+                                            const string &route_str,
+                                            bool alloc_label) {
     bool ret = false;
     NextHop *nh = NULL;
 
     agent->nexthop_table()->Process(nh_req);
+    if (alloc_label) {
+        NextHopKey *key = static_cast<NextHopKey *>(nh_req.key.get());
+        // Create MPLS label and point it to Composite NH
+        label = agent->mpls_table()->CreateRouteLabel(
+                    MplsTable::kInvalidLabel, key, vrf_name,
+                    route_str);
+    }
     nh = static_cast<NextHop *>(agent->nexthop_table()->
                                 FindActiveEntry(nh_req.key.get()));
     if (nh == NULL) {
@@ -446,9 +455,6 @@ AgentPath *InetUnicastRouteEntry::AllocateEcmpPath(Agent *agent,
     AgentPath *path = new AgentPath(agent->ecmp_peer(), NULL);
     InsertPath(path);
 
-    // Allocate a new label for the ECMP path
-    uint32_t label = AllocateMplsLabel();
-
     const NextHop* path1_nh = path1->ComputeNextHop(agent);
     bool composite_nh_policy = path1_nh->NexthopToInterfacePolicy();
 
@@ -484,18 +490,15 @@ AgentPath *InetUnicastRouteEntry::AllocateEcmpPath(Agent *agent,
     nh_req.data.reset(new CompositeNHData());
 
     InetUnicastRouteEntry::ModifyEcmpPath(addr_, plen_, path2->dest_vn_list(),
-                                          label, true, vrf()->GetName(),
+                                          MplsTable::kInvalidLabel, true,
+                                          vrf()->GetName(),
                                           path2->sg_list(),
                                           path2->communities(),
                                           path2->path_preference(),
                                           path2->tunnel_bmap(),
                                           path2->ecmp_load_balance(),
-                                          nh_req, agent, path);
-
-    //Make MPLS label point to Composite NH
-    MplsLabel::CreateEcmpLabel(agent, label, Composite::LOCAL_ECMP,
-                               composite_nh_policy, component_nh_list,
-                               vrf()->GetName());
+                                          nh_req, agent, path, ToString(),
+                                          true);
 
     RouteInfo rt_info;
     FillTrace(rt_info, AgentRoute::CHANGE_PATH, path);
@@ -550,7 +553,7 @@ bool InetUnicastRouteEntry::EcmpDeletePath(AgentPath *path) {
         // There is single path of type LOCAL_VM_PORT_PEER. Delete the ECMP path
         remove(ecmp);
         //Enqueue MPLS label delete request
-        FreeMplsLabel(ecmp->label());
+        agent->mpls_table()->FreeLabel(ecmp->label());
         delete ecmp;
     } else if (count > 1) {
         // Remove Component-NH for the path being deleted
@@ -798,12 +801,12 @@ void InetUnicastRouteEntry::AppendEcmpPath(Agent *agent,
                                path->path_preference(),
                                path->tunnel_bmap(),
                                path->ecmp_load_balance(),
-                               nh_req, agent, ecmp_path);
+                               nh_req, agent, ecmp_path, "", false);
 
+    NextHopKey *nh_key1 = static_cast<NextHopKey *>(nh_req.key.get());
     //Make MPLS label point to composite NH
-    MplsLabel::CreateEcmpLabel(agent, ecmp_path->label(), Composite::LOCAL_ECMP,
-                               composite_nh_policy, component_nh_key_list,
-                               vrf()->GetName());
+    agent->mpls_table()->CreateRouteLabel(ecmp_path->label(), nh_key1,
+                                          vrf()->GetName(), ToString());
 
     RouteInfo rt_info;
     FillTrace(rt_info, AgentRoute::CHANGE_PATH, path);
@@ -854,12 +857,12 @@ bool InetUnicastRouteEntry::UpdateComponentNH(Agent *agent,
                                ecmp_path->path_preference(),
                                ecmp_path->tunnel_bmap(),
                                ecmp_path->ecmp_load_balance(),
-                               nh_req, agent, ecmp_path);
+                               nh_req, agent, ecmp_path, "", false);
 
+    NextHopKey *nh_key1 = static_cast<NextHopKey *>(nh_req.key.get());
     //Make MPLS label point to updated composite NH
-    MplsLabel::CreateEcmpLabel(agent, ecmp_path->label(), Composite::LOCAL_ECMP,
-                               composite_nh_policy, component_nh_key_list,
-                               vrf()->GetName());
+    agent->mpls_table()->CreateRouteLabel(ecmp_path->label(), nh_key1,
+                                          vrf()->GetName(), ToString());
 
     RouteInfo rt_info;
     FillTrace(rt_info, AgentRoute::CHANGE_PATH, path);
@@ -901,14 +904,14 @@ void InetUnicastRouteEntry::DeleteComponentNH(Agent *agent, AgentPath *path) {
                                ecmp_path->path_preference(),
                                ecmp_path->tunnel_bmap(),
                                ecmp_path->ecmp_load_balance(),
-                               nh_req, agent, ecmp_path)) {
+                               nh_req, agent, ecmp_path, "", false)) {
         return;
     }
 
+    NextHopKey *nh_key1 = static_cast<NextHopKey *>(nh_req.key.get());
     //Make MPLS label point to composite NH
-    MplsLabel::CreateEcmpLabel(agent, ecmp_path->label(), Composite::LOCAL_ECMP,
-                               comp_nh_policy, component_nh_key_list,
-                               vrf()->GetName());
+    agent->mpls_table()->CreateRouteLabel(ecmp_path->label(), nh_key1,
+                                          vrf()->GetName(), ToString());
 
     RouteInfo rt_info;
     FillTrace(rt_info, AgentRoute::CHANGE_PATH, path);

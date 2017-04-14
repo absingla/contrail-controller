@@ -1,9 +1,7 @@
 cfgm_common
 vnc_api
-discoveryclient
 sandesh
 sandesh-common
-lxml>=2.3.3
 gevent==1.1a2
 geventhttpclient==1.0a
 pycassa>=1.7.2

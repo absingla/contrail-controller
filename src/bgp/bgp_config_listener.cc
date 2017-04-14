@@ -54,6 +54,7 @@ void BgpConfigListener::DependencyTrackerInit() {
     policy->insert(make_pair("connection", connection_react));
 
     ReactionMap rt_instance_react = map_list_of<string, PropagateList>
+        ("self", list_of("instance-bgp-router"))
         ("instance-target", list_of("self")("connection"))
         ("connection", list_of("self"))
         ("virtual-network-routing-instance", list_of("self"))
@@ -82,6 +83,10 @@ void BgpConfigListener::DependencyTrackerInit() {
     policy->insert(make_pair("route-aggregate", route_aggregate_react));
 
     ReactionMap global_config_react = map_list_of<string, PropagateList>
-        ("self", list_of("global-system-config-graceful-restart"));
+        ("self", PropagateList());
     policy->insert(make_pair("global-system-config", global_config_react));
+
+    ReactionMap global_qos_react = map_list_of<string, PropagateList>
+        ("self", PropagateList());
+    policy->insert(make_pair("global-qos-config", global_qos_react));
 }

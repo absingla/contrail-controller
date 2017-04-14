@@ -6,6 +6,7 @@
 This file contains implementation of managing physical router configuration
 """
 
+import gevent
 # Import kazoo.client before monkey patching
 from cfgm_common.zkclient import ZookeeperClient
 from gevent import monkey
@@ -31,9 +32,9 @@ from sandesh_common.vns.constants import ModuleNames, Module2NodeType, \
 from pysandesh.connection_info import ConnectionState
 from pysandesh.gen_py.process_info.ttypes import ConnectionType as ConnType
 from pysandesh.gen_py.process_info.ttypes import ConnectionStatus
-import discoveryclient.client as client
 from cfgm_common.exceptions import ResourceExhaustionError
 from cfgm_common.exceptions import NoIdError
+from cfgm_common.vnc_db import DBBase
 from vnc_api.vnc_api import VncApi
 from cfgm_common.uve.nodeinfo.ttypes import NodeStatusUVE, \
     NodeStatus
@@ -47,10 +48,15 @@ from cfgm_common.dependency_tracker import DependencyTracker
 from cfgm_common import vnc_cgitb
 from cfgm_common.utils import cgitb_hook
 from cfgm_common.vnc_logger import ConfigServiceLogger
+from logger import DeviceManagerLogger
+
+
+# zookeeper client connection
+_zookeeper_client = None
 
 
 class DeviceManager(object):
-    _REACTION_MAP = {
+    REACTION_MAP = {
         'physical_router': {
             'self': ['bgp_router',
                      'physical_interface',
@@ -137,35 +143,22 @@ class DeviceManager(object):
         },
     }
 
-    def __init__(self, args=None):
+    _device_manager = None
+
+    def __init__(self, dm_logger=None, args=None):
         self._args = args
-
-        # Initialize discovery client
-        self._disc = None
-        if self._args.disc_server_ip and self._args.disc_server_port:
-            self._disc = client.DiscoveryClient(
-                self._args.disc_server_ip,
-                self._args.disc_server_port,
-                ModuleNames[Module.DEVICE_MANAGER])
-
         PushConfigState.set_repush_interval(int(self._args.repush_interval))
         PushConfigState.set_repush_max_interval(int(self._args.repush_max_interval))
         PushConfigState.set_push_delay_per_kb(float(self._args.push_delay_per_kb))
         PushConfigState.set_push_delay_max(int(self._args.push_delay_max))
         PushConfigState.set_push_delay_enable(bool(self._args.push_delay_enable))
-  
-        # randomize collector list
-        self._args.random_collectors = self._args.collectors
+
         self._chksum = "";
         if self._args.collectors:
             self._chksum = hashlib.md5(''.join(self._args.collectors)).hexdigest()
-            self._args.random_collectors = random.sample(self._args.collectors, \
-                                                      len(self._args.collectors))
-    
+
         # Initialize logger
-        module = Module.DEVICE_MANAGER
-        module_pkg = "device_manager"
-        self.logger = ConfigServiceLogger(self._disc, module, module_pkg, args)
+        self.logger = dm_logger or DeviceManagerLogger(args)
 
         # Retry till API server is up
         connected = False
@@ -192,12 +185,12 @@ class DeviceManager(object):
         gevent.signal(signal.SIGHUP, self.sighup_handler)
 
         # Initialize amqp
-        self._vnc_amqp = DMAmqpHandle(self.logger,
-                self._REACTION_MAP, self._args)
+        self._vnc_amqp = DMAmqpHandle(self.logger, self.REACTION_MAP,
+                                      self._args)
         self._vnc_amqp.establish()
 
         # Initialize cassandra
-        self._object_db = DMCassandraDB.getInstance(self, _zookeeper_client)
+        self._object_db = DMCassandraDB.get_instance(self, _zookeeper_client)
         DBBaseDM.init(self, self.logger, self._object_db)
         DBBaseDM._sandesh = self.logger._sandesh
 
@@ -208,20 +201,32 @@ class DeviceManager(object):
             GlobalVRouterConfigDM.locate(obj['uuid'], obj)
 
         for obj in VirtualNetworkDM.list_obj():
-            vn = VirtualNetworkDM.locate(obj['uuid'], obj)
-            if vn is not None and vn.routing_instances is not None:
-                for ri_id in vn.routing_instances:
-                    ri_obj = RoutingInstanceDM.locate(ri_id)
+            VirtualNetworkDM.locate(obj['uuid'], obj)
+
+        for obj in RoutingInstanceDM.list_obj():
+            RoutingInstanceDM.locate(obj['uuid'], obj)
 
         for obj in BgpRouterDM.list_obj():
             BgpRouterDM.locate(obj['uuid'], obj)
 
         pr_obj_list = PhysicalRouterDM.list_obj()
+        for obj in pr_obj_list:
+            PhysicalRouterDM.locate(obj['uuid'],obj)
+
         pr_uuid_set = set([pr_obj['uuid'] for pr_obj in pr_obj_list])
         self._object_db.handle_pr_deletes(pr_uuid_set)
 
         for obj in PortTupleDM.list_obj():
             PortTupleDM.locate(obj['uuid'],obj)
+
+        for obj in PhysicalInterfaceDM.list_obj():
+            PhysicalInterfaceDM.locate(obj['uuid'],obj)
+
+        for obj in LogicalInterfaceDM.list_obj():
+            LogicalInterfaceDM.locate(obj['uuid'],obj)
+
+        for obj in VirtualMachineInterfaceDM.list_obj():
+            VirtualMachineInterfaceDM.locate(obj['uuid'],obj)
 
         for obj in pr_obj_list:
             pr = PhysicalRouterDM.locate(obj['uuid'], obj)
@@ -258,9 +263,31 @@ class DeviceManager(object):
         for pr in PhysicalRouterDM.values():
             pr.set_config_state()
 
+        DeviceManager._device_manager = self
         self._vnc_amqp._db_resync_done.set()
-        gevent.joinall(self._vnc_amqp._vnc_kombu.greenlets())
+        try:
+            gevent.joinall(self._vnc_amqp._vnc_kombu.greenlets())
+        except KeyboardInterrupt:
+            DeviceManager.destroy_instance()
+            raise
     # end __init__
+
+    @classmethod
+    def get_instance(cls):
+        return cls._device_manager
+
+    @classmethod
+    def destroy_instance(cls):
+        inst = cls.get_instance()
+        if not inst:
+            return
+        inst._vnc_amqp.close()
+        for obj_cls in DBBaseDM.get_obj_type_map().values():
+            obj_cls.reset()
+        DBBase.clear()
+        DMCassandraDB.clear_instance()
+        inst._object_db = None
+        cls._device_manager = None
 
     def connection_state_update(self, status, message=None):
         ConnectionState.update(
@@ -302,8 +329,6 @@ def parse_args(args_str):
                          --zk_server_ip 10.1.2.3
                          --zk_server_port 2181
                          --collectors 127.0.0.1:8086
-                         --disc_server_ip 127.0.0.1
-                         --disc_server_port 5998
                          --http_server_port 8090
                          --log_local
                          --log_level SYS_DEBUG
@@ -342,8 +367,6 @@ def parse_args(args_str):
         'zk_server_ip': '127.0.0.1',
         'zk_server_port': '2181',
         'collectors': None,
-        'disc_server_ip': None,
-        'disc_server_port': None,
         'http_server_port': '8096',
         'log_local': False,
         'log_level': SandeshLevel.SYS_DEBUG,
@@ -358,7 +381,7 @@ def parse_args(args_str):
         'repush_max_interval': '600',
         'push_delay_per_kb': '0.01',
         'push_delay_max': '100',
-        'push_delay_enable': 'True',
+        'push_delay_enable': True,
         'sandesh_send_rate_limit': SandeshSystem.get_sandesh_send_rate_limit(),
         'rabbit_use_ssl': False,
         'kombu_ssl_version': '',
@@ -404,6 +427,12 @@ def parse_args(args_str):
             cassandraopts.update(dict(config.items('CASSANDRA')))
         if 'SANDESH' in config.sections():
             sandeshopts.update(dict(config.items('SANDESH')))
+            if 'sandesh_ssl_enable' in config.options('SANDESH'):
+                sandeshopts['sandesh_ssl_enable'] = config.getboolean(
+                    'SANDESH', 'sandesh_ssl_enable')
+            if 'introspect_ssl_enable' in config.options('SANDESH'):
+                sandeshopts['introspect_ssl_enable'] = config.getboolean(
+                    'SANDESH', 'introspect_ssl_enable')
 
     # Override with CLI options
     # Don't surpress add_help here so it will handle -h
@@ -439,10 +468,6 @@ def parse_args(args_str):
     parser.add_argument("--collectors",
                         help="List of VNC collectors in ip:port format",
                         nargs="+")
-    parser.add_argument("--disc_server_ip",
-                        help="IP address of the discovery server")
-    parser.add_argument("--disc_server_port",
-                        help="Port of the discovery server")
     parser.add_argument("--http_server_port",
                         help="Port of local HTTP server")
     parser.add_argument("--log_local", action="store_true",
@@ -505,6 +530,7 @@ def parse_args(args_str):
 
 def main(args_str=None):
     global _zookeeper_client
+
     if not args_str:
         args_str = ' '.join(sys.argv[1:])
     args = parse_args(args_str)
@@ -514,16 +540,35 @@ def main(args_str=None):
     else:
         client_pfx = ''
         zk_path_pfx = ''
+
+    # randomize collector list
+    args.random_collectors = args.collectors
+    if args.collectors:
+        args.random_collectors = random.sample(args.collectors,
+                                               len(args.collectors))
+
+    # Initialize logger
+    dm_logger = DeviceManagerLogger(args)
+
+    # Initialize AMQP handler then close it to be sure remain queue of a
+    # precedent run is cleaned
+    vnc_amqp = DMAmqpHandle(dm_logger, DeviceManager.REACTION_MAP, args)
+    vnc_amqp.establish()
+    vnc_amqp.close()
+    dm_logger.debug("Removed remained AMQP queue")
+
     _zookeeper_client = ZookeeperClient(client_pfx+"device-manager",
                                         args.zk_server_ip)
+    dm_logger.notice("Waiting to be elected as master...")
     _zookeeper_client.master_election(zk_path_pfx+"/device-manager",
                                       os.getpid(), run_device_manager,
-                                      args)
+                                      dm_logger, args)
 # end main
 
 
-def run_device_manager(args):
-    device_manager = DeviceManager(args)
+def run_device_manager(dm_logger, args):
+    dm_logger.notice("Elected master Device Manager node. Initializing... ")
+    DeviceManager(dm_logger, args)
 # end run_device_manager
 
 

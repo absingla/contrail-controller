@@ -46,8 +46,7 @@ from sandesh.nodeinfo.process_info.ttypes import *
 from sandesh_common.vns.ttypes import Module, NodeType
 from sandesh_common.vns.constants import ModuleNames, CategoryNames,\
      ModuleCategoryMap, Module2NodeType, NodeTypeNames, ModuleIds,\
-     INSTANCE_ID_DEFAULT, COLLECTOR_DISCOVERY_SERVICE_NAME,\
-     ALARM_GENERATOR_SERVICE_NAME
+     INSTANCE_ID_DEFAULT, ALARM_GENERATOR_SERVICE_NAME
 from alarmgen_cfg import CfgParser
 from uveserver import UVEServer
 from partition_handler import PartitionHandler, UveStreamProc
@@ -64,12 +63,10 @@ from sandesh.alarmgen_ctrl.ttypes import PartitionOwnershipReq, \
     AlarmStateChangeTrace, UVEQTrace, AlarmConfig, AlarmConfigRequest, \
     AlarmConfigResponse, AlarmgenUVEStats, AlarmgenAlarmStats
 
-from sandesh.discovery.ttypes import CollectorTrace
 from opserver_util import AnalyticsDiscovery
 from stevedore import hook, extension
 from pysandesh.util import UTCTimestampUsec
 from libpartition.libpartition import PartitionClient
-import discoveryclient.client as client 
 from kafka import KafkaClient, SimpleProducer
 import redis
 from collections import namedtuple
@@ -241,8 +238,9 @@ class AlarmProcessor(object):
 	except Exception as ex:
 	    template = "Exception {0} in Alarm Processing. Arguments:\n{1!r}"
 	    messag = template.format(type(ex).__name__, ex.args)
-	    self._logger.error("%s : traceback %s" % \
-			      (messag, traceback.format_exc()))
+            self._logger.error("%s\n UVE:[%s]:%s\n Alarm config: %s\n traceback %s" % \
+                (messag, uv, str(local_uve), alarm.config().alarm_rules,
+                traceback.format_exc()))
             self.uve_alarms[alarm_fqname] = UVEAlarmInfo(type=alarm_fqname,
                     severity=sev, timestamp=0, token="",
                     alarm_rules=AlarmRules(None),
@@ -875,16 +873,9 @@ class Controller(object):
         self._instance_id = self._conf.worker_id()
         self._disable_cb = False
 
-        self.disc = None
         self._libpart_name = self._conf.host_ip() + ":" + self._instance_id
         self._libpart = None
         self._partset = set()
-        if self._conf.discovery()['server']:
-            self.disc = client.DiscoveryClient(
-                self._conf.discovery()['server'],
-                self._conf.discovery()['port'],
-                ModuleNames[Module.ALARM_GENERATOR],
-                '%s-%s' % (self._hostname, self._instance_id))
 
         is_collector = True
         if test_logger is not None:
@@ -906,7 +897,6 @@ class Controller(object):
                                       self._conf.http_port(),
                                       ['opserver.sandesh', 'sandesh'],
                                       host_ip=self._conf.host_ip(),
-                                      discovery_client=self.disc,
                                       connect_to_collector = is_collector,
                                       alarm_ack_callback=self.alarm_ack_callback,
                                       config=self._conf.sandesh_config())
@@ -1005,14 +995,13 @@ class Controller(object):
         # Create config handler to read/update alarm config
         rabbitmq_params = self._conf.rabbitmq_params()
         self._config_handler = AlarmGenConfigHandler(self._sandesh,
-            self._moduleid, self._instance_id, self.config_log, self.disc,
-            self._conf.keystone_params(), rabbitmq_params, self.mgrs,
-            self.alarm_config_change_callback)
-        if rabbitmq_params['servers'] and self.disc:
+            self._moduleid, self._instance_id, self.config_log,
+            self._conf.api_server_config(), self._conf.keystone_params(),
+            rabbitmq_params, self.mgrs, self.alarm_config_change_callback)
+        if rabbitmq_params['servers']:
             self._config_handler.start()
         else:
-            self._logger.error('Rabbitmq server and/or Discovery server '
-                'not configured')
+            self._logger.error('Rabbitmq server not configured ')
 
         PartitionOwnershipReq.handle_request = self.handle_PartitionOwnershipReq
         PartitionStatusReq.handle_request = self.handle_PartitionStatusReq
@@ -1114,7 +1103,7 @@ class Controller(object):
         uveq_trace.uves = uves.keys()
         uveq_trace.part = part
         if part not in self._uveq:
-            self._uveq[part] = {}
+            self._uveq[part] = OrderedDict()
             self._logger.error('Created uveQ for part %s' % str(part))
             uveq_trace.oper = "create"
         else:
@@ -1270,9 +1259,6 @@ class Controller(object):
                 self._logger.error("Agg unexpected key %s from inst:part %s:%d" % \
                         (check_keys_list[idx], inst, part))
                 ppe5.srem("AGPARTKEYS:%s:%d" % (inst, part), check_keys_list[idx])
-                # TODO: alarmgen should have already figured out if all structs of 
-                #       the UVE are gone, and should have sent a UVE delete
-                #       We should not need to figure this out again
                 retry = True
             idx += 1
         ppe5.execute()
@@ -1281,7 +1267,6 @@ class Controller(object):
 
         if retry:
             self._logger.error("Agg unexpected rows %s" % str(rows))
-            raise SystemExit(1)
         
     def send_alarm_update(self, tab, uk):
         ustruct = None
@@ -1384,7 +1369,8 @@ class Controller(object):
                             db=7)
                     self.reconnect_agg_uve(lredis)
                     ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
-                          name = 'AggregateRedis', status = ConnectionStatus.UP)
+                          name = 'AggregateRedis', status = ConnectionStatus.UP,
+                          server_addrs = ['127.0.0.1:'+str(self._conf.redis_server_port())])
                 else:
                     if not lredis.exists(self._moduleid+':'+self._instance_id):
                         self._logger.error('Identified redis restart')
@@ -1479,7 +1465,8 @@ class Controller(object):
 
                 lredis = None
                 ConnectionState.update(conn_type = ConnectionType.REDIS_UVE,
-                      name = 'AggregateRedis', status = ConnectionStatus.DOWN)
+                      name = 'AggregateRedis', status = ConnectionStatus.DOWN,
+                      server_addrs = ['127.0.0.1:'+str(self._conf.redis_server_port())])
                         
                 if self._ad:
                     self._ad.publish(None)
@@ -1925,7 +1912,8 @@ class Controller(object):
         self._logger.info("Got UVETableAlarmReq : %s" % str(parts))
         np = 1
         for pt in parts:
-            resp = UVETableAlarmResp(table = pt)
+            if pt not in self.tab_alarms:
+                continue
             uves = []
             for uk,uv in self.tab_alarms[pt].iteritems():
                 for ak,av in uv.iteritems():
@@ -1936,6 +1924,7 @@ class Controller(object):
                         uves.append(UVEAlarmStateMachineInfo(
                             uai = UVEAlarms(name = uk, alarms = alm_copy),
                             uac = av.get_uac(), uas = av.get_uas()))
+            resp = UVETableAlarmResp(table = pt)
             resp.uves = uves 
             if np == len(parts):
                 mr = False
@@ -1953,6 +1942,8 @@ class Controller(object):
         self._logger.info("Got UVETablePerfReq : %s" % str(parts))
         np = 1
         for pt in parts:
+            if pt not in self.tab_perf_prev:
+                continue
             resp = UVETablePerfResp(table = pt)
             resp.call_time = self.tab_perf_prev[pt].call_result()
             resp.get_time = self.tab_perf_prev[pt].get_result()
@@ -2329,6 +2320,9 @@ class Controller(object):
             else:
                 self._logger.error("Periodic collection took %s sec" % duration)
 
+    def _TraceRead(self, trace_sandesh, more):
+        self._logger.error(trace_sandesh.log(trace=True))
+
     def run(self):
         self.gevs = [ gevent.spawn(self.run_process_stats),
                       gevent.spawn(self.run_uve_processing),
@@ -2343,6 +2337,7 @@ class Controller(object):
         except gevent.GreenletExit:
             self._logger.error('AlarmGen Exiting on gevent-kill')
         except:
+            self._sandesh.trace_buffer_read("UVEQTrace", "", 0, self._TraceRead)
             raise
         finally:
             self._logger.error('AlarmGen stopping everything')

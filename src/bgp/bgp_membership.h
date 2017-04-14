@@ -188,6 +188,10 @@ private:
         const BgpTable *table) const;
     void DestroyPeerRibState(PeerRibState *prs);
 
+    void TriggerRegisterRibCompleteEvent(IPeer *peer, BgpTable *table);
+    void TriggerUnregisterRibCompleteEvent(IPeer *peer, BgpTable *table);
+    void TriggerWalkRibCompleteEvent(IPeer *peer, BgpTable *table);
+
     void ProcessRegisterRibEvent(Event *event);
     void ProcessRegisterRibCompleteEvent(Event *event);
     void ProcessUnregisterRibEvent(Event *event);
@@ -292,6 +296,7 @@ public:
 
     explicit RibState(BgpMembershipManager *manager, BgpTable *table);
     ~RibState();
+    void ManagedDelete() {}
 
     iterator begin() { return pending_peer_rib_list_.begin(); }
     iterator end() { return pending_peer_rib_list_.end(); }
@@ -314,6 +319,7 @@ private:
     uint32_t walk_count_;
     PeerRibList peer_rib_list_;
     PeerRibList pending_peer_rib_list_;
+    LifetimeRef<RibState> table_delete_ref_;
 
     DISALLOW_COPY_AND_ASSIGN(RibState);
 };
@@ -340,7 +346,6 @@ public:
     void DeactivateRibOut();
     void UnregisterRibIn();
     void WalkRibIn();
-    void ManagedDelete() {}
 
     void FillMembershipInfo(ShowMembershipPeerInfo *smpi) const;
 
@@ -377,7 +382,6 @@ private:
     bool ribout_registered_;
     int instance_id_;
     uint64_t subscription_gen_id_;
-    LifetimeRef<PeerRibState> table_delete_ref_;
 
     DISALLOW_COPY_AND_ASSIGN(PeerRibState);
 };

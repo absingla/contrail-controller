@@ -8,6 +8,7 @@ configuration manager
 """
 
 from ncclient import manager
+from ncclient.xml_ import new_ele
 import copy
 import time
 import datetime
@@ -123,7 +124,7 @@ class PhysicalRouterConfig(object):
 
     def get_xml_data(self, config):
         xml_data = StringIO()
-        config.export(xml_data, 1)
+        config.export_xml(xml_data, 1)
         xml_str = xml_data.getvalue()
         return xml_str.replace("comment>", "junos:comment>", -1)
     # end get_xml_data
@@ -186,6 +187,32 @@ class PhysicalRouterConfig(object):
         return config_size
     # end send_config
 
+    def get_device_config(self):
+        try:
+            with manager.connect(host=self.management_ip, port=22,
+                                 username=self.user_creds['username'],
+                                 password=self.user_creds['password'],
+                                 timeout=10,
+                                 device_params = {'name':'junos'},
+                                 unknown_host_cb=lambda x, y: True) as m:
+                sw_info = new_ele('get-software-information')
+                res = m.rpc(sw_info)
+                pname = res.xpath('//software-information/product-name')[0].text
+                pmodel = res.xpath('//software-information/product-model')[0].text
+                ele = res.xpath("//software-information/package-information"
+                                "[name='junos-version']")[0]
+                jversion = ele.find('comment').text
+                dev_conf = {}
+                dev_conf['product-name'] = pname
+                dev_conf['product-model'] = pmodel
+                dev_conf['software-version'] = jversion
+                return dev_conf
+        except Exception as e:
+            if self._logger:
+                self._logger.error("could not fetch config from router %s: %s" % (
+                                          self.management_ip, e.message))
+        return {}
+
     def add_pnf_logical_interface(self, junos_interface):
 
         if not self.interfaces_config:
@@ -195,6 +222,20 @@ class PhysicalRouterConfig(object):
         interface = Interface(name=junos_interface.ifd_name, unit=unit)
         self.interfaces_config.add_interface(interface)
     # end add_pnf_logical_interface
+
+    def add_lo0_unit_0_interface(self, loopback_ip=''):
+        if not loopback_ip:
+            return
+        if not self.interfaces_config:
+            self.interfaces_config = Interfaces(comment=DMUtils.interfaces_comment())
+        lo_intf = Interface(name="lo0")
+        self.interfaces_config.add_interface(lo_intf)
+        fam_inet = FamilyInet(address=[Address(name=loopback_ip + "/32",
+                                                   primary='', preferred='')])
+        intf_unit = Unit(name="0", family=Family(inet=fam_inet),
+                             comment=DMUtils.lo0_unit_0_comment())
+        lo_intf.add_unit(intf_unit)
+    # end add_lo0_unit_0_interface
 
     def add_static_routes(self, parent, static_routes):
         static_config = parent.get_static()
@@ -218,7 +259,7 @@ class PhysicalRouterConfig(object):
 
     def add_dynamic_tunnels(self, tunnel_source_ip,
                              ip_fabric_nets, bgp_router_ips):
-        dynamic_tunnel = DynamicTunnel(name="__contrail__",
+        dynamic_tunnel = DynamicTunnel(name=DMUtils.dynamic_tunnel_name(self.get_asn()),
                                        source_address=tunnel_source_ip, gre='')
         if ip_fabric_nets is not None:
             for subnet in ip_fabric_nets.get("subnet", []):
@@ -287,6 +328,33 @@ class PhysicalRouterConfig(object):
         return Term(name=DMUtils.make_vrf_term_name(ri_name),
                                         fromxx=from_, then=then_)
     # end add_inet_filter_term
+
+    def add_ibgp_export_policy(self, params):
+        if params.get('address_families') is None:
+            return
+        families = params['address_families'].get('family', [])
+        if not families:
+            return
+        if self.policy_config is None:
+            self.policy_config = PolicyOptions(comment=DMUtils.policy_options_comment())
+        ps = PolicyStatement(name=DMUtils.make_ibgp_export_policy_name())
+        self.policy_config.add_policy_statement(ps)
+        ps.set_comment(DMUtils.ibgp_export_policy_comment())
+        vpn_types = []
+        for family in ['inet-vpn', 'inet6-vpn']:
+            if family in families:
+                vpn_types.append(family)
+        for vpn_type in vpn_types:
+            is_v6 = True if vpn_type == 'inet6-vpn' else False
+            term = Term(name=DMUtils.make_ibgp_export_policy_term_name(is_v6))
+            ps.set_term(term)
+            then = Then()
+            from_ = From()
+            term.set_from(from_)
+            term.set_then(then)
+            from_.set_family(DMUtils.get_inet_family_name(is_v6))
+            then.set_next_hop(NextHop(selfxx=''))
+    # end add_ibgp_export_policy
 
     '''
      ri_name: routing instance name to be configured on mx
@@ -585,14 +653,6 @@ class PhysicalRouterConfig(object):
                         if len(gateway) and gateway != '0.0.0.0':
                             addr.set_virtual_gateway_address(gateway)
 
-            lo_intf = Interface(name="lo0")
-            interfaces_config.add_interface(lo_intf)
-            fam_inet = FamilyInet(address=[Address(name=self.bgp_params['address'] + "/32",
-                                                   primary='', preferred='')])
-            intf_unit = Unit(name="0", family=Family(inet=fam_inet),
-                             comment=DMUtils.lo0_unit_0_comment())
-            lo_intf.add_unit(intf_unit)
-
             self.build_l2_evpn_interface_config(interfaces_config, interfaces, vn)
 
         if (not is_l2 and not is_l2_l3 and gateways):
@@ -623,7 +683,7 @@ class PhysicalRouterConfig(object):
                     inet.add_address(addr)
                     lo_ip = ip + '/' + '32'
                 addr.set_name(lo_ip)
-                addr.set_comment(DMUtils.lo0_ip_comment(lo0_ip))
+                addr.set_comment(DMUtils.lo0_ip_comment(lo_ip))
             ri.add_interface(Interface(name="lo0." + ifl_num,
                                        comment=DMUtils.lo0_ri_intf_comment(vn)))
 
@@ -743,10 +803,11 @@ class PhysicalRouterConfig(object):
     # end build_l2_evpn_interface_config
 
     def set_global_routing_options(self, bgp_params):
-        if bgp_params['address'] is not None:
+        router_id = bgp_params.get('identifier') or bgp_params.get('address')
+        if router_id:
             if not self.global_routing_options_config:
                 self.global_routing_options_config = RoutingOptions(comment=DMUtils.routing_options_comment())
-            self.global_routing_options_config.set_router_id(bgp_params['address'])
+            self.global_routing_options_config.set_router_id(router_id)
     # end set_global_routing_options
 
     def add_to_global_ri_opts(self, prefix):
@@ -813,12 +874,14 @@ class PhysicalRouterConfig(object):
         bgp_group = BgpGroup()
         bgp_group.set_comment(DMUtils.bgp_group_comment(self.bgp_obj))
         if external:
-            bgp_group.set_name(DMUtils.make_bgp_group_name(True))
+            bgp_group.set_name(DMUtils.make_bgp_group_name(self.get_asn(), True))
             bgp_group.set_type('external')
             bgp_group.set_multihop('')
         else:
-            bgp_group.set_name(DMUtils.make_bgp_group_name(False))
+            bgp_group.set_name(DMUtils.make_bgp_group_name(self.get_asn(), False))
             bgp_group.set_type('internal')
+            self.add_ibgp_export_policy(self.bgp_params)
+            bgp_group.set_export(DMUtils.make_ibgp_export_policy_name())
         bgp_group.set_local_address(self.bgp_params['address'])
         self.add_families(bgp_group, self.bgp_params)
         self.add_bgp_auth_config(bgp_group, self.bgp_params)
@@ -885,12 +948,14 @@ class PhysicalRouterConfig(object):
             nbr.set_peer_as(peer_as)
     # end _get_neighbor_config_xml
 
+    def get_asn(self):
+        return self.bgp_params.get('local_autonomous_system') or self.bgp_params.get('autonomous_system')
+
     def set_as_config(self):
         if self.global_routing_options_config is None:
             self.global_routing_options_config = RoutingOptions(comment=DMUtils.routing_options_comment())
         self.global_routing_options_config.set_route_distinguisher_id(self.bgp_params['identifier'])
-        local_as = self.bgp_params.get('local_autonomous_system') or self.bgp_params.get('autonomous_system')
-        self.global_routing_options_config.set_autonomous_system(str(local_as))
+        self.global_routing_options_config.set_autonomous_system(str(self.get_asn()))
     # end set_as_config
 
     def set_route_targets_config(self):

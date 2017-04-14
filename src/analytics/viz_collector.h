@@ -27,7 +27,6 @@ class StructuredSyslogCollector;
 class SFlowCollector;
 class IpfixCollector;
 class Options;
-class DiscoveryServiceClient;
 
 class VizCollector {
 public:
@@ -36,8 +35,10 @@ public:
             unsigned short protobuf_listen_port,
             bool structured_syslog_collector_enabled,
             unsigned short structured_syslog_listen_port,
+            const vector<string> &structured_syslog_tcp_forward_dst,
             const std::string &redis_uve_ip, unsigned short redis_uve_port,
             const std::string &redis_password,
+            const std::map<std::string, std::string>& aggconf,
             const std::string &brokers,
             int syslog_port, int sflow_port, int ipfix_port,
             uint16_t partitions, bool dup,
@@ -46,7 +47,9 @@ public:
             const std::string &zookeeper_server_list,
             bool use_zookeeper,
             const DbWriteOptions &db_write_options,
-            const SandeshConfig &sandesh_config);
+            const SandeshConfig &sandesh_config,
+            const ConfigDBConnection::ApiServerList &api_server_list,
+            const VncApiConfig &api_config);
     VizCollector(EventManager *evm, DbHandlerPtr db_handler,
                  Ruleeng *ruleeng,
                  Collector *collector, OpServerProxy *osp);
@@ -77,13 +80,11 @@ public:
         collector_->RedisUpdate(rsc);
         if (rsc) {
             redis_gen_ ++;
-            CollectorPublish();
         }
     }
     void SendDbStatistics();
     void SendProtobufCollectorStatistics();
     void SendGeneratorStatistics();
-    void CollectorPublish();
     bool GetCqlMetrics(cass::cql::Metrics *metrics);
 
     static const unsigned int kPartCountCnodes = 1;
@@ -128,9 +129,6 @@ public:
             break;
         }
         return std::make_pair(bpart, npart);
-    }
-    void UpdateConfigDBConnection(Options *o, DiscoveryServiceClient *c) {
-        GetDbHandler()->UpdateConfigDBConnection(o, c);
     }
 private:
     std::string DbGlobalName(bool dup=false);

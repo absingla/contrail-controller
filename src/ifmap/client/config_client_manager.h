@@ -32,11 +32,21 @@ struct ConfigClientManagerInfo;
  */
 class ConfigClientManager {
 public:
-    static const int kNumConfigReaderTasks = 4;
+    static const int kNumConfigReaderTasks = 8;
+    static const std::set<std::string> skip_properties;
+
     typedef std::list<struct DBRequest *> RequestList;
+    typedef std::set<std::string> ObjectTypeList;
+
     ConfigClientManager(EventManager *evm, IFMapServer *ifmap_server,
                         std::string hostname, std::string module_name,
                         const IFMapConfigOptions& config_options);
+    ConfigClientManager(EventManager *evm, IFMapServer *ifmap_server,
+                        std::string hostname, std::string module_name,
+                        const IFMapConfigOptions& config_options,
+                        bool end_of_rib_computed);
+    virtual ~ConfigClientManager();
+
     void Initialize();
     ConfigAmqpClient *config_amqp_client() const;
     ConfigDbClient *config_db_client() const;
@@ -62,15 +72,23 @@ public:
 
     std::string GetWrapperFieldName(const std::string &type_name,
                                     const std::string &property_name) const;
+    static int GetNumConfigReader();
+
     static int GetNumWorkers() {
         // AMQP reader and ConfigDB readers
-        return kNumConfigReaderTasks + 1;
+        return GetNumConfigReader() + 1;
     }
 
     void EndOfConfig();
     void WaitForEndOfConfig();
     void GetPeerServerInfo(IFMapPeerServerInfoUI *server_info);
     void GetClientManagerInfo(ConfigClientManagerInfo &info) const;
+    const ObjectTypeList &ObjectTypeListToRead() const {
+        return obj_type_to_read_;
+    }
+
+protected:
+    bool end_of_rib_computed_;
 
 private:
     typedef std::pair<std::string, std::string> LinkMemberPair;
@@ -79,6 +97,8 @@ private:
     typedef std::map<std::string, std::string> WrapperFieldMap;
 
     IFMapTable::RequestKey *CloneKey(const IFMapTable::RequestKey &src) const;
+    void SetUp(std::string hostname, std::string module_name,
+               const IFMapConfigOptions& config_options);
 
     LinkNameMap link_name_map_;
     EventManager *evm_;
@@ -88,10 +108,10 @@ private:
     boost::scoped_ptr<ConfigAmqpClient> config_amqp_client_;
     int thread_count_;
     WrapperFieldMap wrapper_field_map_;
+    ObjectTypeList obj_type_to_read_;
 
     mutable tbb::mutex end_of_rib_sync_mutex_;
     tbb::interface5::condition_variable cond_var_;
-    bool end_of_rib_computed_;
     uint64_t end_of_rib_computed_at_;
 };
 

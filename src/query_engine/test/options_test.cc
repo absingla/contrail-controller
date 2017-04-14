@@ -22,23 +22,28 @@ using namespace boost::asio::ip;
 static uint16_t default_redis_port = ContrailPorts::RedisQueryPort();
 static uint16_t default_collector_port = ContrailPorts::CollectorPort();
 static uint16_t default_http_server_port = ContrailPorts::HttpPortQueryEngine();
-static uint16_t default_discovery_port = ContrailPorts::DiscoveryServerPort();
 
 class OptionsTest : public ::testing::Test {
 protected:
-    OptionsTest() { }
-
-    virtual void SetUp() {
+    OptionsTest() :
+        default_cassandra_server_list_(1, "127.0.0.1:9160"),
+        default_collector_server_list_() {
+        map<string, vector<string> >::const_iterator it =
+            g_vns_constants.ServicesDefaultConfigurationFiles.find(
+                g_vns_constants.SERVICE_QUERY_ENGINE);
+        assert(it != g_vns_constants.ServicesDefaultConfigurationFiles.end());
+        default_conf_files_ = it->second;
         boost::system::error_code error;
         hostname_ = host_name(error);
         host_ip_ = GetHostIp(evm_.io_service(), hostname_);
-        default_cassandra_server_list_.push_back("127.0.0.1:9160");
-        default_collector_server_list_.push_back("127.0.0.1:8086");
-        default_conf_files_.push_back("/etc/contrail/contrail-query-engine.conf");
+    }
+
+    virtual void SetUp() {
     }
 
     virtual void TearDown() {
         remove("./options_test_query_engine.conf");
+        remove("./options_test_cassandra_config_file.conf");
     }
 
     EventManager evm_;
@@ -58,19 +63,14 @@ TEST_F(OptionsTest, NoArguments) {
 
     options_.Parse(evm_, argc, argv);
 
-    vector<string> expected_conf_files_;
-    expected_conf_files_.push_back("/etc/contrail/contrail-query-engine.conf");
-
     TASK_UTIL_EXPECT_VECTOR_EQ(default_cassandra_server_list_,
                      options_.cassandra_server_list());
     TASK_UTIL_EXPECT_VECTOR_EQ(default_collector_server_list_,
                      options_.collector_server_list());
     EXPECT_EQ(options_.redis_server(), "127.0.0.1");
     EXPECT_EQ(options_.redis_port(), default_redis_port);
-    TASK_UTIL_EXPECT_VECTOR_EQ(expected_conf_files_,
+    TASK_UTIL_EXPECT_VECTOR_EQ(default_conf_files_,
                      options_.config_file());
-    EXPECT_EQ(options_.discovery_server(), "");
-    EXPECT_EQ(options_.discovery_port(), default_discovery_port);
     EXPECT_EQ(options_.hostname(), hostname_);
     EXPECT_EQ(options_.host_ip(), host_ip_);
     EXPECT_EQ(options_.http_server_port(), default_http_server_port);
@@ -86,7 +86,8 @@ TEST_F(OptionsTest, NoArguments) {
     EXPECT_EQ(options_.max_tasks(), 0);
     EXPECT_EQ(options_.max_slice(), 100);
     EXPECT_EQ(options_.test_mode(), false);
-    EXPECT_EQ(options_.sandesh_send_rate_limit(), 0);
+    EXPECT_EQ(options_.sandesh_send_rate_limit(),
+        g_sandesh_constants.DEFAULT_SANDESH_SEND_RATELIMIT);
 }
 
 TEST_F(OptionsTest, DefaultConfFile) {
@@ -110,8 +111,6 @@ TEST_F(OptionsTest, DefaultConfFile) {
     EXPECT_EQ(options_.redis_port(), default_redis_port);
     TASK_UTIL_EXPECT_VECTOR_EQ(options_.config_file(),
                                passed_conf_files);
-    EXPECT_EQ(options_.discovery_server(), "");
-    EXPECT_EQ(options_.discovery_port(), default_discovery_port);
     EXPECT_EQ(options_.hostname(), hostname_);
     EXPECT_EQ(options_.host_ip(), host_ip_);
     EXPECT_EQ(options_.http_server_port(), default_http_server_port);
@@ -127,7 +126,8 @@ TEST_F(OptionsTest, DefaultConfFile) {
     EXPECT_EQ(options_.max_tasks(), 0);
     EXPECT_EQ(options_.max_slice(), 100);
     EXPECT_EQ(options_.test_mode(), false);
-    EXPECT_EQ(options_.sandesh_send_rate_limit(), 100);
+    EXPECT_EQ(options_.sandesh_send_rate_limit(),
+        g_sandesh_constants.DEFAULT_SANDESH_SEND_RATELIMIT);
 }
 
 TEST_F(OptionsTest, OverrideStringFromCommandLine) {
@@ -154,8 +154,6 @@ TEST_F(OptionsTest, OverrideStringFromCommandLine) {
     EXPECT_EQ(options_.redis_port(), default_redis_port);
     TASK_UTIL_EXPECT_VECTOR_EQ(options_.config_file(),
                                passed_conf_files);
-    EXPECT_EQ(options_.discovery_server(), "");
-    EXPECT_EQ(options_.discovery_port(), default_discovery_port);
     EXPECT_EQ(options_.hostname(), hostname_);
     EXPECT_EQ(options_.host_ip(), host_ip_);
     EXPECT_EQ(options_.http_server_port(), default_http_server_port);
@@ -196,8 +194,6 @@ TEST_F(OptionsTest, OverrideBooleanFromCommandLine) {
     EXPECT_EQ(options_.redis_port(), default_redis_port);
     TASK_UTIL_EXPECT_VECTOR_EQ(options_.config_file(),
                                passed_conf_files);
-    EXPECT_EQ(options_.discovery_server(), "");
-    EXPECT_EQ(options_.discovery_port(), default_discovery_port);
     EXPECT_EQ(options_.hostname(), hostname_);
     EXPECT_EQ(options_.host_ip(), host_ip_);
     EXPECT_EQ(options_.http_server_port(), default_http_server_port);
@@ -240,9 +236,6 @@ TEST_F(OptionsTest, CustomConfigFile) {
         "max_slice=500\n"
         "sandesh_send_rate_limit=5\n"
         "\n"
-        "[DISCOVERY]\n"
-        "port=100\n"
-        "server=1.0.0.1 # discovery_server IP address\n"
         "[REDIS]\n"
         "server=1.2.3.4\n"
         "port=200\n"
@@ -296,8 +289,6 @@ TEST_F(OptionsTest, CustomConfigFile) {
     EXPECT_EQ(options_.redis_port(), 200);
     TASK_UTIL_EXPECT_VECTOR_EQ(options_.config_file(),
                                input_conf_files);
-    EXPECT_EQ(options_.discovery_server(), "1.0.0.1");
-    EXPECT_EQ(options_.discovery_port(), 100);
     EXPECT_EQ(options_.hostname(), "test");
     EXPECT_EQ(options_.host_ip(), "1.2.3.4");
     EXPECT_EQ(options_.http_server_port(), 800);
@@ -344,9 +335,6 @@ TEST_F(OptionsTest, CustomConfigFileAndOverrideFromCommandLine) {
         "max_slice=800\n"
         "sandesh_send_rate_limit=5\n"
         "\n"
-        "[DISCOVERY]\n"
-        "port=100\n"
-        "server=1.0.0.1 # discovery_server IP address\n"
         "[REDIS]\n"
         "server=1.2.3.4\n"
         "port=200\n"
@@ -367,7 +355,7 @@ TEST_F(OptionsTest, CustomConfigFileAndOverrideFromCommandLine) {
     config_file << cassandra_config;
     config_file.close();
 
-    int argc = 19;
+    int argc = 18;
     char *argv[argc];
     char argv_0[] = "options_test";
     char argv_1[] = "--conf_file=./options_test_query_engine.conf";
@@ -400,11 +388,11 @@ TEST_F(OptionsTest, CustomConfigFileAndOverrideFromCommandLine) {
     argv[10] = argv_10;
     argv[11] = argv_11;
     argv[12] = argv_12;
-    argv[14] = argv_13;
-    argv[15] = argv_14;
-    argv[16] = argv_15;
-    argv[17] = argv_16;
-    argv[18] = argv_17;
+    argv[13] = argv_13;
+    argv[14] = argv_14;
+    argv[15] = argv_15;
+    argv[16] = argv_16;
+    argv[17] = argv_17;
 
     options_.Parse(evm_, argc, argv);
 
@@ -431,8 +419,6 @@ TEST_F(OptionsTest, CustomConfigFileAndOverrideFromCommandLine) {
                                input_conf_files);
     EXPECT_EQ(options_.cassandra_user(),"cassandra");
     EXPECT_EQ(options_.cassandra_password(),"cassandra");
-    EXPECT_EQ(options_.discovery_server(), "1.0.0.1");
-    EXPECT_EQ(options_.discovery_port(), 100);
     EXPECT_EQ(options_.hostname(), "test");
     EXPECT_EQ(options_.host_ip(), "1.2.3.4");
     EXPECT_EQ(options_.http_server_port(), 800);
@@ -457,7 +443,7 @@ TEST_F(OptionsTest, MultitokenVector) {
     char argv_0[] = "options_test";
     char argv_1[] = "--DEFAULT.collectors=10.10.10.1:100 20.20.20.2:200";
     char argv_2[] = "--DEFAULT.cassandra_server_list=30.30.30.3:300";
-    char argv_3[] = "--conf_file=controller/src/analytics/contrail-collector.conf"
+    char argv_3[] = "--conf_file=controller/src/query_engine/contrail-query-engine.conf"
                     " controller/src/analytics/contrail-database.conf";
     char argv_4[] = "--conf_file=controller/src/analytics/test-conf.conf";
     argv[0] = argv_0;
@@ -474,7 +460,7 @@ TEST_F(OptionsTest, MultitokenVector) {
     vector<string> cassandra_server_list;
     cassandra_server_list.push_back("30.30.30.3:300");
     vector<string> option_file_list;
-    option_file_list.push_back("controller/src/analytics/contrail-collector.conf");
+    option_file_list.push_back("controller/src/query_engine/contrail-query-engine.conf");
     option_file_list.push_back("controller/src/analytics/contrail-database.conf");
     option_file_list.push_back("controller/src/analytics/test-conf.conf");
     TASK_UTIL_EXPECT_VECTOR_EQ(options_.config_file(),

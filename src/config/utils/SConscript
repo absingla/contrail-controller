@@ -45,7 +45,6 @@ utils_scripts = [
   'provision_analytics_node.py',
   'provision_database_node.py',
   'provision_config_node.py',
-  'discovery_cli.py',
   'provision_user_defined_log_statistics.py',
   'provision_alarm.py',
   'contrail_alarm.py',
@@ -53,6 +52,8 @@ utils_scripts = [
   'provision_issu.py',
   'issu_process.sh',
   'qosmap.py',
+  'update_default_global_qos_config.py',
+  'vnc_admin_api.py',
 ]
 
 for utils in utils_scripts:

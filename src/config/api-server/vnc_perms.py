@@ -3,6 +3,7 @@
 #
 import sys
 import cfgm_common
+from cfgm_common import has_role
 from cfgm_common import jsonutils as json
 import string
 import uuid
@@ -55,10 +56,10 @@ class VncPermissions(object):
         err_msg = (403, 'Permission Denied')
 
         user, roles = self.get_user_roles(request)
-        is_admin = self.cloud_admin_role in roles
+        is_admin = has_role(self.cloud_admin_role, roles)
         if is_admin:
             return (True, 'RWX')
-        if self.global_read_only_role in roles and mode == PERMS_R:
+        if has_role(self.global_read_only_role, roles) and mode == PERMS_R:
             return (True, 'R')
 
         owner = id_perms['permissions']['owner']
@@ -99,10 +100,10 @@ class VncPermissions(object):
             return (True, '')
 
         user, roles = self.get_user_roles(request)
-        is_admin = self.cloud_admin_role in roles
+        is_admin = has_role(self.cloud_admin_role, roles)
         if is_admin:
             return (True, 'RWX')
-        if self.global_read_only_role in roles and mode == PERMS_R:
+        if has_role(self.global_read_only_role, roles) and mode == PERMS_R:
             return (True, 'R')
 
         env = request.headers.environ
@@ -237,7 +238,7 @@ class VncPermissions(object):
         if self._rbac:
             # delete only allowed for owner
             (ok, obj_dict) = self._server_mgr._db_conn.dbe_read(obj_type,
-                             {'uuid':obj_uuid}, obj_fields=['perms2'])
+                             obj_uuid, obj_fields=['perms2'])
             obj_owner=obj_dict['perms2']['owner']
             return self.validate_perms_rbac(request, parent_uuid, PERMS_W, obj_owner_for_delete = obj_owner)
         elif self._multi_tenancy:

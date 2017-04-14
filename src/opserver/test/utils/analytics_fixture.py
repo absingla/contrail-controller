@@ -30,6 +30,7 @@ from opserver.sandesh.alarmgen_ctrl.ttypes import UVEAlarmState
 from sandesh_common.vns.constants import NodeTypeNames, ModuleNames
 from sandesh_common.vns.ttypes import NodeType, Module
 from pysandesh.util import UTCTimestampUsec
+from pysandesh.sandesh_base import SandeshConfig
 from sets import Set
 
 class Query(object):
@@ -186,6 +187,9 @@ class Collector(object):
             if 'sandesh_ssl_enable' in self.sandesh_config:
                 args.append('--SANDESH.sandesh_ssl_enable')
                 args.append(self.sandesh_config['sandesh_ssl_enable'])
+            if 'introspect_ssl_enable' in self.sandesh_config:
+                args.append('--SANDESH.introspect_ssl_enable')
+                args.append(self.sandesh_config['introspect_ssl_enable'])
             if 'sandesh_keyfile' in self.sandesh_config:
                 args.append('--SANDESH.sandesh_keyfile')
                 args.append(self.sandesh_config['sandesh_keyfile'])
@@ -293,6 +297,9 @@ class AlarmGen(object):
             if 'sandesh_ssl_enable' in self.sandesh_config and \
                 self.sandesh_config['sandesh_ssl_enable']:
                 args.append('--sandesh_ssl_enable')
+            if 'introspect_ssl_enable' in self.sandesh_config and \
+                self.sandesh_config['introspect_ssl_enable']:
+                args.append('--introspect_ssl_enable')
             if 'sandesh_keyfile' in self.sandesh_config:
                 args.append('--sandesh_keyfile')
                 args.append(self.sandesh_config['sandesh_keyfile'])
@@ -417,6 +424,9 @@ class OpServer(object):
             if 'sandesh_ssl_enable' in self.sandesh_config and \
                 self.sandesh_config['sandesh_ssl_enable']:
                 args.append('--sandesh_ssl_enable')
+            if 'introspect_ssl_enable' in self.sandesh_config and \
+                self.sandesh_config['introspect_ssl_enable']:
+                args.append('--introspect_ssl_enable')
             if 'sandesh_keyfile' in self.sandesh_config:
                 args.append('--sandesh_keyfile')
                 args.append(self.sandesh_config['sandesh_keyfile'])
@@ -517,6 +527,9 @@ class QueryEngine(object):
             if 'sandesh_ssl_enable' in self.sandesh_config:
                 args.append('--SANDESH.sandesh_ssl_enable')
                 args.append(self.sandesh_config['sandesh_ssl_enable'])
+            if 'introspect_ssl_enable' in self.sandesh_config:
+                args.append('--SANDESH.introspect_ssl_enable')
+                args.append(self.sandesh_config['introspect_ssl_enable'])
             if 'sandesh_keyfile' in self.sandesh_config:
                 args.append('--SANDESH.sandesh_keyfile')
                 args.append(self.sandesh_config['sandesh_keyfile'])
@@ -622,6 +635,18 @@ class AnalyticsFixture(fixtures.Fixture):
     ADMIN_USER = 'test'
     ADMIN_PASSWORD = 'password'
 
+    def set_sandesh_config(self, sandesh_config):
+        self.sandesh_config = sandesh_config
+        self.sandesh_config_struct = None
+        if sandesh_config:
+            self.sandesh_config_struct = SandeshConfig(
+                sandesh_config.get('sandesh_keyfile'),
+                sandesh_config.get('sandesh_certfile'),
+                sandesh_config.get('sandesh_ca_cert'),
+                sandesh_config.get('sandesh_ssl_enable', False),
+                sandesh_config.get('introspect_ssl_enable', False))
+    # end set_sandesh_config
+
     def __init__(self, logger, builddir, cassandra_port,
                  ipfix_port = False, sflow_port = False, syslog_port = False,
                  protobuf_port = False, noqed=False, collector_ha_test=False,
@@ -650,7 +675,7 @@ class AnalyticsFixture(fixtures.Fixture):
         self.admin_user = AnalyticsFixture.ADMIN_USER
         self.admin_password = AnalyticsFixture.ADMIN_PASSWORD
         self.cluster_id = cluster_id
-        self.sandesh_config = sandesh_config
+        self.set_sandesh_config(sandesh_config)
 
     def setUp(self):
         super(AnalyticsFixture, self).setUp()
@@ -740,7 +765,8 @@ class AnalyticsFixture(fixtures.Fixture):
 
     def get_generator_list(self, collector):
         generator_list = []
-        vcl = VerificationCollector('127.0.0.1', collector.http_port)
+        vcl = VerificationCollector('127.0.0.1', collector.http_port, \
+                self.sandesh_config_struct)
         try:
            genlist = vcl.get_generators()['generators']
            self.logger.info('Generator list from collector %s -> %s' %
@@ -785,7 +811,8 @@ class AnalyticsFixture(fixtures.Fixture):
         See if the SandeshClient within vizd has been able to register
         with the collector within vizd
         '''
-        vcl = VerificationCollector('127.0.0.1', collector.http_port)
+        vcl = VerificationCollector('127.0.0.1', collector.http_port, \
+                self.sandesh_config_struct)
         self.logger.info("verify_collector_gen port %s : %s" % \
             (collector.http_port, str(vcl)))
         try:
@@ -2131,7 +2158,8 @@ class AnalyticsFixture(fixtures.Fixture):
     @retry(delay=2, tries=5)
     def verify_collector_redis_uve_connection(self, collector, connected=True):
         self.logger.info('verify_collector_redis_uve_connection')
-        vcl = VerificationCollector('127.0.0.1', collector.http_port)
+        vcl = VerificationCollector('127.0.0.1', collector.http_port,
+                self.sandesh_config_struct)
         try:
             redis_uve = vcl.get_redis_uve_info()['RedisUveInfo']
             if redis_uve['status'] == 'Connected':
@@ -2149,7 +2177,8 @@ class AnalyticsFixture(fixtures.Fixture):
                                  pending_compaction_tasks_level_out = None):
 
         self.logger.info('verify_collector_db_info')
-        vcl = VerificationCollector('127.0.0.1', collector.http_port)
+        vcl = VerificationCollector('127.0.0.1', collector.http_port,
+                self.sandesh_config_struct)
         try:
             db_info_dict = vcl.get_db_info()
             db_info = (db_info_dict['db_info'])['DbInfo']
@@ -2655,7 +2684,7 @@ class AnalyticsFixture(fixtures.Fixture):
             actual_uves = vns.uve_query(table_query, filters)
         except Exception as err:
             self.logger.error('Failed to get response for %s:%s [%s]' % \
-                (query, str(filters), str(err)))
+                (table_query, str(filters), str(err)))
             assert(False)
         return self._verify_uves(exp_uves, actual_uves)
     # end verify_multi_uve_get

@@ -18,7 +18,6 @@
 #include "ifmap/client/config_json_parser.h"
 #include "ifmap/ifmap_factory.h"
 #include "ifmap/ifmap_link_table.h"
-#include "ifmap/ifmap_server_parser.h"
 #include "ifmap/ifmap_table.h"
 #include "ifmap/ifmap_xmpp.h"
 #include "ifmap/test/ifmap_test_util.h"
@@ -51,16 +50,14 @@ public:
         return ConfigCassandraClient::HashUUID(uuid_str);
     }
 
-    virtual void HandleObjectDelete(const std::string &obj_type,
-                            const std::string &uuid) {
-        ConfigCassandraClient::HandleObjectDelete(obj_type, uuid);
+    virtual void HandleObjectDelete(const std::string &uuid) {
+        ConfigCassandraClient::HandleObjectDelete(uuid);
     }
 
-    virtual bool ParseRowAndEnqueueToParser(const string &obj_type,
-                                            const string &uuid_key,
-                                            const GenDb::ColList &col_list) {
-        return ConfigCassandraClient::ParseRowAndEnqueueToParser(obj_type,
-                                          uuid_key, col_list);
+    virtual bool ProcessObjUUIDTableEntry(const string &uuid_key,
+                                          const GenDb::ColList &col_list) {
+        return ConfigCassandraClient::ProcessObjUUIDTableEntry(uuid_key,
+                                                               col_list);
     }
 };
 
@@ -96,15 +93,6 @@ public:
     }
 
     virtual ~IFMapXmppChannelTest() { }
-
-    bool ProcessConfig(const std::string *config) {
-        IFMapServerParser *parser = IFMapServerParser::GetInstance("vnc_cfg");
-        parser->Receive(ifmap_server_->database(), config->c_str(),
-                        config->size(), 0);
-
-        delete config;
-        return true;
-    }
 
     virtual void ReceiveUpdate(const XmppStanza::XmppMessage *msg) {
         // Inject virtual-machine and virtual-router configurations so that
@@ -188,7 +176,7 @@ public:
         ConfigCassandraClientTest *cassandra_client =
             dynamic_cast<IFMapServerTest *>(ifmap_server_)->cassandra_client();
         if (!action.compare("unsubscribe")) {
-            cassandra_client->HandleObjectDelete(id_type, uuid_key);
+            cassandra_client->HandleObjectDelete(uuid_key);
             return;
         }
 
@@ -231,8 +219,7 @@ public:
         col_list.columns_.push_back(
             new GenDb::NewCol(names3, values3, 100, timestamps3));
 
-        cassandra_client->ParseRowAndEnqueueToParser(id_type, uuid_key,
-                                                     col_list);
+        cassandra_client->ProcessObjUUIDTableEntry(uuid_key, col_list);
     }
 
 private:

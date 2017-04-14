@@ -23,6 +23,7 @@ public:
         RETRY_DELETE_VRF,
         DELETE_BGP_AAS_FLOWS,
         UPDATE_FLOW_STATS,
+        IMPLICIT_ROUTE_DELETE,
         DUMMY
 
     };
@@ -75,6 +76,10 @@ public:
         if (event_ == DELETE_BGP_AAS_FLOWS)
             return FlowEvent::DELETE_FLOW;
 
+        if (event_ == IMPLICIT_ROUTE_DELETE) {
+            resp_event = FlowEvent::RECOMPUTE_FLOW;
+        }
+
         if (db_entry_ == NULL)
             return resp_event;
 
@@ -88,8 +93,13 @@ public:
             resp_event = FlowEvent::DELETE_DBENTRY;
         }
 
-        const InetUnicastRouteEntry *rt =
-            dynamic_cast<const InetUnicastRouteEntry *>(db_entry_);
+        // Add/Change in route needs complete recomputation of flows
+        // 1. Bridge route change can be result of MAC-Move. This will need
+        //    recomputing rpf-nh also.
+        // 2. Add/Delete of inet-uc route can result in change of route used
+        //    used for flow
+        const AgentRoute *rt =
+            dynamic_cast<const AgentRoute *>(db_entry_);
         if (rt) {
             resp_event = FlowEvent::RECOMPUTE_FLOW;
         }

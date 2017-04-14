@@ -43,6 +43,9 @@ struct VrfData : public AgentOperDBData {
         GwVrf     = 1 << 1,     // GW configured for this VRF
         MirrorVrf = 1 << 2,     // internally Created VRF
         PbbVrf    = 1 << 3,     // Per ISID VRF
+        //Note addition of new flag may need update in
+        //ConfigFlags() API, if flag being added is a property
+        //flag(Ex PbbVrf) and not flag indicating Config origination(ex: GwVrf)
     };
 
     VrfData(Agent *agent, IFMapNode *node, uint32_t flags,
@@ -53,6 +56,10 @@ struct VrfData : public AgentOperDBData {
         isid_(isid), bmac_vrf_name_(bmac_vrf_name),
         mac_aging_time_(mac_aging_time), learning_enabled_(learning_enabled) {}
     virtual ~VrfData() {}
+
+    uint32_t ConfigFlags() {
+        return ~(PbbVrf);
+    }
 
     uint32_t flags_;
     boost::uuids::uuid vn_uuid_;
@@ -164,6 +171,7 @@ public:
         allow_route_add_on_deleted_vrf_ = val;
     }
     InetUnicastAgentRouteTable *GetInetUnicastRouteTable(const IpAddress &addr) const;
+    int RDInstanceId() const;
 
     uint32_t isid() const {
         return isid_;
@@ -195,6 +203,7 @@ private:
     uint32_t id_;
     uint32_t flags_;
     VnEntryRef vn_;
+    NextHopRef nh_;
     DBTableWalker::WalkId walkid_;
     boost::scoped_ptr<DeleteActor> deleter_;
     AgentRouteTable *rt_table_db_[Agent::ROUTE_TABLE_MAX];
@@ -210,6 +219,7 @@ private:
     tbb::atomic<uint32_t> mac_aging_time_;
     bool learning_enabled_;
     bool layer2_control_word_;
+    bool l2_;
     DISALLOW_COPY_AND_ASSIGN(VrfEntry);
 };
 

@@ -30,6 +30,7 @@ public:
     void DeletePath(BgpPath *path);
 
     const BgpPath *FindPath(BgpPath::PathSource src) const;
+    BgpPath *FindPath(const IPeer *peer);
     BgpPath *FindPath(BgpPath::PathSource src, const IPeer *peer,
                       uint32_t path_id);
     BgpPath *FindPath(BgpPath::PathSource src, uint32_t path_id);
@@ -62,7 +63,8 @@ public:
 
     virtual void BuildProtoPrefix(BgpProtoPrefix *prefix,
                                   const BgpAttr *attr = NULL,
-                                  uint32_t label = 0) const {
+                                  uint32_t label = 0,
+                                  uint32_t l3_label = 0) const {
     }
     virtual void BuildBgpProtoNextHop(std::vector<uint8_t> &nh,
                                       IpAddress nexthop) const {

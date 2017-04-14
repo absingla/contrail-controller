@@ -456,10 +456,6 @@ void BgpStressTest::IFMapInitialize(const string &hostname) {
         set_config_client_manager(config_client_manager_.get());
 
     IFMapLinkTable_Init(ifmap_server_->database(), ifmap_server_->graph());
-    IFMapServerParser *parser = IFMapServerParser::GetInstance("vnc_cfg");
-    vnc_cfg_ParserInit(parser);
-    bgp_schema_ParserInit(parser);
-
     vnc_cfg_JsonParserInit(config_client_manager_->config_json_parser());
     vnc_cfg_Server_ModuleInit(ifmap_server_->database(),
                               ifmap_server_->graph());
@@ -481,7 +477,6 @@ void BgpStressTest::IFMapCleanUp() {
     WaitForIdle();
 
     config_db_->Clear();
-    IFMapServerParser::GetInstance("vnc_cfg")->MetadataClear("vnc_cfg");
 }
 
 void BgpStressTest::SetUp() {
@@ -1681,9 +1676,7 @@ void BgpStressTest::AddXmppRoute(int instance_id, int agent_id, int route_id) {
     if (!d_no_inet6_routes_) {
         Inet6Prefix prefix6 = CreateAgentInet6Prefix(agent_id, instance_id,
                                                      route_id);
-        test::NextHops agent_nexthop;
-        agent_nexthop.push_back(
-            test::NextHop(GetAgentNexthop(agent_id, route_id)));
+        test::NextHop agent_nexthop(GetAgentNexthop(agent_id, route_id));
         xmpp_agents_[agent_id]->AddInet6Route(GetInstanceName(instance_id),
                                              prefix6.ToString(), agent_nexthop,
                                              attributes);

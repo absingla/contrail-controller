@@ -3,10 +3,12 @@
 #
 from consistent_hash import ConsistentHash
 import gevent
+import os
 import hashlib
 import logging
 from kazoo.client import KazooClient
 from kazoo.client import KazooState
+from kazoo.handlers.gevent import SequentialGeventHandler
 from random import randint
 import struct
 import traceback
@@ -48,7 +50,8 @@ class ConsistentScheduler(object):
             self._zk_path = '/'+self._cluster_id + '/contrail_cs' + '/'+self._service_name
         else:
             self._zk_path = '/'.join(['/contrail_cs', self._service_name])
-        self._zk = KazooClient(self._zookeeper_srvr)
+        self._zk = KazooClient(self._zookeeper_srvr,
+            handler=SequentialGeventHandler())
         self._zk.add_listener(self._zk_lstnr)
         self._conn_state = None
         while True:
@@ -115,7 +118,8 @@ class ConsistentScheduler(object):
         gevent.sleep(0)
         ret = False
         if self._pc.failed:
-            raise Exception("Lost or unable to acquire partition")
+            self._logger.error('Lost or unable to acquire partition')
+            os._exit(2)
         elif self._pc.release:
             self._supress_log('Releasing...')
             self._release()
@@ -125,8 +129,9 @@ class ConsistentScheduler(object):
             if self._wait_allocation < self._MAX_WAIT_4_ALLOCATION:
                 self._wait_allocation += 1
             else:
-                raise StopIteration('Giving up after %d tries!' % (
-                            self._wait_allocation))
+                self._logger.error('Giving up after %d tries!' %
+                    (self._wait_allocation))
+                os._exit(2)
         elif self._pc.acquired:
             self._supress_log('got work: ', list(self._pc))
             ret = True
@@ -137,6 +142,12 @@ class ConsistentScheduler(object):
                               'from the list',
                               self._items2name(items))
         return ret
+
+    def members(self):
+        return list(self._con_hash.nodes)
+
+    def partitions(self):
+        return list(self._pc)
 
     def work_items(self):
         return sum(self._partitions.values(), [])
@@ -166,16 +177,16 @@ class ConsistentScheduler(object):
     def _consistent_hash(self, members):
         if self._con_hash is None:
             self._con_hash = ConsistentHash(members)
-            self._supress_log('members:', self._con_hash.nodes)
+            self._logger.error('members: %s' % (str(self._con_hash.nodes)))
         cur, updtd = set(self._con_hash.nodes), set(members)
         if cur != updtd:
             newm = updtd - cur
             rmvd = cur - updtd
             if newm:
-                self._supress_log('new workers:', newm)
+                self._logger.error('new members: %s' % (str(newm)))
                 self._con_hash.add_nodes(list(newm))
             if rmvd:
-                self._supress_log('workers left:', rmvd)
+                self._logger.error('members left: %s' % (str(rmvd)))
                 self._con_hash.del_nodes(list(rmvd))
         return self._con_hash
 
@@ -183,8 +194,10 @@ class ConsistentScheduler(object):
         return self._consistent_hash(members).get_node(partition)
 
     def _partitioner_func(self, identifier, members, _partitions):
-        return [p for p in _partitions \
-                if self._consistent_hash_get_node(members, p) == identifier]
+        partitions = [p for p in _partitions \
+            if self._consistent_hash_get_node(members, p) == identifier]
+        self._logger.error('partitions: %s' % (str(partitions)))
+        return partitions
 
     def _release(self):
         old = set(self._pc)
